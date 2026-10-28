@@ -232,28 +232,98 @@ fn truncate(s: &str, n: usize) -> String {
     if s.chars().count() <= n { s.to_string() } else { format!("{}…", s.chars().take(n).collect::<String>()) }
 }
 
-/// Run one AI request against a photo. Returns a human-readable summary.
-pub fn run(core: &Arc<Core>, id: i64, prompt: &str, provider_id: &str) -> Result<String, String> {
-    let p = core
-        .settings
-        .lock()
-        .unwrap()
-        .providers
-        .iter()
-        .find(|p| p.id == provider_id)
-        .cloned()
-        .ok_or_else(|| format!("provider '{provider_id}' is not configured"))?;
+fn provider(core: &Core, id: &str) -> Result<Provider, String> {
+    let s = core.settings.lock().unwrap();
+    s.providers.iter().find(|p| p.id == id).cloned().ok_or_else(|| format!("provider '{id}' is not configured"))
+}
+
+fn session_dir(id: i64) -> Result<PathBuf, String> {
     let ts = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
     let dir = std::env::temp_dir().join(format!("openlight-session-{id}-{ts}"));
     std::fs::create_dir_all(&dir).map_err(es)?;
+    Ok(dir)
+}
+
+/// Run one AI request against a photo. Returns a human-readable summary.
+pub fn run(core: &Arc<Core>, id: i64, prompt: &str, provider_id: &str) -> Result<String, String> {
+    let p = provider(core, provider_id)?;
+    let dir = session_dir(id)?;
     core.log(&p.id, format!("photo {id}: {}", truncate(prompt, 120)));
-    let res = if p.kind == "cli" { run_cli(core, &p, id, prompt, &dir) } else { run_http(core, &p, id, prompt, &dir) };
+    let res = if p.kind == "cli" { run_cli(core, &p, id, prompt, &dir, None) } else { run_http(core, &p, id, prompt, &dir) };
     match &res {
         Ok(s) => core.log(&p.id, format!("done: {}", truncate(s, 400))),
         Err(e) => core.log(&p.id, format!("error: {e}")),
     }
     let _ = std::fs::remove_dir_all(&dir);
     res
+}
+
+const TRACE: &str = "Identify the one object under the ring (the whole object: the whole castle, one person, one car) and \
+    trace its outline. Reply with only a JSON object {\"name\": \"<short name>\", \"points\": [[x, y], ...]}: 16-60 points in \
+    order around the object's edge, following it closely, as [x, y] fractions of the full frame, (0,0) = top-left.";
+
+/// AI selection, step 1: the provider looks at the full frame with the click marked and returns
+/// the name and outline of the object under it. Nothing is edited.
+pub fn trace(core: &Arc<Core>, id: i64, at: [f32; 2], provider_id: &str) -> Result<(String, Vec<[f32; 2]>), String> {
+    let p = provider(core, provider_id)?;
+    let dir = session_dir(id)?;
+    let [x, y] = at;
+    core.log(&p.id, format!("photo {id}: select the object at [{x:.3}, {y:.3}]"));
+    let res = (|| {
+        let reply = if p.kind == "cli" {
+            let agent = format!(
+                "You are selecting an object in a photo in OpenLight Studio through its MCP server \"openlight\". Photo id: {id}. \
+                 The user clicked at [{x:.4}, {y:.4}] (fractions of the full frame). Call photo_inspect (photo_id \"{id}\", \
+                 full_frame true, max_edge 1536, mark [{x:.4}, {y:.4}]): a red ring marks the click. Do not change the photo. {TRACE}"
+            );
+            run_cli(core, &p, id, &agent, &dir, Some(agent.clone()))?
+        } else {
+            let mut img = core.render(id, &Opts { full_frame: true, ..Default::default() })?;
+            develop::mark(&mut img, at);
+            let jpeg = base64::engine::general_purpose::STANDARD.encode(develop::encode_jpeg(&img, 1536, 85)?);
+            let user = format!("The user clicked at [{x:.4}, {y:.4}]; a red ring marks the spot. {TRACE}");
+            call_model(&p, "You outline objects in photos for a photo editor.", &user, &jpeg, &outline_schema())?
+        };
+        let v = parse_object(&reply)?;
+        let points: Vec<[f32; 2]> = serde_json::from_value(v["points"].clone()).map_err(|e| format!("the AI's outline is not [[x, y], ...]: {e}"))?;
+        develop::check_outline(&points)?;
+        Ok((v["name"].as_str().filter(|s| !s.is_empty()).unwrap_or("object").to_string(), points))
+    })();
+    match &res {
+        Ok((name, pts)) => core.log(&p.id, format!("selected {name} ({} points)", pts.len())),
+        Err(e) => core.log(&p.id, format!("error: {e}")),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    res
+}
+
+/// AI selection, step 2: the traced object is added to mask `mask` (or subtracted from it),
+/// or starts a new mask. Returns the new state and the mask's index.
+pub fn select(core: &Arc<Core>, id: i64, at: [f32; 2], provider_id: &str, mask: Option<usize>, subtract: bool) -> Result<(develop::Develop, usize), String> {
+    let (name, points) = trace(core, id, at, provider_id)?;
+    // read after the AI call so edits made while it ran are kept
+    let mut d = core.develop(id)?;
+    let c = develop::MaskComponent { op: if subtract { "subtract" } else { "add" }.into(), kind: "polygon".into(), points, ..Default::default() };
+    let i = match mask.filter(|&i| i < d.masks.len()) {
+        Some(i) => {
+            if !subtract {
+                d.masks[i].name = format!("{} + {name}", d.masks[i].name);
+            }
+            d.masks[i].components.push(c);
+            i
+        }
+        None => {
+            let ms = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+            let name = if subtract { format!("all but {name}") } else { name.clone() };
+            d.masks.push(develop::Mask { mask_id: format!("mask_{ms:x}"), name, components: vec![c], ..Default::default() });
+            d.masks.len() - 1
+        }
+    };
+    let label = format!("AI select: {}{name}", if subtract { "− " } else { "" });
+    d.clamp();
+    d.ai_provenance_log.push(mcp::provenance(core, provider_id, &label));
+    core.commit(id, &d, &label)?;
+    Ok((d, i))
 }
 
 /// Strips ANSI escape sequences (CSI and OSC) from CLI agent output.
@@ -290,7 +360,8 @@ pub fn strip_ansi(s: &str) -> String {
     out
 }
 
-fn run_cli(core: &Arc<Core>, p: &Provider, id: i64, prompt: &str, dir: &PathBuf) -> Result<String, String> {
+/// `agent`: the agent prompt; None builds the editing prompt for `prompt`.
+fn run_cli(core: &Arc<Core>, p: &Provider, id: i64, prompt: &str, dir: &PathBuf, agent: Option<String>) -> Result<String, String> {
     let (enabled, url, token) = {
         let s = core.settings.lock().unwrap();
         (s.mcp_enabled, format!("http://127.0.0.1:{}/mcp", s.mcp_port), s.mcp_token.clone())
@@ -305,7 +376,7 @@ fn run_cli(core: &Arc<Core>, p: &Provider, id: i64, prompt: &str, dir: &PathBuf)
     let mcp_config = dir.join("mcp.json");
     let cfg = json!({ "mcpServers": { "openlight": { "type": "http", "url": url, "headers": { "Authorization": format!("Bearer {token}") } } } });
     std::fs::write(&mcp_config, cfg.to_string()).map_err(es)?;
-    let agent_prompt = format!(
+    let agent_prompt = agent.unwrap_or_else(|| format!(
         "You are editing a photo in OpenLight Studio through its MCP server \"openlight\". Photo id: {id}. \
          A rendered preview is at {} and histogram telemetry at {}. User goal: \"{prompt}\". \
          Call photo_inspect (photo_id \"{id}\", full_frame true) to see the image, apply non-destructive edits with develop_apply_parameters \
@@ -317,7 +388,7 @@ fn run_cli(core: &Arc<Core>, p: &Provider, id: i64, prompt: &str, dir: &PathBuf)
          Finish with a one-paragraph summary of what you changed.",
         snap.image.display(),
         snap.telemetry_path.display()
-    );
+    ));
     let vars: [(&str, String); 10] = [
         ("AGENT_PROMPT", agent_prompt),
         ("USER_PROMPT", prompt.to_string()),
@@ -425,6 +496,13 @@ fn response_schema() -> Value {
     })
 }
 
+/// One traced object, `{name, points}` (the retouch tool's item schema).
+fn outline_schema() -> Value {
+    let tools = mcp::tools();
+    let tool = tools.as_array().and_then(|a| a.iter().find(|t| t["name"] == "retouch_remove_objects"));
+    tool.map(|t| t["inputSchema"]["properties"]["objects"]["items"].clone()).unwrap_or_default()
+}
+
 fn parse_object(s: &str) -> Result<Value, String> {
     match (s.find('{'), s.rfind('}')) {
         (Some(a), Some(b)) if b > a => serde_json::from_str(&s[a..=b]).map_err(|e| format!("model returned invalid JSON: {e}")),
@@ -432,14 +510,15 @@ fn parse_object(s: &str) -> Result<Value, String> {
     }
 }
 
-fn call_model(p: &Provider, system: &str, user: &str, image_b64: &str) -> Result<String, String> {
+/// `schema`: the reply's JSON schema (enforced by Ollama; the others are told in the prompt).
+fn call_model(p: &Provider, system: &str, user: &str, image_b64: &str, schema: &Value) -> Result<String, String> {
     let key = get_key(p);
     let ep = p.endpoint.trim_end_matches('/');
     let mut headers: Vec<(&str, String)> = vec![];
     let (url, body) = match p.kind.as_str() {
         "ollama" => (
             format!("{ep}/api/chat"),
-            json!({ "model": p.model, "stream": false, "format": response_schema(), "options": { "temperature": 0.2 },
+            json!({ "model": p.model, "stream": false, "format": schema, "options": { "temperature": 0.2 },
                 "messages": [{ "role": "system", "content": system }, { "role": "user", "content": user, "images": [image_b64] }] }),
         ),
         "openai" => {
@@ -523,7 +602,7 @@ fn run_http(core: &Arc<Core>, p: &Provider, id: i64, prompt: &str, dir: &PathBuf
             compact(&snap.telemetry)
         );
         core.log(&p.id, format!("pass {pass}: asking {} ({})", p.name, p.model));
-        let r = parse_object(&call_model(p, &system, &user, &snap.jpeg_b64)?)?;
+        let r = parse_object(&call_model(p, &system, &user, &snap.jpeg_b64, &response_schema())?)?;
         core.log(&p.id, format!("pass {pass}: applying model response..."));
         let mut d = snap.state.clone();
         let mut notes = vec![];
@@ -540,6 +619,7 @@ fn run_http(core: &Arc<Core>, p: &Provider, id: i64, prompt: &str, dir: &PathBuf
                 Ok((mut m, _)) => match d.masks.iter_mut().find(|x| x.name == name) {
                     Some(x) => {
                         m.mask_id = x.mask_id.clone();
+                        m.tuning = x.tuning.take();
                         *x = m;
                     }
                     None => {

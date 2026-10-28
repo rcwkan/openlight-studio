@@ -69,7 +69,8 @@ export type LocalAdjust = {
   tint_shift: number;
   saturation: number;
 };
-export type Mask = { mask_id: string; name: string; enabled: boolean; components: MaskComponent[]; adjustments: LocalAdjust };
+/** `tuning`: develop settings applied on top of the photo inside the mask only (absent = none). */
+export type Mask = { mask_id: string; name: string; enabled: boolean; components: MaskComponent[]; adjustments: LocalAdjust; tuning?: Develop | null };
 export type Swatch = { id: string; src_hsl: number[]; shift_hsl: number[]; range_hsl: number[]; falloff: number };
 
 export type Develop = {
@@ -170,8 +171,9 @@ export const api = {
   remove: (ids: number[]) => invoke("remove_photos", { ids }),
   getDevelop: (id: number) => invoke<Develop>("get_develop", { id }),
   defaultDevelop: () => invoke<Develop>("default_develop"),
-  render: async (id: number, develop: Develop, skipCrop: boolean, overlayMask: number | null) =>
-    parseRender(await invoke<ArrayBuffer>("render_preview", { id, develop, skipCrop, overlayMask })),
+  /** fullFrame: no crop or straighten, so view coordinates are mask coordinates */
+  render: async (id: number, develop: Develop, skipCrop: boolean, overlayMask: number | null, fullFrame = false) =>
+    parseRender(await invoke<ArrayBuffer>("render_preview", { id, develop, skipCrop, overlayMask, fullFrame })),
   save: (id: number, develop: Develop, label: string) => invoke<Develop>("save_develop", { id, develop, label }),
   history: (id: number) => invoke<HistoryEntry[]>("get_history", { id }),
   gotoHistory: (id: number, hid: number) => invoke<Develop>("goto_history", { id, hid }),
@@ -182,6 +184,9 @@ export const api = {
   regenerateToken: () => invoke<string>("regenerate_token"),
   setKey: (id: string, key: string) => invoke("set_provider_key", { id, key }),
   aiRun: (id: number, prompt: string, provider: string) => invoke<string>("ai_run", { id, prompt, provider }),
+  /** AI selection: the object at (x, y) of the full frame joins mask `mask` (null: a new mask) */
+  aiSelect: (id: number, x: number, y: number, provider: string, mask: number | null, subtract: boolean) =>
+    invoke<{ develop: Develop; mask: number }>("ai_select", { id, x, y, provider, mask, subtract }),
   immichConnect: (url: string, key: string) => invoke<Settings>("immich_connect", { url, key }),
   immichAlbums: () => invoke<ImmichAlbum[]>("immich_albums"),
   /** Load one page of an album (null = favorites) into the catalog; page 1 starts it over */

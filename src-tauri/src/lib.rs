@@ -345,9 +345,10 @@ fn default_develop() -> Develop {
 
 /// Binary reply: u32 width, u32 height, 4x256 u32 histogram (R, G, B, luma), RGBA8 pixels.
 #[tauri::command(async)]
-fn render_preview(core: St, id: i64, develop: Develop, skip_crop: bool, overlay_mask: Option<usize>) -> Result<tauri::ipc::Response, String> {
+fn render_preview(core: St, id: i64, develop: Develop, skip_crop: bool, overlay_mask: Option<usize>, full_frame: Option<bool>) -> Result<tauri::ipc::Response, String> {
     let photo = core.photo(id)?;
-    let out = develop::render(&*core.proxy(&photo.path)?, &develop, &Opts { skip_crop, overlay_mask, ..Default::default() });
+    let opts = Opts { skip_crop, overlay_mask, full_frame: full_frame.unwrap_or(false) };
+    let out = develop::render(&*core.proxy(&photo.path)?, &develop, &opts);
     let rgba = develop::to_rgba8(&out);
     let mut buf = Vec::with_capacity(8 + 4096 + rgba.len());
     buf.extend((out.w as u32).to_le_bytes());
@@ -445,6 +446,13 @@ fn ai_run(core: St, id: i64, prompt: String, provider: String) -> Result<String,
     ai::run(core.inner(), id, &prompt, &provider)
 }
 
+/// AI selection: the object at (x, y) of the full frame joins mask `mask` (or a new one).
+#[tauri::command(async)]
+fn ai_select(core: St, id: i64, x: f32, y: f32, provider: String, mask: Option<usize>, subtract: bool) -> Result<Value, String> {
+    let (develop, mask) = ai::select(core.inner(), id, [x, y], &provider, mask, subtract)?;
+    Ok(json!({ "develop": develop, "mask": mask }))
+}
+
 #[tauri::command(async)]
 fn immich_connect(core: St, url: String, key: String) -> Result<Settings, String> {
     remote::immich_connect(&core, &url, &key)
@@ -520,6 +528,7 @@ pub fn run() {
             regenerate_token,
             set_provider_key,
             ai_run,
+            ai_select,
             immich_connect,
             immich_albums,
             immich_open,

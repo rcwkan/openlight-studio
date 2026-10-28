@@ -17,7 +17,7 @@ type Props = {
   clearLogs?: () => void;
 };
 
-type Tool = "none" | "crop" | "swatch" | "maskcolor";
+type Tool = "none" | "crop" | "swatch" | "maskcolor" | "select";
 type Path = (string | number)[];
 
 const BANDS: [string, string][] = [
@@ -81,6 +81,8 @@ export function Develop(p: Props) {
   const [compSel, setCompSel] = useState(0);
   const [swatchSel, setSwatchSel] = useState<number | null>(null);
   const [overlay, setOverlay] = useState(false);
+  /** AI Select: where the click being traced was (normalised) */
+  const [picking, setPicking] = useState<{ x: number; y: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [imgSize, setImgSize] = useState({ w: 3, h: 2 });
@@ -143,7 +145,7 @@ export function Develop(p: Props) {
   }, [refreshHistory]);
 
   // --- render loop: latest request wins, one render in flight --------------------------
-  const job = useRef<{ id: number; d: Dev; skip: boolean; overlay: number | null } | null>(null);
+  const job = useRef<{ id: number; d: Dev; skip: boolean; overlay: number | null; full: boolean } | null>(null);
   const busy = useRef(false);
   const draw = (r: Rendered) => {
     const c = canvas.current;
@@ -163,7 +165,7 @@ export function Develop(p: Props) {
       const j = job.current;
       job.current = null;
       try {
-        draw(await api.render(j.id, j.d, j.skip, j.overlay));
+        draw(await api.render(j.id, j.d, j.skip, j.overlay, j.full));
         setError(null);
       } catch (e) {
         setError(String(e));
@@ -176,11 +178,13 @@ export function Develop(p: Props) {
   const mask = dev && maskSel != null ? dev.masks[maskSel] : null;
   const handlesOn = !!mask && mask.components.some((c) => c.type === "linear_gradient" || c.type === "radial_gradient");
   const skipCrop = tool === "crop" || handlesOn;
+  // AI Select shows the uncropped frame, so a click is already in mask coordinates
+  const fullFrame = tool === "select";
   useEffect(() => {
     if (id == null || !dev) return;
-    job.current = { id, d: before ? p.defaults : dev, skip: skipCrop && !before, overlay: overlay && !before ? maskSel : null };
+    job.current = { id, d: before ? p.defaults : dev, skip: skipCrop && !before, overlay: overlay && !before ? maskSel : null, full: fullFrame };
     pump();
-  }, [id, dev, before, skipCrop, overlay, maskSel, p.defaults, pump]);
+  }, [id, dev, before, skipCrop, fullFrame, overlay, maskSel, p.defaults, pump]);
 
   useEffect(() => {
     const ro = new ResizeObserver(([e]) => setBox({ w: e.contentRect.width, h: e.contentRect.height }));
@@ -212,6 +216,21 @@ export function Develop(p: Props) {
     }
     return text;
   };
+  // AI Select: the clicked object joins the selected mask (⌥ subtracts it) or starts a new one
+  const aiSelect = async (x: number, y: number, subtract: boolean) => {
+    if (id == null || !p.settings || picking) return;
+    await flush();
+    setPicking({ x, y });
+    setError(null);
+    try {
+      const r = await api.aiSelect(id, x, y, p.settings.active_provider, maskSel, subtract);
+      if (idRef.current === id) (setDev(r.develop), setMaskSel(r.mask), setCompSel(0), setOverlay(true), refreshHistory(id));
+    } catch (e) {
+      setError(`AI Select: ${e}`);
+    } finally {
+      setPicking(null);
+    }
+  };
 
   const others = p.selected.filter((s) => s !== id);
   const sync = async () => {
@@ -229,6 +248,7 @@ export function Develop(p: Props) {
     else if (mod) return;
     else if (e.key === "\\") setBefore((b) => !b);
     else if (e.key.toLowerCase() === "r") setTool((t) => (t === "crop" ? "none" : "crop"));
+    else if (e.key.toLowerCase() === "s") setTool((t) => (t === "select" ? "none" : "select"));
     else if (e.key.toLowerCase() === "o" && maskSel != null) setOverlay((o) => !o);
     else if (e.key === "Escape") (setTool("none"), setMaskSel(null));
   };
@@ -253,21 +273,31 @@ export function Develop(p: Props) {
   if (!p.active) return <div className="flex flex-1 items-center justify-center text-neutral-500">Select a photo in the Library first.</div>;
 
   // --- helpers bound to the current state -----------------------------------------------
-  const S = (label: string, path: Path, min: number, max: number, extra: Partial<Parameters<typeof Slider>[0]> = {}) =>
-    dev && (
-      <Slider
-        key={path.join(".")}
-        label={label}
-        value={getPath(dev, path) as number}
-        def={(getPath(p.defaults, path) as number | undefined) ?? 0}
-        min={min}
-        max={max}
-        onChange={(v) => change(setPath(dev, path, v), label)}
-        {...extra}
-      />
-    );
+  // While a mask is selected every panel tunes inside it: the mask's own settings (a delta
+  // that starts at the defaults), applied on top of the photo.
+  const T = mask ? (mask.tuning ?? p.defaults) : dev;
+  const edit = (t: Dev, label: string) => {
+    if (dev && mask && maskSel != null) (setOverlay(false), change(setPath(dev, ["masks", maskSel, "tuning"], t), `${mask.name}: ${label}`));
+    else change(t, label);
+  };
+  const slider =
+    (root: Dev | null, write: (d: Dev, label: string) => void) =>
+    (label: string, path: Path, min: number, max: number, extra: Partial<Parameters<typeof Slider>[0]> = {}) =>
+      root && (
+        <Slider
+          key={path.join(".")}
+          label={label}
+          value={getPath(root, path) as number}
+          def={(getPath(p.defaults, path) as number | undefined) ?? 0}
+          min={min}
+          max={max}
+          onChange={(v) => write(setPath(root, path, v), label)}
+          {...extra}
+        />
+      );
+  const S = slider(T, edit);
   const reset = (key: keyof Dev, label: string) => (
-    <button className="text-[10px] font-normal normal-case text-neutral-500 hover:text-neutral-200" onClick={() => dev && change({ ...dev, [key]: structuredClone(p.defaults[key]) }, `Reset ${label}`)}>
+    <button className="text-[10px] font-normal normal-case text-neutral-500 hover:text-neutral-200" onClick={() => T && edit({ ...T, [key]: structuredClone(p.defaults[key]) }, `Reset ${label}`)}>
       reset
     </button>
   );
@@ -281,12 +311,15 @@ export function Develop(p: Props) {
     return [R, G, B];
   };
   const onCanvasClick = (e: React.MouseEvent) => {
-    if (!dev) return;
-    if (tool === "swatch") {
+    if (!dev || !T) return;
+    if (tool === "select") {
+      const r = canvas.current!.getBoundingClientRect();
+      aiSelect((e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height, e.altKey);
+    } else if (tool === "swatch") {
       const [h, C, L] = srgbToOklch(...(sample(e) as [number, number, number]));
       const sw = { id: `swatch_${Date.now().toString(36)}`, src_hsl: [Math.round(h * 10) / 10, Math.round(C * 2500) / 10, Math.round(L * 1000) / 10], shift_hsl: [0, 0, 0], range_hsl: [50, 50, 50], falloff: 50 };
-      change({ ...dev, point_color: [...dev.point_color, sw].slice(0, 8) }, "Add color swatch");
-      setSwatchSel(Math.min(dev.point_color.length, 7));
+      edit({ ...T, point_color: [...T.point_color, sw].slice(0, 8) }, "Add color swatch");
+      setSwatchSel(Math.min(T.point_color.length, 7));
       setTool("none");
     } else if (tool === "maskcolor" && maskSel != null) {
       const rgb = sample(e).map((v) => Math.round((v / 255) * 1000) / 1000);
@@ -400,7 +433,7 @@ export function Develop(p: Props) {
     );
   };
 
-  const swatch = dev && swatchSel != null ? dev.point_color[swatchSel] : null;
+  const swatch = T && swatchSel != null ? T.point_color[swatchSel] : null;
 
   return (
     <div className="flex min-h-0 flex-1">
@@ -460,6 +493,12 @@ export function Develop(p: Props) {
           <span className="text-neutral-500">{[p.active.camera, p.active.iso && `ISO ${p.active.iso}`, p.active.shutter && `${p.active.shutter}s`, p.active.aperture && `f/${p.active.aperture}`].filter(Boolean).join(" · ")}</span>
           <span className="ml-auto flex gap-1">
             {tool === "swatch" || tool === "maskcolor" ? <span className="px-2 py-1 text-amber-300">Click the photo to sample a colour (Esc cancels)</span> : null}
+            {tool === "select" ? (
+              <span className="px-2 py-1 text-violet-300">{picking ? "✦ Finding the object…" : mask ? "Click to add an object · ⌥-click to subtract · Esc when done" : "Click an object to select it"}</span>
+            ) : null}
+            <Btn active={tool === "select"} onClick={() => setTool(tool === "select" ? "none" : "select")} title="AI Select (S): click objects to select them with the AI; then every panel tunes only the selection">
+              ✦ Select
+            </Btn>
             <Btn active={before} onClick={() => setBefore(!before)} title="Before / after (\)">
               Before
             </Btn>
@@ -472,7 +511,17 @@ export function Develop(p: Props) {
 
         <div ref={boxRef} className="checker relative flex min-h-0 flex-1 items-center justify-center overflow-hidden">
           <div ref={wrap} className="relative overflow-hidden shadow-2xl" style={{ width: disp.w, height: disp.h }}>
-            <canvas ref={canvas} onClick={onCanvasClick} className={`block h-full w-full ${tool === "swatch" || tool === "maskcolor" ? "cursor-crosshair" : ""}`} />
+            <canvas
+              ref={canvas}
+              onClick={onCanvasClick}
+              className={`block h-full w-full ${picking ? "cursor-wait" : tool === "swatch" || tool === "maskcolor" || tool === "select" ? "cursor-crosshair" : ""}`}
+            />
+            {picking && (
+              <span
+                className="pointer-events-none absolute h-10 w-10 -translate-x-1/2 -translate-y-1/2 animate-ping rounded-full border-2 border-violet-300"
+                style={{ left: pct(picking.x), top: pct(picking.y) }}
+              />
+            )}
             {tool === "crop" && dev && !before && (
               <div
                 className="absolute cursor-move border border-white/80"
@@ -548,11 +597,39 @@ export function Develop(p: Props) {
         <div className="border-b border-neutral-800 p-3">
           <Histogram hist={hist} />
         </div>
-        {dev && (
+        {mask && (
+          <div className="sticky top-0 z-10 flex items-center gap-1.5 border-b border-violet-800/60 bg-violet-950/95 px-3 py-2 text-[11px]">
+            <span className="min-w-0 flex-1 truncate text-violet-200" title="Every panel below changes only this selection">
+              Tuning <b className="text-white">{mask.name}</b> only
+            </span>
+            <Btn active={overlay} onClick={() => setOverlay(!overlay)} title="Show the selection (O)">
+              Show
+            </Btn>
+            <Btn disabled={!mask.tuning} onClick={() => edit(structuredClone(p.defaults), "Reset")} title="Undo all tuning of this selection">
+              Reset
+            </Btn>
+            <Btn onClick={() => (setMaskSel(null), setTool("none"))} title="Back to the whole photo (Esc)">
+              Done
+            </Btn>
+          </div>
+        )}
+        {dev && T && (
           <>
-            <Panel title="Basic" right={<span className="flex gap-2"><button className="text-[10px] font-normal normal-case text-sky-400 hover:text-sky-300" onClick={autoTone}>auto</button>{reset("basic_tone", "tone")}</span>}>
+            <Panel
+              title="Basic"
+              right={
+                <span className="flex gap-2">
+                  {!mask && (
+                    <button className="text-[10px] font-normal normal-case text-sky-400 hover:text-sky-300" onClick={autoTone}>
+                      auto
+                    </button>
+                  )}
+                  {reset("basic_tone", "tone")}
+                </span>
+              }
+            >
               <div className="mb-2">
-                <Seg options={[["Color", "Color"], ["Monochrome", "B&W"]]} value={dev.profile.toLowerCase() === "monochrome" ? "Monochrome" : "Color"} onChange={(v) => change({ ...dev, profile: v }, "Profile")} />
+                <Seg options={[["Color", "Color"], ["Monochrome", "B&W"]]} value={T.profile.toLowerCase() === "monochrome" ? "Monochrome" : "Color"} onChange={(v) => edit({ ...T, profile: v }, "Profile")} />
               </div>
               {S("Temp", ["white_balance", "temperature_k"], 2000, 50000, { log: true, track: "track-temp" })}
               {S("Tint", ["white_balance", "tint"], -150, 150, { track: "track-tint" })}
@@ -584,10 +661,10 @@ export function Develop(p: Props) {
                 />
               </div>
               <CurveEditor
-                points={dev.tone_curve[curveKey.current]}
+                points={T.tone_curve[curveKey.current]}
                 color={{ point_luma: "#ddd", point_red: "#f55", point_green: "#5d5", point_blue: "#58f" }[curveKey.current]}
                 hist={hist?.[{ point_luma: 3, point_red: 0, point_green: 1, point_blue: 2 }[curveKey.current]]}
-                onChange={(pts) => change(setPath(dev, ["tone_curve", curveKey.current], pts), "Point curve")}
+                onChange={(pts) => edit(setPath(T, ["tone_curve", curveKey.current], pts), "Point curve")}
               />
               <p className="mt-1 text-[10px] text-neutral-500">Click to add · drag to move · double-click to delete</p>
             </Panel>
@@ -606,10 +683,10 @@ export function Develop(p: Props) {
 
             <Panel title="Point color" open={false} right={reset("point_color", "point color")}>
               <div className="mb-2 flex flex-wrap items-center gap-1.5">
-                <Btn active={tool === "swatch"} onClick={() => setTool(tool === "swatch" ? "none" : "swatch")} disabled={dev.point_color.length >= 8}>
+                <Btn active={tool === "swatch"} onClick={() => setTool(tool === "swatch" ? "none" : "swatch")} disabled={T.point_color.length >= 8}>
                   ⌖ Pick colour
                 </Btn>
-                {dev.point_color.map((s, i) => (
+                {T.point_color.map((s, i) => (
                   <button
                     key={s.id || i}
                     onClick={() => setSwatchSel(i)}
@@ -628,7 +705,7 @@ export function Develop(p: Props) {
                   {S("Sat range", ["point_color", swatchSel, "range_hsl", 1], 0, 100, { def: 50 })}
                   {S("Lum range", ["point_color", swatchSel, "range_hsl", 2], 0, 100, { def: 50 })}
                   {S("Falloff", ["point_color", swatchSel, "falloff"], 0, 100, { def: 50 })}
-                  <Btn className="mt-1" onClick={() => (change({ ...dev, point_color: dev.point_color.filter((_, k) => k !== swatchSel) }, "Delete swatch"), setSwatchSel(null))}>
+                  <Btn className="mt-1" onClick={() => (edit({ ...T, point_color: T.point_color.filter((_, k) => k !== swatchSel) }, "Delete swatch"), setSwatchSel(null))}>
                     Delete swatch
                   </Btn>
                 </>
@@ -638,11 +715,11 @@ export function Develop(p: Props) {
             <Panel title="Color grading" open={false} right={reset("color_grading_3way", "grading")}>
               <div className="grid grid-cols-3 gap-2">
                 {(["shadows", "midtones", "highlights"] as const).map((k) => (
-                  <ColorWheel key={k} size={84} label={k[0].toUpperCase() + k.slice(1)} wheel={dev.color_grading_3way[k]} onChange={(w) => change(setPath(dev, ["color_grading_3way", k], w), `Grade ${k}`)} />
+                  <ColorWheel key={k} size={84} label={k[0].toUpperCase() + k.slice(1)} wheel={T.color_grading_3way[k]} onChange={(w) => edit(setPath(T, ["color_grading_3way", k], w), `Grade ${k}`)} />
                 ))}
               </div>
               <div className="mx-auto mt-2 w-28">
-                <ColorWheel label="Global" size={84} wheel={dev.color_grading_3way.global} onChange={(w) => change(setPath(dev, ["color_grading_3way", "global"], w), "Grade global")} />
+                <ColorWheel label="Global" size={84} wheel={T.color_grading_3way.global} onChange={(w) => edit(setPath(T, ["color_grading_3way", "global"], w), "Grade global")} />
               </div>
               {S("Blending", ["color_grading_3way", "blending"], 0, 100)}
               {S("Balance", ["color_grading_3way", "balance"], -100, 100)}
@@ -656,41 +733,46 @@ export function Develop(p: Props) {
               <p className="mt-1 text-[10px] text-neutral-500">Preview is a 1600px proxy; sharpening is exact on export.</p>
             </Panel>
 
-            <Panel title="Effects" open={false} right={reset("effects", "effects")}>
-              {S("Vignette", ["effects", "vignette"], -100, 100)}
-              {S("Midpoint", ["effects", "vignette_midpoint"], 0, 100)}
-              {S("Feather", ["effects", "vignette_feather"], 0, 100)}
-            </Panel>
+            {/* whole-photo only: hidden while a selection is tuned */}
+            {!mask && (
+              <>
+                <Panel title="Effects" open={false} right={reset("effects", "effects")}>
+                  {S("Vignette", ["effects", "vignette"], -100, 100)}
+                  {S("Midpoint", ["effects", "vignette_midpoint"], 0, 100)}
+                  {S("Feather", ["effects", "vignette_feather"], 0, 100)}
+                </Panel>
 
-            <Panel title="Crop & straighten" open={tool === "crop"} right={reset("crop", "crop")}>
-              <div className="mb-2 flex flex-wrap gap-1">
-                {ASPECTS.map(([label, a]) => (
-                  <Btn key={label} active={aspect === a} onClick={() => (setTool("crop"), applyAspect(a))}>
-                    {label}
-                  </Btn>
-                ))}
-              </div>
-              {S("Angle", ["crop", "angle"], -45, 45, { step: 0.1, digits: 1 })}
-              <Btn className="mt-1" active={tool === "crop"} onClick={() => setTool(tool === "crop" ? "none" : "crop")}>
-                {tool === "crop" ? "Done (R)" : "Edit crop (R)"}
-              </Btn>
-            </Panel>
-
-            <Panel title="Remove" open={false} right={reset("retouch", "removals")}>
-              {dev.retouch.length === 0 && <p className="text-[10px] text-neutral-500">Ask the AI bar, e.g. “remove the people on the sand”.</p>}
-              <div className="space-y-1">
-                {dev.retouch.map((r, i) => (
-                  <div key={i} className="flex items-center gap-2 rounded bg-neutral-800 px-2 py-1 text-[11px]">
-                    <span className="flex-1 truncate" title={r.name}>
-                      {r.name}
-                    </span>
-                    <button className="text-neutral-500 hover:text-white" title="Undo this removal" onClick={() => change({ ...dev, retouch: dev.retouch.filter((_, k) => k !== i) }, "Delete removal")}>
-                      ✕
-                    </button>
+                <Panel title="Crop & straighten" open={tool === "crop"} right={reset("crop", "crop")}>
+                  <div className="mb-2 flex flex-wrap gap-1">
+                    {ASPECTS.map(([label, a]) => (
+                      <Btn key={label} active={aspect === a} onClick={() => (setTool("crop"), applyAspect(a))}>
+                        {label}
+                      </Btn>
+                    ))}
                   </div>
-                ))}
-              </div>
-            </Panel>
+                  {S("Angle", ["crop", "angle"], -45, 45, { step: 0.1, digits: 1 })}
+                  <Btn className="mt-1" active={tool === "crop"} onClick={() => setTool(tool === "crop" ? "none" : "crop")}>
+                    {tool === "crop" ? "Done (R)" : "Edit crop (R)"}
+                  </Btn>
+                </Panel>
+
+                <Panel title="Remove" open={false} right={reset("retouch", "removals")}>
+                  {dev.retouch.length === 0 && <p className="text-[10px] text-neutral-500">Ask the AI bar, e.g. “remove the people on the sand”.</p>}
+                  <div className="space-y-1">
+                    {dev.retouch.map((r, i) => (
+                      <div key={i} className="flex items-center gap-2 rounded bg-neutral-800 px-2 py-1 text-[11px]">
+                        <span className="flex-1 truncate" title={r.name}>
+                          {r.name}
+                        </span>
+                        <button className="text-neutral-500 hover:text-white" title="Undo this removal" onClick={() => change({ ...dev, retouch: dev.retouch.filter((_, k) => k !== i) }, "Delete removal")}>
+                          ✕
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </Panel>
+              </>
+            )}
 
             <Panel title="Masks" open={false}>
               <MasksPanel
@@ -703,7 +785,7 @@ export function Develop(p: Props) {
                 overlay={overlay}
                 setOverlay={setOverlay}
                 pickColor={(ci) => (setCompSel(ci), setTool("maskcolor"))}
-                S={S}
+                S={slider(dev, change)}
               />
             </Panel>
           </>
@@ -833,17 +915,21 @@ function MasksPanel({
             </select>
             <Btn onClick={() => change(setPath(dev, ["masks", sel, "components"], [...m.components, { ...COMPONENT, type: newType, op: newOp }]), "Add component")}>+</Btn>
           </div>
-          <div className="border-t border-neutral-700 pt-1">
-            {S("Temp", ["masks", sel, "adjustments", "temperature_shift"], -100, 100, { track: "track-temp" })}
-            {S("Tint", ["masks", sel, "adjustments", "tint_shift"], -100, 100, { track: "track-tint" })}
-            {S("Exposure", ["masks", sel, "adjustments", "exposure"], -5, 5, { step: 0.01, digits: 2 })}
-            {S("Contrast", ["masks", sel, "adjustments", "contrast"], -100, 100)}
-            {S("Highlights", ["masks", sel, "adjustments", "highlights"], -100, 100)}
-            {S("Shadows", ["masks", sel, "adjustments", "shadows"], -100, 100)}
-            {S("Whites", ["masks", sel, "adjustments", "whites"], -100, 100)}
-            {S("Blacks", ["masks", sel, "adjustments", "blacks"], -100, 100)}
-            {S("Saturation", ["masks", sel, "adjustments", "saturation"], -100, 100)}
-          </div>
+          {/* older quick adjustments (e.g. set by the AI bar); the Develop panels tune the selected mask fully */}
+          {Object.values(m.adjustments).some((v) => v !== 0) && (
+            <div className="border-t border-neutral-700 pt-1">
+              <p className="mb-1 text-[10px] text-neutral-500">Quick adjustments (set by the AI)</p>
+              {S("Temp", ["masks", sel, "adjustments", "temperature_shift"], -100, 100, { track: "track-temp" })}
+              {S("Tint", ["masks", sel, "adjustments", "tint_shift"], -100, 100, { track: "track-tint" })}
+              {S("Exposure", ["masks", sel, "adjustments", "exposure"], -5, 5, { step: 0.01, digits: 2 })}
+              {S("Contrast", ["masks", sel, "adjustments", "contrast"], -100, 100)}
+              {S("Highlights", ["masks", sel, "adjustments", "highlights"], -100, 100)}
+              {S("Shadows", ["masks", sel, "adjustments", "shadows"], -100, 100)}
+              {S("Whites", ["masks", sel, "adjustments", "whites"], -100, 100)}
+              {S("Blacks", ["masks", sel, "adjustments", "blacks"], -100, 100)}
+              {S("Saturation", ["masks", sel, "adjustments", "saturation"], -100, 100)}
+            </div>
+          )}
         </div>
       )}
     </div>

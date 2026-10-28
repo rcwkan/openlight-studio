@@ -219,6 +219,11 @@ pub struct Mask {
     pub enabled: bool,
     pub components: Vec<MaskComponent>,
     pub adjustments: LocalAdjust,
+    /// Full develop settings applied on top of the finished photo inside this mask only (the
+    /// Develop panels while the mask is selected). Default settings change nothing; crop,
+    /// effects, removals and masks of its own are ignored.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tuning: Option<Develop>,
 }
 impl Default for Mask {
     fn default() -> Self {
@@ -228,6 +233,7 @@ impl Default for Mask {
             enabled: true,
             components: vec![],
             adjustments: LocalAdjust::default(),
+            tuning: None,
         }
     }
 }
@@ -422,6 +428,17 @@ impl Develop {
                 &mut a.saturation,
             ] {
                 cl(v, -100.0, 100.0);
+            }
+            if let Some(t) = &mut m.tuning {
+                t.crop = Crop::default();
+                t.effects = Effects::default();
+                t.retouch.clear();
+                t.masks.clear();
+                t.ai_provenance_log.clear();
+                t.clamp();
+            }
+            if m.tuning.as_ref().is_some_and(|t| *t == Develop::default()) {
+                m.tuning = None;
             }
         }
     }
@@ -730,10 +747,30 @@ pub struct Opts {
 
 pub fn render(src: &Img, d: &Develop, o: &Opts) -> Img {
     let (w, h) = (src.w, src.h);
+    let (mut px, wts) = tones(&src.px, w, h, d, o.overlay_mask);
+    // 8. mask tuning: the mask's own settings on top of the result, inside the mask only
+    for (m, wt) in d.masks.iter().zip(&wts) {
+        if let (true, Some(t), Some(wt)) = (m.enabled, &m.tuning, wt) {
+            let (tp, _) = tones(&px, w, h, t, None);
+            px.par_iter_mut().zip(tp).zip(wt).for_each(|((p, q), &a)| *p = lerp(*p, q, a));
+        }
+    }
+    if let Some(m) = o.overlay_mask.and_then(|i| wts.get(i)).and_then(Option::as_ref) {
+        px.par_iter_mut().zip(m).for_each(|(p, &m)| *p = lerp(p.map(|c| c.clamp(0.0, 1.0)), [0.9, 0.05, 0.05], m * 0.6));
+    }
+    // 9. geometry, then post-crop effects
+    let mut img = if o.full_frame { Img { w, h, px } } else { crop_rotate(Img { w, h, px }, &d.crop, !o.skip_crop) };
+    vignette(&mut img, &d.effects);
+    img
+}
+
+/// Stages 1–7 (everything before geometry), plus each mask's coverage (None for a disabled
+/// mask that is not the overlay).
+fn tones(src: &[Px], w: usize, h: usize, d: &Develop, overlay: Option<usize>) -> (Vec<Px>, Vec<Option<Vec<f32>>>) {
     // 1. white balance + exposure
     let wb = wb_gains(d.white_balance.temperature_k, d.white_balance.tint);
     let g = wb.map(|v| v * d.basic_tone.exposure.exp2());
-    let mut px: Vec<Px> = src.px.par_iter().map(|p| [p[0] * g[0], p[1] * g[1], p[2] * g[2]]).collect();
+    let mut px: Vec<Px> = src.par_iter().map(|p| [p[0] * g[0], p[1] * g[1], p[2] * g[2]]).collect();
     // 1b. object removal
     for r in &d.retouch {
         heal(&mut px, w, h, r);
@@ -752,7 +789,7 @@ pub fn render(src: &Img, d: &Develop, o: &Opts) -> Img {
         local_contrast(&mut px, w, h, d.presence.clarity / 100.0, d.presence.texture / 100.0);
     }
     // 5. local masks
-    let overlay = apply_masks(&mut px, w, h, &d.masks, o.overlay_mask);
+    let wts = apply_masks(&mut px, w, h, &d.masks, overlay);
     // 6. curves + colour
     let curves = Curves::new(&d.tone_curve);
     let color = ColorOps::new(d);
@@ -773,13 +810,21 @@ pub fn render(src: &Img, d: &Develop, o: &Opts) -> Img {
     if d.detail.sharpening > 0.0 {
         sharpen(&mut px, w, h, &d.detail);
     }
-    if let Some(m) = overlay {
-        px.par_iter_mut().zip(m).for_each(|(p, m)| *p = lerp(p.map(|c| c.clamp(0.0, 1.0)), [0.9, 0.05, 0.05], m * 0.6));
+    (px, wts)
+}
+
+/// Click marker for the AI: a red ring with a white rim around `at` (normalised).
+pub fn mark(img: &mut Img, at: [f32; 2]) {
+    let (cx, cy, r) = (at[0] * img.w as f32, at[1] * img.h as f32, 0.015 * img.w.max(img.h) as f32);
+    let span = |c: f32, n: usize| (c - r - 4.0).max(0.0) as usize..((c + r + 4.0).max(0.0) as usize).min(n);
+    for y in span(cy, img.h) {
+        for x in span(cx, img.w) {
+            let d = ((x as f32 + 0.5 - cx).hypot(y as f32 + 0.5 - cy) - r).abs();
+            if d < 3.5 {
+                img.px[y * img.w + x] = if d < 2.0 { [1.0, 0.0, 0.0] } else { [1.0; 3] };
+            }
+        }
     }
-    // 8. geometry, then post-crop effects
-    let mut img = if o.full_frame { Img { w, h, px } } else { crop_rotate(Img { w, h, px }, &d.crop, !o.skip_crop) };
-    vignette(&mut img, &d.effects);
-    img
 }
 
 struct Tone {
@@ -1273,15 +1318,15 @@ fn mask_weights(m: &Mask, w: usize, h: usize, px: &[Px]) -> Vec<f32> {
         .collect()
 }
 
-fn apply_masks(px: &mut [Px], w: usize, h: usize, masks: &[Mask], overlay: Option<usize>) -> Option<Vec<f32>> {
-    let mut out = None;
+fn apply_masks(px: &mut [Px], w: usize, h: usize, masks: &[Mask], overlay: Option<usize>) -> Vec<Option<Vec<f32>>> {
+    let mut out = vec![];
     for (i, m) in masks.iter().enumerate() {
-        let show = overlay == Some(i);
-        if !m.enabled && !show {
+        if !m.enabled && overlay != Some(i) {
+            out.push(None);
             continue;
         }
         let wts = mask_weights(m, w, h, px);
-        if m.enabled {
+        if m.enabled && m.adjustments != LocalAdjust::default() {
             let a = &m.adjustments;
             let tone = Tone::new(&BasicTone {
                 exposure: 0.0,
@@ -1305,9 +1350,7 @@ fn apply_masks(px: &mut [Px], w: usize, h: usize, masks: &[Mask], overlay: Optio
                 *p = lerp(*p, q, m);
             });
         }
-        if show {
-            out = Some(wts);
-        }
+        out.push(Some(wts));
     }
     out
 }
@@ -1959,6 +2002,29 @@ mod tests {
         assert!(luma(out.px[top]) > luma(src.px[top]) * 1.5);
         assert!((luma(out.px[bottom]) - luma(src.px[bottom])).abs() < 1e-6);
         assert!(mask_from_ops("sky", &json!([{"boolean_op": "add", "source_type": "ai_sky"}]), &json!({})).is_err());
+    }
+
+    #[test]
+    fn mask_tuning_applies_inside_only() {
+        let src = gradient();
+        let mut t = Develop { profile: "Monochrome".into(), ..Default::default() };
+        t.basic_tone.exposure = 1.0;
+        let mut d = Develop::default();
+        d.masks.push(Mask {
+            components: vec![MaskComponent { kind: "linear_gradient".into(), start: [0.5, 0.0], end: [0.5, 0.3], ..Default::default() }],
+            tuning: Some(t),
+            ..Default::default()
+        });
+        let out = render(&src, &d, &Opts::default());
+        let (top, bottom) = (5 * src.w + 10, (src.h - 2) * src.w + 10);
+        let chroma = |p: Px| oklab(p)[1].hypot(oklab(p)[2]);
+        assert!(luma(out.px[top]) > luma(src.px[top]) * 1.5, "brighter inside");
+        assert!(chroma(out.px[top]) < 0.6 * chroma(src.px[top]), "B&W inside");
+        assert!((0..3).all(|c| (out.px[bottom][c] - src.px[bottom][c]).abs() < 1e-5), "untouched outside");
+        // a tuning keeps no geometry or masks of its own, and default settings are dropped
+        d.masks[0].tuning = Some(Develop { masks: d.masks.clone(), crop: Crop { w: 0.5, ..Default::default() }, ..Default::default() });
+        d.clamp();
+        assert_eq!(d.masks[0].tuning, None);
     }
 
     #[test]

@@ -135,6 +135,7 @@ pub fn tools() -> Value {
                 "max_edge": { "type": "integer", "enum": [512, 1024, 1536], "default": 1024 },
                 "full_frame": { "type": "boolean", "default": false, "description": "skip crop and straighten: the frame that mask and retouch coordinates refer to" },
                 "show_mask": { "type": "integer", "minimum": 0, "description": "tint the coverage of the mask at this index red, to check a selection" },
+                "mark": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2, "description": "[x, y] in the full frame (with full_frame): draw a red ring there, e.g. where the user clicked" },
                 "include_histogram_bins": { "type": "boolean", "default": false } } }
         },
         {
@@ -310,6 +311,7 @@ fn call_tool(core: &Arc<Core>, name: &str, a: &Value) -> Value {
             match d.masks.iter_mut().find(|m| m.name == name) {
                 Some(m) => {
                     mask.mask_id = m.mask_id.clone();
+                    mask.tuning = m.tuning.take();
                     *m = mask.clone();
                 }
                 None => {
@@ -348,13 +350,16 @@ fn call_tool(core: &Arc<Core>, name: &str, a: &Value) -> Value {
             let id = parse_id(&a["photo_id"])?;
             let edge = a["max_edge"].as_u64().unwrap_or(1024).clamp(256, 2048) as u32;
             let opts = Opts { full_frame: a["full_frame"].as_bool().unwrap_or(false), overlay_mask: a["show_mask"].as_u64().map(|m| m as usize), ..Default::default() };
-            let img = core.render(id, &opts)?;
+            let mut img = core.render(id, &opts)?;
             let mut t = develop::telemetry(&img);
             if !a["include_histogram_bins"].as_bool().unwrap_or(false) {
                 t.as_object_mut().map(|o| o.remove("histogram"));
             }
             if opts.overlay_mask.is_some() {
                 t = json!("not measured: the mask overlay tints the preview");
+            }
+            if let Ok(at) = serde_json::from_value::<[f32; 2]>(a["mark"].clone()) {
+                develop::mark(&mut img, at);
             }
             let jpeg = develop::encode_jpeg(&img, edge, 85)?;
             let state = core.develop(id)?;
