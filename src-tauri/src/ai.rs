@@ -80,20 +80,41 @@ pub fn default_providers() -> Vec<Provider> {
     ]
 }
 
-const KEYCHAIN: &str = "org.openlight.studio";
+fn creds_path() -> PathBuf {
+    crate::data_dir().join("credentials.json")
+}
+
+fn load_creds() -> std::collections::HashMap<String, String> {
+    std::fs::read_to_string(creds_path())
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_creds(creds: &std::collections::HashMap<String, String>) -> Result<(), String> {
+    let path = creds_path();
+    let s = serde_json::to_string_pretty(creds).map_err(es)?;
+    std::fs::write(&path, s).map_err(es)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
 
 pub fn set_key(id: &str, key: &str) -> Result<(), String> {
-    let e = keyring::Entry::new(KEYCHAIN, id).map_err(es)?;
+    let mut creds = load_creds();
     if key.is_empty() {
-        let _ = e.delete_credential();
-        Ok(())
+        creds.remove(id);
     } else {
-        e.set_password(key).map_err(es)
+        creds.insert(id.to_string(), key.to_string());
     }
+    save_creds(&creds)
 }
 
 pub fn key(id: &str) -> Option<String> {
-    keyring::Entry::new(KEYCHAIN, id).ok().and_then(|e| e.get_password().ok())
+    load_creds().get(id).cloned()
 }
 
 /// Keychain first, then the usual environment variable for that vendor.

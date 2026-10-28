@@ -34,7 +34,6 @@ dirs = "7.0.0"
 rawler = "0.8.0"
 getrandom = "0.4.3"
 ureq = { version = "3.5.0", features = ["json"] }
-keyring = "4.2.0"
 moxcms = "0.8.1"
 ring = "0.17"
 
