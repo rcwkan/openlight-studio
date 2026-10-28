@@ -1,5 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import { Fragment, ReactNode, useCallback, useEffect, useRef, useState } from "react";
+import { Log } from "./Agent";
 import { api, Develop as Dev, getPath, HistoryEntry, Mask, MaskComponent, Photo, Rendered, setPath, Settings, srgbToOklch, thumbUrl } from "./api";
 import { Btn, ColorWheel, CurveEditor, Histogram, Panel, Seg, Slider } from "./controls";
 
@@ -12,6 +13,8 @@ type Props = {
   settings: Settings | null;
   setSettings: (s: Settings) => void;
   onExport: () => void;
+  logs: Log[];
+  clearLogs?: () => void;
 };
 
 type Tool = "none" | "crop" | "swatch" | "maskcolor";
@@ -523,7 +526,7 @@ export function Develop(p: Props) {
           {before && <div className="absolute left-3 top-3 rounded bg-neutral-900/80 px-2 py-1 text-[11px]">Before</div>}
         </div>
 
-        <AiBar settings={p.settings} setSettings={p.setSettings} run={aiRun} />
+        <AiBar settings={p.settings} setSettings={p.setSettings} run={aiRun} logs={p.logs} clearLogs={p.clearLogs} />
 
         <div className="flex h-[84px] shrink-0 gap-1 overflow-x-auto border-t border-neutral-800 bg-neutral-900 p-1.5">
           {p.photos.map((ph) => (
@@ -847,23 +850,88 @@ function MasksPanel({
   );
 }
 
-function AiBar({ settings, setSettings, run: runAi }: { settings: Settings | null; setSettings: (s: Settings) => void; run: (prompt: string, provider: string) => Promise<string> }) {
+function AiBar({
+  settings,
+  setSettings,
+  run: runAi,
+  logs,
+  clearLogs,
+}: {
+  settings: Settings | null;
+  setSettings: (s: Settings) => void;
+  run: (prompt: string, provider: string) => Promise<string>;
+  logs: Log[];
+  clearLogs?: () => void;
+}) {
   const [prompt, setPrompt] = useState("");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
+  const [startTime, setStartTime] = useState<number | null>(null);
+  const [elapsed, setElapsed] = useState(0);
+  const [runStartIdx, setRunStartIdx] = useState<number | null>(null);
+  const [showDetails, setShowDetails] = useState(false);
+  const [logFilter, setLogFilter] = useState<"run" | "all">("run");
+  const [copied, setCopied] = useState(false);
+  const userClosedDetails = useRef(false);
+  const logEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!busy || startTime == null) return;
+    const interval = setInterval(() => {
+      setElapsed((Date.now() - startTime) / 1000);
+    }, 100);
+    return () => clearInterval(interval);
+  }, [busy, startTime]);
+
+  useEffect(() => {
+    if (showDetails) {
+      logEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [logs, showDetails]);
+
   if (!settings) return null;
   const provider = settings.active_provider;
+
+  const runLogs = runStartIdx != null ? logs.slice(runStartIdx) : [];
+  const displayLogs = logFilter === "run" && runStartIdx != null ? runLogs : logs;
+  const latestLog = runLogs.length > 0 ? runLogs[runLogs.length - 1] : logs.length > 0 ? logs[logs.length - 1] : null;
+
+  const copyLogs = () => {
+    const text = displayLogs.map((l) => `[${l.t}] [${l.source}] ${l.message}`).join("\n");
+    navigator.clipboard.writeText(text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
   const run = async () => {
     if (!prompt.trim() || busy) return;
+    const now = Date.now();
+    setStartTime(now);
+    setElapsed(0);
+    setRunStartIdx(logs.length);
     setBusy(true);
     setResult(null);
+    if (!userClosedDetails.current) {
+      setShowDetails(true);
+    }
     try {
-      setResult({ ok: true, text: await runAi(prompt, provider) });
+      const text = await runAi(prompt, provider);
+      setResult({ ok: true, text });
     } catch (e) {
       setResult({ ok: false, text: String(e) });
+    } finally {
+      setBusy(false);
+      setElapsed((Date.now() - now) / 1000);
     }
-    setBusy(false);
   };
+
+  const getSourceBadge = (source: string) => {
+    if (source === "mcp") return "bg-sky-950/70 text-sky-400 border border-sky-800/60";
+    if (source.includes("antigravity") || source.includes("claude")) return "bg-violet-950/70 text-violet-300 border border-violet-800/60";
+    if (source.includes("gemini") || source.includes("openai") || source.includes("anthropic")) return "bg-emerald-950/70 text-emerald-300 border border-emerald-800/60";
+    return "bg-neutral-800 text-neutral-300 border border-neutral-700";
+  };
+
   return (
     <div className="border-t border-neutral-800 bg-neutral-900 px-3 py-2 text-[11px]">
       <div className="flex items-center gap-2">
@@ -876,6 +944,7 @@ function AiBar({ settings, setSettings, run: runAi }: { settings: Settings | nul
             setSettings(s);
             api.saveSettings(s);
           }}
+          disabled={busy}
         >
           {settings.providers.map((pr) => (
             <option key={pr.id} value={pr.id}>
@@ -892,15 +961,150 @@ function AiBar({ settings, setSettings, run: runAi }: { settings: Settings | nul
           disabled={busy}
         />
         <Btn active onClick={run} disabled={busy || !prompt.trim()}>
-          {busy ? "Working…" : "Run"}
+          {busy ? `Working… ${elapsed.toFixed(1)}s` : "Run"}
         </Btn>
       </div>
-      {result && (
-        <div className={`mt-2 max-h-24 overflow-y-auto whitespace-pre-wrap rounded bg-neutral-800 p-2 ${result.ok ? "text-neutral-300" : "text-red-400"}`}>
-          {result.text}
-          <button className="float-right text-neutral-500 hover:text-white" onClick={() => setResult(null)}>
-            ✕
+
+      {busy && (
+        <div className="relative mt-2 h-1 w-full overflow-hidden rounded bg-neutral-800">
+          <div className="animate-indeterminate absolute inset-y-0 w-1/3 rounded bg-gradient-to-r from-violet-500 via-sky-400 to-violet-500" />
+        </div>
+      )}
+
+      <div className="mt-2 flex items-center justify-between gap-2 text-[11px]">
+        <div className="flex min-w-0 items-center gap-2 overflow-hidden">
+          {busy ? (
+            <>
+              <span className="relative flex h-2 w-2 shrink-0">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-violet-400 opacity-75" />
+                <span className="relative inline-flex h-2 w-2 rounded-full bg-violet-500" />
+              </span>
+              <span className="shrink-0 font-medium text-violet-300">Working ({elapsed.toFixed(1)}s):</span>
+              {latestLog ? (
+                <span className="truncate font-mono text-[10px] text-neutral-300">
+                  <span className={latestLog.source === "mcp" ? "font-semibold text-sky-400" : "font-semibold text-violet-300"}>
+                    [{latestLog.source}]
+                  </span>{" "}
+                  {latestLog.message}
+                </span>
+              ) : (
+                <span className="italic text-neutral-500">Initializing agent...</span>
+              )}
+            </>
+          ) : result ? (
+            <span className="flex items-center gap-1.5 text-neutral-400">
+              <span className={`h-1.5 w-1.5 rounded-full ${result.ok ? "bg-emerald-400" : "bg-red-400"}`} />
+              {result.ok ? `Finished in ${elapsed.toFixed(1)}s` : `Failed after ${elapsed.toFixed(1)}s`}
+            </span>
+          ) : latestLog ? (
+            <span className="truncate font-mono text-[10px] text-neutral-500">
+              Last activity:{" "}
+              <span className={latestLog.source === "mcp" ? "text-sky-400/80" : "text-violet-400/80"}>[{latestLog.source}]</span>{" "}
+              {latestLog.message}
+            </span>
+          ) : (
+            <span className="text-neutral-500">Ready</span>
+          )}
+        </div>
+
+        <div className="flex shrink-0 items-center gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              const next = !showDetails;
+              userClosedDetails.current = !next;
+              setShowDetails(next);
+            }}
+            className="flex items-center gap-1.5 rounded px-2 py-0.5 text-[10px] font-medium text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200"
+          >
+            <span>{showDetails ? "Hide details" : "Show details"}</span>
+            {(runLogs.length > 0 || logs.length > 0) && (
+              <span className="rounded-full bg-neutral-800 px-1.5 text-[9px] text-neutral-300">
+                {runLogs.length > 0 ? runLogs.length : logs.length}
+              </span>
+            )}
+            <span className="text-[8px]">{showDetails ? "▲" : "▼"}</span>
           </button>
+        </div>
+      </div>
+
+      {showDetails && (
+        <div className="mt-2 flex flex-col rounded border border-neutral-800 bg-neutral-950 p-2 text-[11px]">
+          <div className="mb-1.5 flex items-center justify-between border-b border-neutral-800/80 pb-1.5 text-[10px] text-neutral-400">
+            <div className="flex items-center gap-2">
+              <span className="font-semibold text-neutral-300">Activity Log</span>
+              {runStartIdx != null && (
+                <div className="flex rounded bg-neutral-900 p-0.5 text-[9px]">
+                  <button
+                    type="button"
+                    className={`rounded px-1.5 py-0.5 ${logFilter === "run" ? "bg-neutral-700 font-medium text-white" : "text-neutral-400 hover:text-neutral-200"}`}
+                    onClick={() => setLogFilter("run")}
+                  >
+                    This Run ({runLogs.length})
+                  </button>
+                  <button
+                    type="button"
+                    className={`rounded px-1.5 py-0.5 ${logFilter === "all" ? "bg-neutral-700 font-medium text-white" : "text-neutral-400 hover:text-neutral-200"}`}
+                    onClick={() => setLogFilter("all")}
+                  >
+                    All ({logs.length})
+                  </button>
+                </div>
+              )}
+            </div>
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={copyLogs}
+                className="rounded px-1.5 py-0.5 hover:bg-neutral-800 hover:text-white"
+              >
+                {copied ? "Copied!" : "Copy"}
+              </button>
+              {clearLogs && (
+                <button
+                  type="button"
+                  onClick={clearLogs}
+                  className="rounded px-1.5 py-0.5 hover:bg-neutral-800 hover:text-white"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+          </div>
+          <div className="max-h-48 min-h-24 select-text space-y-1 overflow-y-auto font-mono text-[10px]">
+            {displayLogs.length === 0 ? (
+              <div className="py-2 text-center text-neutral-600">No activity logged yet.</div>
+            ) : (
+              displayLogs.map((l, i) => (
+                <div key={i} className="whitespace-pre-wrap break-all leading-tight">
+                  <span className="text-neutral-600">{l.t}</span>{" "}
+                  <span className={`inline-block rounded px-1 py-0.2 text-[9px] font-medium ${getSourceBadge(l.source)}`}>
+                    {l.source}
+                  </span>{" "}
+                  <span className="text-neutral-300">{l.message}</span>
+                </div>
+              ))
+            )}
+            <div ref={logEndRef} />
+          </div>
+        </div>
+      )}
+
+      {result && (
+        <div
+          className={`mt-2 max-h-32 overflow-y-auto whitespace-pre-wrap rounded border p-2.5 font-sans text-[11px] leading-relaxed ${
+            result.ok ? "border-neutral-700 bg-neutral-800/90 text-neutral-200" : "border-red-900/60 bg-red-950/20 text-red-300"
+          }`}
+        >
+          <div className="flex items-start justify-between gap-2">
+            <div className="flex-1 select-text">
+              <span className="mr-1.5 font-semibold text-violet-300">{result.ok ? "AI summary:" : "Error:"}</span>
+              {result.text}
+            </div>
+            <button className="shrink-0 p-0.5 text-neutral-500 hover:text-white" onClick={() => setResult(null)}>
+              ✕
+            </button>
+          </div>
         </div>
       )}
     </div>

@@ -259,6 +259,8 @@ export default function App() {
           settings={settings}
           setSettings={setSettings}
           onExport={() => setExportIds(targets())}
+          logs={logs}
+          clearLogs={() => setLogs([])}
         />
       )}
       {module === "agent" && <Agent info={info} settings={settings} setSettings={setSettings} logs={logs} clearLogs={() => setLogs([])} />}

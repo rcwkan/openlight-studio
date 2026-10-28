@@ -14,7 +14,7 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    io::Read,
+    io::{BufRead, BufReader, Read},
     path::PathBuf,
     process::{Command, Stdio},
     sync::{Arc, OnceLock},
@@ -256,6 +256,40 @@ pub fn run(core: &Arc<Core>, id: i64, prompt: &str, provider_id: &str) -> Result
     res
 }
 
+/// Strips ANSI escape sequences (CSI and OSC) from CLI agent output.
+pub fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            match chars.peek() {
+                Some(&'[') => {
+                    chars.next();
+                    while let Some(&next) = chars.peek() {
+                        chars.next();
+                        if (0x40..=0x7e).contains(&(next as u32)) {
+                            break;
+                        }
+                    }
+                }
+                Some(&']') => {
+                    chars.next();
+                    while let Some(&next) = chars.peek() {
+                        chars.next();
+                        if next == '\x07' || next == '\x1b' {
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 fn run_cli(core: &Arc<Core>, p: &Provider, id: i64, prompt: &str, dir: &PathBuf) -> Result<String, String> {
     let (enabled, url, token) = {
         let s = core.settings.lock().unwrap();
@@ -317,17 +351,37 @@ fn run_cli(core: &Arc<Core>, p: &Provider, id: i64, prompt: &str, dir: &PathBuf)
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("could not start '{prog}' (resolved to '{}'): {e}", prog_path.display()))?;
-    let drain = |r: Option<Box<dyn Read + Send>>| {
+    let stream_lines = |core: Arc<Core>, source: String, r: Option<Box<dyn Read + Send>>| {
         std::thread::spawn(move || {
-            let mut s = String::new();
-            if let Some(mut r) = r {
-                let _ = r.read_to_string(&mut s);
+            let mut full = String::new();
+            if let Some(r) = r {
+                let mut reader = BufReader::new(r);
+                let mut buf = Vec::new();
+                while let Ok(n) = reader.read_until(b'\n', &mut buf) {
+                    if n == 0 {
+                        break;
+                    }
+                    let line = String::from_utf8_lossy(&buf);
+                    full.push_str(&line);
+                    let mut last_chunk = None;
+                    for chunk in line.split('\r') {
+                        let cleaned = strip_ansi(chunk);
+                        let trimmed = cleaned.trim();
+                        if !trimmed.is_empty() {
+                            last_chunk = Some(trimmed.to_string());
+                        }
+                    }
+                    if let Some(msg) = last_chunk {
+                        core.log(&source, msg);
+                    }
+                    buf.clear();
+                }
             }
-            s
+            full
         })
     };
-    let out = drain(child.stdout.take().map(|r| Box::new(r) as Box<dyn Read + Send>));
-    let err = drain(child.stderr.take().map(|r| Box::new(r) as Box<dyn Read + Send>));
+    let out = stream_lines(core.clone(), p.id.clone(), child.stdout.take().map(|r| Box::new(r) as Box<dyn Read + Send>));
+    let err = stream_lines(core.clone(), p.id.clone(), child.stderr.take().map(|r| Box::new(r) as Box<dyn Read + Send>));
     let deadline = Instant::now() + Duration::from_secs(p.timeout_s.max(10));
     let status = loop {
         if let Some(s) = child.try_wait().map_err(es)? {
@@ -337,11 +391,12 @@ fn run_cli(core: &Arc<Core>, p: &Provider, id: i64, prompt: &str, dir: &PathBuf)
             let _ = child.kill();
             return Err(format!("{prog} timed out after {}s", p.timeout_s));
         }
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(100));
     };
     let (out, err) = (out.join().unwrap_or_default(), err.join().unwrap_or_default());
     if !status.success() {
-        return Err(format!("{prog} exited with {status}: {}", truncate(err.trim(), 600)));
+        let msg = if !err.trim().is_empty() { err.trim() } else { out.trim() };
+        return Err(format!("{prog} exited with {status}: {}", truncate(msg, 600)));
     }
     // `claude --output-format json` wraps the final message in {"result": ...}
     Ok(serde_json::from_str::<Value>(out.trim())
@@ -469,6 +524,7 @@ fn run_http(core: &Arc<Core>, p: &Provider, id: i64, prompt: &str, dir: &PathBuf
         );
         core.log(&p.id, format!("pass {pass}: asking {} ({})", p.name, p.model));
         let r = parse_object(&call_model(p, &system, &user, &snap.jpeg_b64)?)?;
+        core.log(&p.id, format!("pass {pass}: applying model response..."));
         let mut d = snap.state.clone();
         let mut notes = vec![];
         if let Some(patch) = r.get("global_parameter_patch").filter(|v| v.as_object().is_some_and(|o| !o.is_empty())) {
@@ -494,10 +550,12 @@ fn run_http(core: &Arc<Core>, p: &Provider, id: i64, prompt: &str, dir: &PathBuf
                 Err(e) => notes.push(e),
             }
         }
-        if let Some(objs) = r.get("remove_objects").filter(|v| v.as_array().is_some_and(|a| !a.is_empty()))
-            && let Err(e) = mcp::remove_objects(core, id, &mut d, objs)
-        {
-            notes.push(e);
+        if let Some(objs) = r.get("remove_objects").filter(|v| v.as_array().is_some_and(|a| !a.is_empty())) {
+            let count = objs.as_array().map_or(0, |a| a.len());
+            core.log(&p.id, format!("pass {pass}: removing {count} objects..."));
+            if let Err(e) = mcp::remove_objects(core, id, &mut d, objs) {
+                notes.push(e);
+            }
         }
         let summary = r["reasoning_summary"].as_str().unwrap_or("").to_string();
         if d != snap.state {
@@ -512,4 +570,17 @@ fn run_http(core: &Arc<Core>, p: &Provider, id: i64, prompt: &str, dir: &PathBuf
         }
     }
     Ok(summaries.join("\n"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ansi_stripping() {
+        assert_eq!(strip_ansi("\x1b[32mhello world\x1b[0m"), "hello world");
+        assert_eq!(strip_ansi("\x1b[1;31mError:\x1b[0m file not found"), "Error: file not found");
+        assert_eq!(strip_ansi("clean text"), "clean text");
+        assert_eq!(strip_ansi("\x1b]0;Title\x07rest"), "rest");
+    }
 }

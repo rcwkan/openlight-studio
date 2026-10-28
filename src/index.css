@@ -55,3 +55,19 @@ input[type="range"].ol-range::-webkit-slider-thumb {
   background-image: conic-gradient(#141414 25%, #101010 0 50%, #141414 0 75%, #101010 0);
   background-size: 24px 24px;
 }
+
+@keyframes indeterminate {
+  0% {
+    transform: translateX(-100%);
+  }
+  50% {
+    transform: translateX(100%);
+  }
+  100% {
+    transform: translateX(350%);
+  }
+}
+
+.animate-indeterminate {
+  animation: indeterminate 1.8s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
