@@ -23,18 +23,20 @@ The catalog lives in `~/Library/Application Support/org.openlight.studio/` (`cat
 | `openlight-studio --import <folder>` | Headless import (recursive; files stay in place) |
 | `openlight-studio --mcp-stdio` | MCP over stdio — forwards to the running app, or edits the catalog headless when it is closed |
 
-## Import from Immich or Google Photos
+## Immich and Google Photos
 
 The Library sidebar has **Import from Immich…** and **Import from Google Photos…**. Originals download to `remote/<source>/<album>/` in the catalog folder and are imported like a folder. Re-importing fetches only what is new. Formats OpenLight can't open (HEIC, video) are skipped.
 
-- **Immich:** enter the server URL (e.g. `http://192.168.1.10:2283`) and an API key from *Account Settings → API Keys* with `album.read`, `asset.read` and `asset.download`. The key is stored in the OS keychain. Import an album or your favorites. Immich's search covers your own library, so albums other people share with you import only your photos in them.
-- **Google Photos:** Google's Library API no longer lists your photos, so OpenLight uses the Picker API: you choose photos in Google Photos in your browser, then OpenLight downloads them (Google removes location metadata). One-time setup in Google Cloud Console:
-  1. Enable the **Photos Picker API**.
+To send edits back, choose **Upload to Immich** or **Upload to Google Photos** as the destination in the Export dialog. OpenLight renders to a temporary folder, uploads the files and deletes them.
+
+- **Immich:** enter the server URL (e.g. `http://192.168.1.10:2283`) and an API key from *Account Settings → API Keys* with `album.read`, `asset.read` and `asset.download`, plus `asset.upload` to upload. The key is stored in the OS keychain. Import an album or your favorites. Immich's search covers your own library, so albums other people share with you import only your photos in them. Uploads go to your timeline, dated with the photo's capture time (read as this computer's time zone).
+- **Google Photos:** Google's Library API no longer lists your photos, so OpenLight uses the Picker API: you choose photos in Google Photos in your browser, then OpenLight downloads them (Google removes location metadata). Uploads go through the Library API, which still accepts new photos. One-time setup in Google Cloud Console:
+  1. Enable the **Photos Picker API**, and the **Photos Library API** to upload.
   2. Configure the OAuth consent screen and add yourself as a test user.
   3. Create an OAuth client ID of type **Desktop app**.
   4. Paste the client ID and secret into OpenLight and choose **Sign in with Google**.
 
-  While the consent screen is in *Testing*, Google expires the sign-in after 7 days; sign in again or switch it to *In production*.
+  While the consent screen is in *Testing*, Google expires the sign-in after 7 days; sign in again or switch it to *In production*. Exports carry no EXIF yet, so Google Photos files uploads under the upload date.
 
 ## Connect an agent
 
@@ -57,7 +59,7 @@ src-tauri/src/
   catalog.rs         SQLite schema, import/EXIF/thumbnails, history, virtual copies, .olxmp sidecars
   mcp.rs             MCP server: JSON-RPC, tools/resources, HTTP + stdio transports
   ai.rs              provider router (spec §5)
-  remote.rs          Immich + Google Photos import (download originals, then folder import)
+  remote.rs          Immich + Google Photos: import (download originals, then folder import) and export upload
   lib.rs             shared engine state + Tauri commands
 ```
 
@@ -70,7 +72,7 @@ The pipeline works in linear Rec.2020 float. One Rust implementation renders the
 - **DAM (§3.1):** classic catalog import, import from Immich (albums, favorites) and Google Photos (Picker), EXIF, thumbnails; ratings, flags, colour labels, keywords; filters (folder, text, rating, flag, label, edited); virtual copies; `.olxmp` sidecars (read on import, written on edit).
 - **Develop (§3.2–3.3):** white balance, exposure, contrast, highlights/shadows/whites/blacks, texture, clarity, dehaze, vibrance (skin-protected), saturation; B&W profile; parametric + point curves (RGB/R/G/B); 8-band colour mixer; Point Color (8 swatches, eyedropper, 3-D range, falloff); 3-way + global colour grading; sharpening, colour noise reduction; vignette; crop and straighten (auto-constrained); history with undo/redo; before/after; copy/paste/sync settings; live RGB histogram with clipping.
 - **Masks (§3.4):** linear/radial gradient, luminance range and colour range components with add/subtract/intersect, invert, feather, edge shift, local adjustments and an overlay.
-- **Export (§3.5, §3.7):** JPEG, AVIF, 16-bit PNG/TIFF in sRGB, Display P3 or Adobe RGB with embedded ICC; Rec. 2020 PQ HDR for 16-bit files.
+- **Export (§3.5, §3.7):** JPEG, AVIF, 16-bit PNG/TIFF in sRGB, Display P3 or Adobe RGB with embedded ICC; Rec. 2020 PQ HDR for 16-bit files; upload to Immich or Google Photos.
 - **MCP (§4) and router (§5):** everything listed above.
 
 **Not yet**
@@ -79,5 +81,5 @@ The pipeline works in linear Rec.2020 float. One Rust implementation renders the
 - **Colour and optics:** DCP/ICC camera profiles and LUTs, lens corrections, upright, calibration, embedded-ICC input colour management.
 - **Library features:** smart collections, survey/compare/reference views, brush masks.
 - **HDR and output:** HDR display, merges, tethering, soft proofing, C2PA signing, video, and the Map/Book/Print/Slideshow/Web modules.
-- **Sync and web:** cloud sync, publishing exports back to Immich or Google Photos, the web/PWA build, Adobe `crs:` XMP interop.
+- **Sync and web:** cloud sync, EXIF in exports (capture date for Google Photos uploads), the web/PWA build, Adobe `crs:` XMP interop.
 - **Performance SLAs (§7):** the pipeline runs on the CPU (rayon) over a 1600 px proxy rather than `wgpu`, and the grid is not virtualised for very large catalogs.

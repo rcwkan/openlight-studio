@@ -112,7 +112,8 @@ export type RemoteImport = { folder: string; imported: number; skipped: number; 
 export type AppInfo = { data_dir: string; thumbs_dir: string; exe: string | null; mcp_url: string; mcp_status: string };
 export type HistoryEntry = { id: number; label: string; created_at: string; current: boolean };
 export type Rendered = { hist: Uint32Array[]; image: ImageData };
-export type ExportReq = { ids: number[]; folder: string; format: string; color_space: string; quality: number; max_edge: number | null };
+/** upload: send the renders to Immich / Google Photos instead of keeping them in `folder` */
+export type ExportReq = { ids: number[]; folder: string; format: string; color_space: string; quality: number; max_edge: number | null; upload?: Source | null };
 
 function parseRender(buf: ArrayBuffer): Rendered {
   const dv = new DataView(buf);

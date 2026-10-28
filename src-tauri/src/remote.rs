@@ -1,9 +1,10 @@
 //! Remote photo sources: a local Immich server and Google Photos.
 //!
 //! Originals are downloaded to `<data dir>/remote/<source>/<album>/` and imported like any
-//! folder, so develop, sidecars and export work unchanged. Immich authenticates with an API
-//! key. Google Photos goes through the Picker API (the Library API no longer lists a user's
-//! photos) with the user's own OAuth "Desktop app" client. Secrets live in the OS keychain.
+//! folder, so develop, sidecars and export work unchanged; exports can be uploaded back.
+//! Immich authenticates with an API key. Google Photos goes through the Picker API (the
+//! Library API no longer lists a user's photos, but still accepts uploads) with the user's
+//! own OAuth "Desktop app" client. Secrets live in the OS keychain.
 
 use crate::{
     Core, Settings, ai, catalog,
@@ -201,7 +202,10 @@ pub fn google_connect(core: &Core, client_id: &str, client_secret: &str) -> Resu
             ("client_id", client_id),
             ("redirect_uri", redirect.as_str()),
             ("response_type", "code"),
-            ("scope", "https://www.googleapis.com/auth/photospicker.mediaitems.readonly"),
+            (
+                "scope",
+                "https://www.googleapis.com/auth/photospicker.mediaitems.readonly https://www.googleapis.com/auth/photoslibrary.appendonly",
+            ),
             ("code_challenge", challenge.as_str()),
             ("code_challenge_method", "S256"),
             ("state", state.as_str()),
@@ -326,6 +330,121 @@ pub fn google_import(core: &Core) -> Result<Value, String> {
     })();
     let _ = agent.delete(&format!("{PICKER}/sessions/{id}")).header("Authorization", &bearer).call();
     res
+}
+
+// ---------------------------------------------------------------------------
+// Upload
+// ---------------------------------------------------------------------------
+
+/// Upload rendered exports (`files[i]` shows photo `ids[i]`) to `immich` or `google`.
+/// Returns the uploaded file names.
+pub fn upload(core: &Core, dest: &str, ids: &[i64], files: &[String]) -> Result<Vec<String>, String> {
+    let agent = agent();
+    let one: Box<dyn Fn(i64, &str) -> Result<String, String> + '_> = match dest {
+        "immich" => {
+            let (url, key) = immich(core)?;
+            Box::new(move |id: i64, file: &str| immich_upload(core, &agent, &url, &key, id, file))
+        }
+        "google" => {
+            let bearer = format!("Bearer {}", google_access_token(core)?);
+            Box::new(move |_: i64, file: &str| google_upload(&agent, &bearer, file))
+        }
+        _ => return Err(format!("unknown upload destination '{dest}'")),
+    };
+    let (mut done, mut failed) = (vec![], vec![]);
+    for (i, (&id, file)) in ids.iter().zip(files).enumerate() {
+        match one(id, file) {
+            Ok(name) => done.push(name),
+            Err(e) => failed.push(format!("{}: {e}", file_name(file))),
+        }
+        core.emit("export-progress", json!({"label": "Uploading", "done": i + 1, "total": files.len()}));
+    }
+    if failed.is_empty() {
+        return Ok(done);
+    }
+    Err(format!("uploaded {} of {}; {}", done.len(), files.len(), failed.into_iter().take(3).collect::<Vec<_>>().join("; ")))
+}
+
+fn file_name(path: &str) -> String {
+    Path::new(path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
+/// Capture time in UTC for Immich's required `fileCreatedAt` (EXIF times are read as this
+/// computer's local time), else now. The file's own EXIF date wins where it has one.
+const TAKEN_UTC: &str = "SELECT COALESCE(strftime('%Y-%m-%dT%H:%M:%SZ', captured_at, 'utc'), \
+                         strftime('%Y-%m-%dT%H:%M:%SZ', 'now')) FROM photos WHERE id = ?";
+
+fn immich_upload(core: &Core, agent: &ureq::Agent, url: &str, key: &str, id: i64, file: &str) -> Result<String, String> {
+    let taken: String = core.db().query_row(TAKEN_UTC, [id], |r| r.get(0)).map_err(es)?;
+    let name = file_name(file);
+    let device_asset_id = format!("openlight-{}", crate::new_token());
+    // deviceAssetId/deviceId are required before Immich 3 and ignored after.
+    let fields = [
+        ("deviceAssetId", device_asset_id.as_str()),
+        ("deviceId", "openlight-studio"),
+        ("fileCreatedAt", taken.as_str()),
+        ("fileModifiedAt", taken.as_str()),
+    ];
+    let (content_type, body) = multipart(&fields, &name, &fs::read(file).map_err(es)?);
+    let reply = agent.post(&format!("{url}/api/assets")).header("x-api-key", key).header("content-type", &content_type).send(&body[..]);
+    json_of("Immich", reply)?; // 201 created, or 200 when Immich already has these exact bytes
+    Ok(name)
+}
+
+/// `multipart/form-data`: text fields, then the file as `assetData`. Export names are
+/// already free of quotes and control characters.
+fn multipart(fields: &[(&str, &str)], file_name: &str, data: &[u8]) -> (String, Vec<u8>) {
+    let b = format!("openlight{}", crate::new_token());
+    let mut body = vec![];
+    for (k, v) in fields {
+        body.extend_from_slice(format!("--{b}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n").as_bytes());
+    }
+    body.extend_from_slice(
+        format!("--{b}\r\nContent-Disposition: form-data; name=\"assetData\"; filename=\"{file_name}\"\r\nContent-Type: application/octet-stream\r\n\r\n")
+            .as_bytes(),
+    );
+    body.extend_from_slice(data);
+    body.extend_from_slice(format!("\r\n--{b}--\r\n").as_bytes());
+    (format!("multipart/form-data; boundary={b}"), body)
+}
+
+/// Library API upload: raw bytes for an upload token, then create the media item.
+/// ponytail: one batchCreate per file; send up to 50 per call if API quota ever matters
+fn google_upload(agent: &ureq::Agent, bearer: &str, file: &str) -> Result<String, String> {
+    let name = file_name(file);
+    let mime = match Path::new(&name).extension().and_then(|e| e.to_str()).unwrap_or("") {
+        "avif" => "image/avif",
+        "png" => "image/png",
+        "tif" => "image/tiff",
+        _ => "image/jpeg",
+    };
+    let mut r = agent
+        .post("https://photoslibrary.googleapis.com/v1/uploads")
+        .header("Authorization", bearer)
+        .header("Content-Type", "application/octet-stream")
+        .header("X-Goog-Upload-Content-Type", mime)
+        .header("X-Goog-Upload-Protocol", "raw")
+        .send(fs::File::open(file).map_err(es)?)
+        .map_err(es)?;
+    let status = r.status().as_u16();
+    let token = r.body_mut().read_to_string().map_err(es)?;
+    if status >= 400 {
+        // Signed in before uploads existed: the token lacks photoslibrary.appendonly.
+        let hint = if token.contains("insufficient") { " (disconnect Google Photos and sign in again to allow uploads)" } else { "" };
+        return Err(format!("HTTP {status}: {}{hint}", token.chars().take(300).collect::<String>()));
+    }
+    let v = json_of(
+        "Google Photos",
+        agent
+            .post("https://photoslibrary.googleapis.com/v1/mediaItems:batchCreate")
+            .header("Authorization", bearer)
+            .send_json(json!({"newMediaItems": [{"simpleMediaItem": {"fileName": name, "uploadToken": token}}]})),
+    )?;
+    let st = &v["newMediaItemResults"][0]["status"];
+    match st["code"].as_i64().unwrap_or(0) {
+        0 => Ok(name),
+        _ => Err(st["message"].as_str().unwrap_or("Google Photos rejected the file").into()),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -468,8 +587,9 @@ mod tests {
         std::thread::spawn(move || {
             for mut req in server.incoming_requests() {
                 assert!(req.headers().iter().any(|h| h.field.equiv("x-api-key") && h.value.as_str() == "k"));
-                let mut body = String::new();
-                req.as_reader().read_to_string(&mut body).unwrap();
+                let mut bytes = vec![];
+                req.as_reader().read_to_end(&mut bytes).unwrap();
+                let body = String::from_utf8_lossy(&bytes);
                 let (ct, data) = match req.url() {
                     "/api/albums" => ("application/json", json!([{"id": "a1", "albumName": "Trip/2024", "assetCount": 3}]).to_string().into_bytes()),
                     "/api/search/metadata" => {
@@ -482,6 +602,12 @@ mod tests {
                         ("application/json", json!({"assets": {"items": items, "nextPage": if first { json!("2") } else { Value::Null }}}).to_string().into_bytes())
                     }
                     "/api/assets/u-1/original" => ("image/jpeg", jpeg.clone()),
+                    "/api/assets" => {
+                        // EXIF local time → UTC: the day can shift with this machine's time zone.
+                        assert!(body.contains("name=\"assetData\"; filename=\"IMG_1_u1.jpg\""), "{body}");
+                        assert!(body.contains("name=\"fileCreatedAt\"\r\n\r\n2024-0"), "{body}");
+                        ("application/json", json!({"id": "n1", "status": "created"}).to_string().into_bytes())
+                    }
                     _ => ("text/plain", vec![]),
                 };
                 let code = if data.is_empty() { 500 } else { 200 };
@@ -497,6 +623,9 @@ mod tests {
         assert!(dir.join("remote/Immich/Trip_2024/IMG_1_u1.jpg").exists());
         let again = import_from_immich(&core, &url, "k", Some("a1")).unwrap();
         assert_eq!(counts(&again), (Some(0), Some(1), Some(1)), "{again}");
+        let id: i64 = core.db().query_row("UPDATE photos SET captured_at = '2024-05-01 12:34:56' RETURNING id", [], |r| r.get(0)).unwrap();
+        let file = dir.join("remote/Immich/Trip_2024/IMG_1_u1.jpg").display().to_string();
+        assert_eq!(immich_upload(&core, &agent(), &url, "k", id, &file), Ok("IMG_1_u1.jpg".to_string()));
         let _ = fs::remove_dir_all(&dir);
     }
 }

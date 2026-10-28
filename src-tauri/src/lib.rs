@@ -221,7 +221,7 @@ impl Core {
                 target = folder.join(format!("{stem}-{n}.{ext}"));
                 n += 1;
             }
-            develop::export(&img, &target, format, color_space, quality)?;
+            develop::export(&img, &target, format, color_space, quality, p.captured_at.as_deref())?;
             self.emit("export-progress", json!({"done": i + 1, "total": ids.len()}));
             out.push(target.display().to_string());
         }
@@ -357,11 +357,18 @@ struct ExportReq {
     color_space: String,
     quality: u8,
     max_edge: Option<u32>,
+    /// `immich` | `google`: upload the renders instead of keeping them in `folder`.
+    upload: Option<String>,
 }
 
 #[tauri::command(async)]
 fn export_photos(core: St, req: ExportReq) -> Result<Vec<String>, String> {
-    core.export(&req.ids, Path::new(&req.folder), &req.format, &req.color_space, req.quality.clamp(1, 100), req.max_edge)
+    let export = |folder: &Path| core.export(&req.ids, folder, &req.format, &req.color_space, req.quality.clamp(1, 100), req.max_edge);
+    let Some(dest) = &req.upload else { return export(Path::new(&req.folder)) };
+    let tmp = std::env::temp_dir().join(format!("openlight-upload-{}", new_token()));
+    let res = export(&tmp).and_then(|files| remote::upload(&core, dest, &req.ids, &files));
+    let _ = fs::remove_dir_all(&tmp);
+    res
 }
 
 #[tauri::command]

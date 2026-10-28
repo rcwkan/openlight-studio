@@ -5,14 +5,14 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "app": "tauri dev",
+    "app": "./scripts/dev.sh",
     "build": "tsc && vite build",
-    "build:app": "tauri build",
+    "build:app": "./scripts/build.sh",
     "preview": "vite preview",
     "tauri": "tauri",
     "test:rs": "cargo test --manifest-path src-tauri/Cargo.toml",
-    "test": "npm run build && npm run test:rs",
-    "mcp": "cargo run --manifest-path src-tauri/Cargo.toml -- --mcp-stdio"
+    "test": "./scripts/test.sh",
+    "mcp": "./scripts/mcp.sh"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

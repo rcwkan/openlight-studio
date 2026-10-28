@@ -246,31 +246,33 @@ const lastFolder = () => {
   }
 };
 
-export function ExportDialog({ ids, onClose }: { ids: number[]; onClose: () => void }) {
+export function ExportDialog({ ids, settings, onClose }: { ids: number[]; settings: Settings | null; onClose: () => void }) {
   const [format, setFormat] = useState("JPEG");
   const [space, setSpace] = useState("sRGB");
   const [quality, setQuality] = useState(90);
   const [edge, setEdge] = useState("");
   const [folder, setFolder] = useState(lastFolder);
+  const [dest, setDest] = useState<Source | "">(""); // "" = folder
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState("");
   const [result, setResult] = useState<string | null>(null);
   useEffect(() => {
-    const un = listen<{ done: number; total: number }>("export-progress", (e) => setProgress(`${e.payload.done}/${e.payload.total}`));
+    const un = listen<{ label?: string; done: number; total: number }>("export-progress", (e) => setProgress(`${e.payload.label ?? "Exporting"} ${e.payload.done}/${e.payload.total}`));
     return () => void un.then((f) => f());
   }, []);
   const hdrOk = format === "PNG_16" || format === "TIFF_16";
   const run = async () => {
     setBusy(true);
     setResult(null);
+    setProgress("");
     try {
       localStorage.setItem("ols.exportFolder", folder);
     } catch {
       /* per-viewer convenience only */
     }
     try {
-      const files = await api.export({ ids, folder, format, color_space: space, quality, max_edge: edge ? +edge : null });
-      setResult(`Exported ${files.length} file(s) to ${folder}`);
+      const files = await api.export({ ids, folder, format, color_space: space, quality, max_edge: edge ? +edge : null, upload: dest || null });
+      setResult(dest ? `Uploaded ${files.length} photo(s) to ${dest === "immich" ? "Immich" : "Google Photos"}` : `Exported ${files.length} file(s) to ${folder}`);
     } catch (e) {
       setResult(`Export failed: ${e}`);
     }
@@ -306,26 +308,40 @@ export function ExportDialog({ ids, onClose }: { ids: number[]; onClose: () => v
           )}
           <span className="text-neutral-400">Long edge (px)</span>
           <input className={field} placeholder="Full resolution" value={edge} onChange={(e) => setEdge(e.target.value.replace(/\D/g, ""))} />
-          <span className="text-neutral-400">Folder</span>
-          <div className="flex gap-1">
-            <input className={`${field} min-w-0 flex-1`} value={folder} onChange={(e) => setFolder(e.target.value)} placeholder="Choose a destination" />
-            <Btn
-              onClick={async () => {
-                const d = await open({ directory: true, defaultPath: folder || undefined });
-                if (typeof d === "string") setFolder(d);
-              }}
-            >
-              Choose…
-            </Btn>
-          </div>
+          <span className="text-neutral-400">Destination</span>
+          <select className={field} value={dest} onChange={(e) => setDest(e.target.value as Source | "")}>
+            <option value="">Folder</option>
+            <option value="immich" disabled={!settings?.immich_url}>
+              Upload to Immich{settings?.immich_url ? "" : " — connect it in Library first"}
+            </option>
+            <option value="google" disabled={!settings?.google_client_id}>
+              Upload to Google Photos{settings?.google_client_id ? "" : " — connect it in Library first"}
+            </option>
+          </select>
+          {!dest && (
+            <>
+              <span className="text-neutral-400">Folder</span>
+              <div className="flex gap-1">
+                <input className={`${field} min-w-0 flex-1`} value={folder} onChange={(e) => setFolder(e.target.value)} placeholder="Choose a destination" />
+                <Btn
+                  onClick={async () => {
+                    const d = await open({ directory: true, defaultPath: folder || undefined });
+                    if (typeof d === "string") setFolder(d);
+                  }}
+                >
+                  Choose…
+                </Btn>
+              </div>
+            </>
+          )}
         </div>
         {result && <p className={result.startsWith("Export failed") ? "text-red-400" : "text-emerald-400"}>{result}</p>}
         <div className="flex justify-end gap-2">
           <Btn onClick={onClose} disabled={busy}>
             Close
           </Btn>
-          <Btn active onClick={run} disabled={busy || !folder || (space === "Rec2020_HDR" && !hdrOk)}>
-            {busy ? `Exporting ${progress}` : "Export"}
+          <Btn active onClick={run} disabled={busy || (!dest && !folder) || (space === "Rec2020_HDR" && !hdrOk)}>
+            {busy ? progress || "Exporting…" : dest ? "Upload" : "Export"}
           </Btn>
         </div>
       </div>
@@ -384,8 +400,8 @@ export function RemoteDialog({ source, settings, setSettings, onImport, onClose 
             </div>
             <p className="text-[11px] text-neutral-500">
               {immich
-                ? "Create a key in Immich under Account Settings → API Keys with album.read, asset.read and asset.download. It is stored in the OS keychain."
-                : "In Google Cloud Console, enable the Photos Picker API, create an OAuth client of type Desktop app and add your account as a test user. Signing in opens your browser."}
+                ? "Create a key in Immich under Account Settings → API Keys with album.read, asset.read and asset.download (plus asset.upload to upload exports). It is stored in the OS keychain."
+                : "In Google Cloud Console, enable the Photos Picker API (and the Photos Library API to upload exports), create an OAuth client of type Desktop app and add your account as a test user. Signing in opens your browser."}
             </p>
           </>
         ) : immich ? (
@@ -407,7 +423,7 @@ export function RemoteDialog({ source, settings, setSettings, onImport, onClose 
         )}
         {connected && (
           <p className="text-[11px] text-neutral-500">
-            Originals download into the catalog folder; formats OpenLight can't open (HEIC, video) are skipped.
+            Originals download into the catalog folder; formats OpenLight can't open (HEIC, video) are skipped. To upload edits, pick this destination in Export.
             {immich && " Albums shared with you import only the photos in your own library."}
           </p>
         )}

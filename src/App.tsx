@@ -219,7 +219,7 @@ export default function App() {
         />
       )}
       {module === "agent" && <Agent info={info} settings={settings} setSettings={setSettings} logs={logs} clearLogs={() => setLogs([])} />}
-      {exportIds && exportIds.length > 0 && <ExportDialog ids={exportIds} onClose={() => setExportIds(null)} />}
+      {exportIds && exportIds.length > 0 && <ExportDialog ids={exportIds} settings={settings} onClose={() => setExportIds(null)} />}
       {remote && settings && (
         <RemoteDialog source={remote} settings={settings} setSettings={setSettings} onImport={(album) => importRemote(remote, album)} onClose={() => setRemote(null)} />
       )}

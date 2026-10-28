@@ -1462,8 +1462,40 @@ pub fn file_ext(format: &str) -> &'static str {
     }
 }
 
-/// Encode with an embedded ICC profile. Rec2020_HDR writes PQ-encoded 16-bit files.
-pub fn export(img: &Img, out: &Path, format: &str, color_space: &str, quality: u8) -> Result<(), String> {
+/// Minimal big-endian EXIF block: IFD0 → Exif IFD → DateTimeOriginal. `taken` is the
+/// catalog's "YYYY-MM-DD HH:MM:SS" (local time, as read on import); anything else gives None.
+fn exif_taken(taken: &str) -> Option<Vec<u8>> {
+    let shape = |(i, c): (usize, &u8)| match i {
+        4 | 7 => *c == b'-',
+        10 => *c == b' ',
+        13 | 16 => *c == b':',
+        _ => c.is_ascii_digit(),
+    };
+    if taken.len() != 19 || !taken.as_bytes().iter().enumerate().all(shape) || taken.starts_with("0000") {
+        return None;
+    }
+    let mut e = b"MM\0\x2a\0\0\0\x08".to_vec(); // TIFF header, IFD0 at 8
+    e.extend([0, 1, 0x87, 0x69, 0, 4, 0, 0, 0, 1, 0, 0, 0, 26, 0, 0, 0, 0]); // IFD0: ExifIFDPointer (LONG) → 26
+    e.extend([0, 1, 0x90, 0x03, 0, 2, 0, 0, 0, 20, 0, 0, 0, 44, 0, 0, 0, 0]); // Exif IFD: DateTimeOriginal (ASCII[20]) at 44
+    e.extend(taken.replacen('-', ":", 2).as_bytes());
+    e.push(0);
+    Some(e)
+}
+
+/// Best effort: an encoder that can't carry ICC or EXIF (TIFF has no EXIF here) still writes the pixels.
+fn tagged<E: ImageEncoder>(mut e: E, icc: Option<Vec<u8>>, exif: Option<Vec<u8>>) -> E {
+    if let Some(i) = icc {
+        let _ = e.set_icc_profile(i);
+    }
+    if let Some(x) = exif {
+        let _ = e.set_exif_metadata(x);
+    }
+    e
+}
+
+/// Encode with an embedded ICC profile and, when the capture time is known, an EXIF
+/// DateTimeOriginal (JPEG, PNG, AVIF). Rec2020_HDR writes PQ-encoded 16-bit files.
+pub fn export(img: &Img, out: &Path, format: &str, color_space: &str, quality: u8, taken: Option<&str>) -> Result<(), String> {
     use image::codecs::{avif::AvifEncoder, jpeg::JpegEncoder, png::PngEncoder, tiff::TiffEncoder};
     use moxcms::ColorProfile;
     let hdr = color_space == "Rec2020_HDR";
@@ -1495,32 +1527,15 @@ pub fn export(img: &Img, out: &Path, format: &str, color_space: &str, quality: u
         .collect();
     let (w, h) = (img.w as u32, img.h as u32);
     let icc = profile.encode().ok();
+    let exif = taken.and_then(exif_taken);
     let file = std::io::BufWriter::new(std::fs::File::create(out).map_err(es)?);
     let to8 = || ImageBuffer::from_raw(w, h, enc.iter().map(|v| (v * 255.0 + 0.5) as u8).collect()).map(DynamicImage::ImageRgb8);
     let to16 = || ImageBuffer::from_raw(w, h, enc.iter().map(|v| (v * 65535.0 + 0.5) as u16).collect()).map(DynamicImage::ImageRgb16);
     let res = match format {
-        "JPEG" => {
-            let mut e = JpegEncoder::new_with_quality(file, quality);
-            if let Some(i) = icc {
-                let _ = e.set_icc_profile(i);
-            }
-            to8().ok_or("buffer")?.write_with_encoder(e)
-        }
-        "AVIF" => to8().ok_or("buffer")?.write_with_encoder(AvifEncoder::new_with_speed_quality(file, 6, quality)),
-        "PNG_16" => {
-            let mut e = PngEncoder::new(file);
-            if let Some(i) = icc {
-                let _ = e.set_icc_profile(i);
-            }
-            to16().ok_or("buffer")?.write_with_encoder(e)
-        }
-        "TIFF_16" => {
-            let mut e = TiffEncoder::new(file);
-            if let Some(i) = icc {
-                let _ = e.set_icc_profile(i);
-            }
-            to16().ok_or("buffer")?.write_with_encoder(e)
-        }
+        "JPEG" => to8().ok_or("buffer")?.write_with_encoder(tagged(JpegEncoder::new_with_quality(file, quality), icc, exif)),
+        "AVIF" => to8().ok_or("buffer")?.write_with_encoder(tagged(AvifEncoder::new_with_speed_quality(file, 6, quality), None, exif)),
+        "PNG_16" => to16().ok_or("buffer")?.write_with_encoder(tagged(PngEncoder::new(file), icc, exif)),
+        "TIFF_16" => to16().ok_or("buffer")?.write_with_encoder(tagged(TiffEncoder::new(file), icc, exif)),
         f => return Err(format!("format '{f}' is not supported in this build ({})", EXPORT_FORMATS.join(", "))),
     };
     res.map_err(es)
@@ -1547,6 +1562,23 @@ mod tests {
         // sRGB -> working -> sRGB round-trips 8-bit values
         let rgba = to_rgba8(&out);
         assert!((rgba[4 * 10] as i32 - (10.0 / 64.0 * 255.0) as i32).abs() <= 1);
+    }
+
+    #[test]
+    fn exports_carry_the_capture_date() {
+        let dir = std::env::temp_dir().join(format!("ols-exif-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (format, ext) in [("JPEG", "jpg"), ("PNG_16", "png"), ("AVIF", "avif")] {
+            let out = dir.join(format!("taken.{ext}"));
+            export(&gradient(), &out, format, "sRGB", 90, Some("2024-05-01 12:34:56")).unwrap();
+            let mut file = std::io::BufReader::new(std::fs::File::open(&out).unwrap());
+            let ex = exif::Reader::new().read_from_container(&mut file).unwrap();
+            let date = ex.get_field(exif::Tag::DateTimeOriginal, exif::In::PRIMARY).map(|f| f.display_value().to_string());
+            assert_eq!(date.as_deref(), Some("2024-05-01 12:34:56"), "{format}");
+        }
+        assert_eq!(exif_taken("0000-00-00 00:00:00"), None);
+        assert_eq!(exif_taken("2024:05:01 12:34:56"), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
