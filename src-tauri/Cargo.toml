@@ -1,0 +1,54 @@
+[package]
+name = "openlight-studio"
+version = "0.1.0"
+description = "OpenLight Studio: non-destructive RAW processor and DAM with a built-in MCP server"
+authors = ["OpenLight Studio contributors"]
+license = "MPL-2.0 OR GPL-3.0-or-later"
+edition = "2024"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "openlight_studio_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri-plugin-dialog = "2"
+rusqlite = { version = "0.41.0", features = ["bundled"] }
+image = "0.25.10"
+kamadak-exif = "0.6.1"
+rayon = "1.12.0"
+tiny_http = "0.12.0"
+base64 = "0.23.1"
+shlex = "2.0.1"
+dirs = "7.0.0"
+rawler = "0.8.0"
+getrandom = "0.4.3"
+ureq = { version = "3.5.0", features = ["json"] }
+keyring = "4.2.0"
+moxcms = "0.8.1"
+ring = "0.17"
+
+
+# Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+strip = true
+
+# Pixel loops and image codecs are unusably slow unoptimised.
+[profile.dev]
+opt-level = 2
+
+[profile.dev.package."*"]
+opt-level = 3

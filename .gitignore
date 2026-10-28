@@ -1,0 +1,56 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Dependencies and build outputs
+node_modules
+dist
+dist-ssr
+*.local
+target/
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.cert
+*.crt
+*.p12
+*.pfx
+credentials.json
+
+# Local user catalog, settings and cached downloads
+settings.json
+*.olcat
+*.olcat-wal
+*.olcat-shm
+thumbs/
+remote/
+*.olxmp
+
+# Editor and OS directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.claude
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+*~
+*.bak
+
