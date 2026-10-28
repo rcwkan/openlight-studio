@@ -69,7 +69,7 @@ pub fn default_providers() -> Vec<Provider> {
     };
     vec![
         p("cli:claude", "cli", "Claude CLI", "claude -p {{AGENT_PROMPT}} --mcp-config {{MCP_CONFIG_PATH}} --allowedTools mcp__openlight --max-turns 20 --output-format json", "", ""),
-        p("cli:antigravity", "cli", "Antigravity CLI", "antigravity run --mcp-server {{MCP_SSE_URL}} --context-file {{IMAGE_PATH}} --context-file {{TELEMETRY_PATH}} --prompt {{AGENT_PROMPT}} --format json", "", ""),
+        p("cli:antigravity", "cli", "Antigravity CLI", "antigravity -p {{AGENT_PROMPT}} --dangerously-skip-permissions", "", ""),
         p("cli:custom", "cli", "Custom CLI agent", "", "", ""),
         p("ollama:qwen2.5vl", "ollama", "Ollama (local)", "", "http://127.0.0.1:11434", "qwen2.5vl:7b"),
         p("local-api:lmstudio", "openai", "LM Studio / vLLM / llama.cpp", "", "http://127.0.0.1:1234/v1", "local-model"),
@@ -152,6 +152,41 @@ fn user_path() -> &'static str {
         }
         current
     })
+}
+
+pub fn find_binary(prog: &str) -> PathBuf {
+    let p = std::path::Path::new(prog);
+    if p.is_absolute() || p.components().count() > 1 {
+        return p.to_path_buf();
+    }
+    let aliases: &[&str] = match prog {
+        "antigravity" => &["antigravity", "agy"],
+        "agy" => &["agy", "antigravity"],
+        _ => &[prog],
+    };
+    for name in aliases {
+        for dir in std::env::split_paths(user_path()) {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+        if let Some(home) = dirs::home_dir() {
+            for dir in [
+                home.join(".local/bin"),
+                home.join(".cargo/bin"),
+                PathBuf::from("/opt/homebrew/bin"),
+                PathBuf::from("/usr/local/bin"),
+                home.join(".gemini/bin"),
+            ] {
+                let candidate = dir.join(name);
+                if candidate.is_file() {
+                    return candidate;
+                }
+            }
+        }
+    }
+    p.to_path_buf()
 }
 
 /// Files and data handed to a provider for one pass.
@@ -268,9 +303,9 @@ fn run_cli(core: &Arc<Core>, p: &Provider, id: i64, prompt: &str, dir: &PathBuf)
         .map(|w| vars.iter().fold(w, |w, (k, v)| w.replace(&format!("{{{{{k}}}}}"), v)))
         .collect();
     let (prog, args) = argv.split_first().ok_or("empty command")?;
-    core.log(&p.id, format!("running {prog} in {}", snap.dir.display()));
-    // ponytail: inherits the user's environment (agents need their auth/config); add an env allowlist if untrusted templates appear
-    let mut child = Command::new(prog)
+    let prog_path = find_binary(prog);
+    core.log(&p.id, format!("running {} in {}", prog_path.display(), snap.dir.display()));
+    let mut child = Command::new(&prog_path)
         .args(args)
         .current_dir(&snap.dir)
         .env("PATH", user_path())
@@ -281,7 +316,7 @@ fn run_cli(core: &Arc<Core>, p: &Provider, id: i64, prompt: &str, dir: &PathBuf)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("could not start '{prog}': {e}"))?;
+        .map_err(|e| format!("could not start '{prog}' (resolved to '{}'): {e}", prog_path.display()))?;
     let drain = |r: Option<Box<dyn Read + Send>>| {
         std::thread::spawn(move || {
             let mut s = String::new();

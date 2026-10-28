@@ -49,7 +49,16 @@ impl Default for Settings {
 
 impl Settings {
     pub fn load(dir: &Path) -> Settings {
-        fs::read_to_string(dir.join("settings.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+        let mut s: Settings = fs::read_to_string(dir.join("settings.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        for p in &mut s.providers {
+            if p.id == "cli:antigravity" && (p.command.starts_with("antigravity run") || p.command.is_empty()) {
+                p.command = "antigravity -p {{AGENT_PROMPT}} --dangerously-skip-permissions".into();
+            }
+        }
+        s
     }
 }
 
