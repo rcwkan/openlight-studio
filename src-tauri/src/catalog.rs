@@ -57,6 +57,11 @@ CREATE TABLE IF NOT EXISTS history (
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS history_photo ON history(photo_id, id);
+CREATE TABLE IF NOT EXISTS immich_albums (
+  album TEXT NOT NULL,
+  path TEXT NOT NULL,
+  PRIMARY KEY (album, path)
+);
 ";
 
 pub fn open(path: &Path) -> Result<Connection, String> {
@@ -135,6 +140,8 @@ pub struct Filter {
     pub color_label: Option<String>,
     pub edited: Option<bool>,
     pub ids: Option<Vec<i64>>,
+    /// Pages of an Immich album loaded so far (album id, or "favorites").
+    pub immich_album: Option<String>,
     pub limit: Option<i64>,
 }
 
@@ -187,7 +194,14 @@ pub fn query(c: &Connection, f: &Filter) -> Result<Vec<Photo>, String> {
         sql += " AND (edited_at IS NOT NULL) = ?";
         args.push(e.into());
     }
+    if let Some(album) = &f.immich_album {
+        sql += " AND path IN (SELECT path FROM immich_albums WHERE album = ?)";
+        args.push(album.clone().into());
+    }
     if let Some(ids) = &f.ids {
+        if ids.is_empty() {
+            return Ok(vec![]); // e.g. an empty Immich album; `IN ()` is not valid SQL
+        }
         sql += &format!(" AND id IN ({})", vec!["?"; ids.len()].join(","));
         args.extend(ids.iter().map(|i| Sql::from(*i)));
     }
@@ -198,8 +212,11 @@ pub fn query(c: &Connection, f: &Filter) -> Result<Vec<Photo>, String> {
     rows.collect::<Result<_, _>>().map_err(es)
 }
 
+/// Local folders only; Immich rows are browsed through their albums.
 pub fn folders(c: &Connection) -> Result<Vec<(String, i64)>, String> {
-    let mut st = c.prepare("SELECT folder, COUNT(*) FROM photos GROUP BY folder ORDER BY folder").map_err(es)?;
+    let mut st = c
+        .prepare("SELECT folder, COUNT(*) FROM photos WHERE path NOT LIKE 'immich://%' GROUP BY folder ORDER BY folder")
+        .map_err(es)?;
     let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).map_err(es)?;
     rows.collect::<Result<_, _>>().map_err(es)
 }
@@ -247,12 +264,20 @@ pub fn update(c: &Connection, ids: &[i64], u: &Culling) -> Result<usize, String>
     c.execute(&sql, params_from_iter(args)).map_err(es)
 }
 
-pub fn remove(c: &Connection, ids: &[i64]) -> Result<(), String> {
-    let list = vec!["?"; ids.len()].join(",");
-    let args: Vec<Sql> = ids.iter().chain(ids).map(|i| Sql::from(*i)).collect();
-    c.execute(&format!("DELETE FROM photos WHERE id IN ({list}) OR master_id IN ({list})"), params_from_iter(args))
-        .map_err(es)?;
-    Ok(())
+/// Removes photos and their virtual copies; returns every id that went.
+pub fn remove(c: &Connection, ids: &[i64]) -> Result<Vec<i64>, String> {
+    let mut gone = vec![];
+    for ids in ids.chunks(10_000) {
+        // two variables per id; SQLite allows 32766
+        let list = vec!["?"; ids.len()].join(",");
+        let args: Vec<Sql> = ids.iter().chain(ids).map(|i| Sql::from(*i)).collect();
+        let mut st = c
+            .prepare(&format!("DELETE FROM photos WHERE id IN ({list}) OR master_id IN ({list}) RETURNING id"))
+            .map_err(es)?;
+        let rows = st.query_map(params_from_iter(args), |r| r.get(0)).map_err(es)?;
+        gone.extend(rows.collect::<Result<Vec<i64>, _>>().map_err(es)?);
+    }
+    Ok(gone)
 }
 
 // ---------------------------------------------------------------------------
@@ -325,6 +350,25 @@ pub fn step(c: &Connection, id: i64, dir: i32) -> Result<Option<Develop>, String
     target.map(|t| goto(c, id, t)).transpose()
 }
 
+/// Undo steps: every history step but each photo's current one.
+const PAST_STEPS: &str = "FROM history WHERE id NOT IN (SELECT history_pos FROM photos WHERE history_pos IS NOT NULL)";
+
+/// (steps, bytes) that `clear_history` would drop.
+pub fn past_steps(c: &Connection) -> Result<(i64, i64), String> {
+    c.query_row(&format!("SELECT COUNT(*), COALESCE(SUM(LENGTH(develop_json)), 0) {PAST_STEPS}"), [], |r| Ok((r.get(0)?, r.get(1)?)))
+        .map_err(es)
+}
+
+/// Drops the undo steps; every photo keeps its current edit.
+pub fn clear_history(c: &Connection) -> Result<usize, String> {
+    c.execute(&format!("DELETE {PAST_STEPS}"), []).map_err(es)
+}
+
+/// Rewrites the catalog without its free pages and empties the write-ahead log.
+pub fn compact(c: &Connection) -> Result<(), String> {
+    c.execute_batch("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);").map_err(es)
+}
+
 pub fn virtual_copy(c: &Connection, id: i64) -> Result<i64, String> {
     let master: i64 =
         c.query_row("SELECT COALESCE(master_id, id) FROM photos WHERE id = ?", [id], |r| r.get(0)).map_err(es)?;
@@ -383,11 +427,11 @@ pub fn read_sidecar(path: &Path) -> Option<Develop> {
     serde_json::from_value(v.get("pipeline")?.clone()).ok()
 }
 
-/// Masters only (virtual copies live in the catalog, as in Lightroom). Best effort:
-/// read-only volumes just skip the sidecar.
+/// Masters only (virtual copies live in the catalog, as in Lightroom); Immich photos keep
+/// their edits in the catalog. Best effort: read-only volumes just skip the sidecar.
 /// ponytail: OpenLight JSON only; read/write Adobe `crs:` XMP when ACR round-trips matter.
 pub fn write_sidecar(p: &Photo, d: &Develop) {
-    if p.master_id.is_some() {
+    if p.master_id.is_some() || crate::remote::immich_id(&p.path).is_some() {
         return;
     }
     let doc = json!({"schema_version": "1.0.0", "photo_id": format!("ols:{}", p.id), "source": p.filename, "pipeline": d});
@@ -401,15 +445,59 @@ pub fn write_sidecar(p: &Photo, d: &Develop) {
 // ---------------------------------------------------------------------------
 
 #[derive(Default)]
-struct Meta {
-    captured_at: Option<String>,
-    camera: Option<String>,
-    lens: Option<String>,
-    iso: Option<i64>,
-    aperture: Option<f64>,
-    shutter: Option<String>,
-    focal_length: Option<f64>,
-    orientation: u8,
+pub struct Meta {
+    pub captured_at: Option<String>,
+    pub camera: Option<String>,
+    pub lens: Option<String>,
+    pub iso: Option<i64>,
+    pub aperture: Option<f64>,
+    pub shutter: Option<String>,
+    pub focal_length: Option<f64>,
+    pub orientation: u8,
+}
+
+/// New master row with its first history step; None when `path` is already in the catalog.
+pub fn add_photo(c: &Connection, path: &str, folder: &str, filename: &str, m: &Meta, d: &Develop) -> Result<Option<i64>, String> {
+    let json = serde_json::to_string(d).map_err(es)?;
+    let n = c
+        .execute(
+            "INSERT OR IGNORE INTO photos (path, folder, filename, captured_at, camera, lens, iso, aperture, shutter,
+               focal_length, develop_json, edited_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? THEN datetime('now') END)",
+            params![
+                path,
+                folder,
+                filename,
+                m.captured_at,
+                m.camera,
+                m.lens,
+                m.iso,
+                m.aperture,
+                m.shutter,
+                m.focal_length,
+                json,
+                *d != Develop::default(),
+            ],
+        )
+        .map_err(es)?;
+    if n == 0 {
+        return Ok(None);
+    }
+    let id = c.last_insert_rowid();
+    c.execute("INSERT INTO history (photo_id, label, develop_json) VALUES (?, 'Import', ?)", params![id, json]).map_err(es)?;
+    c.execute("UPDATE photos SET history_pos = ? WHERE id = ?", params![c.last_insert_rowid(), id]).map_err(es)?;
+    Ok(Some(id))
+}
+
+/// "Make Model" without repeating the brand ("Canon" + "Canon EOS R5" → "Canon EOS R5").
+pub fn camera_name(make: Option<String>, model: Option<String>) -> Option<String> {
+    match (make, model) {
+        (Some(mk), Some(md)) => {
+            let brand = mk.split_whitespace().next().unwrap_or("").to_lowercase();
+            Some(if md.to_lowercase().starts_with(&brand) { md } else { format!("{mk} {md}") })
+        }
+        (mk, md) => md.or(mk),
+    }
 }
 
 fn read_exif(path: &Path) -> Meta {
@@ -428,13 +516,7 @@ fn read_exif(path: &Path) -> Meta {
         })
     };
     m.captured_at = s(Tag::DateTimeOriginal).or_else(|| s(Tag::DateTime));
-    m.camera = match (s(Tag::Make), s(Tag::Model)) {
-        (Some(mk), Some(md)) => {
-            let brand = mk.split_whitespace().next().unwrap_or("").to_lowercase();
-            Some(if md.to_lowercase().starts_with(&brand) { md } else { format!("{mk} {md}") })
-        }
-        (mk, md) => md.or(mk),
-    };
+    m.camera = camera_name(s(Tag::Make), s(Tag::Model));
     m.lens = s(Tag::LensModel);
     m.iso = field(Tag::PhotographicSensitivity).and_then(|f| f.value.get_uint(0)).map(i64::from);
     m.aperture = f(Tag::FNumber);
@@ -515,34 +597,9 @@ pub fn import(core: &Core, folder: &Path, progress: &(dyn Fn(usize, usize) + Syn
         let mut c = core.db();
         let tx = c.transaction().map_err(es)?;
         for (p, m, d) in &metas {
-            let json = serde_json::to_string(d).map_err(es)?;
-            let n = tx
-                .execute(
-                    "INSERT OR IGNORE INTO photos (path, folder, filename, captured_at, camera, lens, iso, aperture, shutter,
-                       focal_length, develop_json, edited_at)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? THEN datetime('now') END)",
-                    params![
-                        p.to_string_lossy(),
-                        p.parent().map(|f| f.to_string_lossy().to_string()).unwrap_or_default(),
-                        p.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default(),
-                        m.captured_at,
-                        m.camera,
-                        m.lens,
-                        m.iso,
-                        m.aperture,
-                        m.shutter,
-                        m.focal_length,
-                        json,
-                        *d != Develop::default(),
-                    ],
-                )
-                .map_err(es)?;
-            if n == 1 {
-                let id = tx.last_insert_rowid();
-                tx.execute("INSERT INTO history (photo_id, label, develop_json) VALUES (?, 'Import', ?)", params![id, json])
-                    .map_err(es)?;
-                tx.execute("UPDATE photos SET history_pos = ? WHERE id = ?", params![tx.last_insert_rowid(), id])
-                    .map_err(es)?;
+            let folder = p.parent().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
+            let name = p.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
+            if let Some(id) = add_photo(&tx, &p.to_string_lossy(), &folder, &name, m, d)? {
                 added.push((id, p.clone(), m.orientation));
             }
         }

@@ -31,6 +31,10 @@ export type Filter = {
   flag?: string | null;
   color_label?: string | null;
   edited?: boolean | null;
+  /** Loaded pages of an Immich album (album id, or "favorites") */
+  immich_album?: string | null;
+  /** Sidebar row being shown; UI only, the backend ignores it */
+  view?: string | null;
 };
 
 export type Culling = { rating?: number; flag?: string; color_label?: string; keywords?: string };
@@ -49,7 +53,11 @@ export type MaskComponent = {
   range: number[];
   color: number[];
   tolerance: number;
+  /** polygon: AI outline [x, y] in the full frame */
+  points: number[][];
 };
+/** Object removal: the outline is refilled from the area at `source` (normalised offset). */
+export type Heal = { name: string; points: number[][]; source: number[] };
 export type LocalAdjust = {
   exposure: number;
   contrast: number;
@@ -82,6 +90,7 @@ export type Develop = {
   detail: { sharpening: number; sharpen_radius: number; sharpen_masking: number; color_noise_reduction: number };
   effects: { vignette: number; vignette_midpoint: number; vignette_feather: number };
   crop: { x: number; y: number; w: number; h: number; angle: number };
+  retouch: Heal[];
   masks: Mask[];
   ai_provenance_log: { timestamp?: string; provider?: string; action?: string }[];
 };
@@ -114,6 +123,23 @@ export type HistoryEntry = { id: number; label: string; created_at: string; curr
 export type Rendered = { hist: Uint32Array[]; image: ImageData };
 /** upload: send the renders to Immich / Google Photos instead of keeping them in `folder` */
 export type ExportReq = { ids: number[]; folder: string; format: string; color_space: string; quality: number; max_edge: number | null; upload?: Source | null };
+export type CleanUp = "thumbs" | "originals" | "missing" | "history" | "compact";
+type Named = { name: string; count: number }[];
+/** Sizes in bytes. `folders` are local folders; an offline one is not there at all (e.g. an unplugged drive). */
+export type StorageReport = {
+  data_dir: string;
+  total: number;
+  catalog: number;
+  thumbs: number;
+  originals: number;
+  google: number;
+  summary: { total_photos: number; virtual_copies: number; edited: number; picks: number; rejects: number; rated_3_plus: number; cameras: Named; lenses: Named };
+  immich_photos: number;
+  history_steps: number;
+  ai: { photos: number; edits: number };
+  folders: { folder: string; photos: number; bytes: number; missing: number; online: boolean }[];
+  clean: Record<CleanUp, { count: number; bytes: number }>;
+};
 
 function parseRender(buf: ArrayBuffer): Rendered {
   const dv = new DataView(buf);
@@ -149,11 +175,14 @@ export const api = {
   aiRun: (id: number, prompt: string, provider: string) => invoke<string>("ai_run", { id, prompt, provider }),
   immichConnect: (url: string, key: string) => invoke<Settings>("immich_connect", { url, key }),
   immichAlbums: () => invoke<ImmichAlbum[]>("immich_albums"),
-  /** album null = favorites */
-  immichImport: (album: string | null) => invoke<RemoteImport>("immich_import", { album }),
+  /** Load one page of an album (null = favorites) into the catalog; page 1 starts it over */
+  immichOpen: (album: string | null, page: number) => invoke<{ next: number | null }>("immich_open", { album, page }),
   googleConnect: (clientId: string, clientSecret: string) => invoke<Settings>("google_connect", { clientId, clientSecret }),
   googleImport: () => invoke<RemoteImport>("google_import"),
   remoteDisconnect: (source: Source) => invoke<Settings>("remote_disconnect", { source }),
+  storage: () => invoke<StorageReport>("storage_report"),
+  /** Returns how many files, photos or history steps went */
+  cleanUp: (what: CleanUp) => invoke<number>("clean_up", { what }),
 };
 
 let thumbsDir = "";

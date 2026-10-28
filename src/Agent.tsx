@@ -85,7 +85,7 @@ export function Agent({ info, settings, setSettings, logs, clearLogs }: { info: 
           <Btn className="mt-2" onClick={() => navigator.clipboard.writeText(snippets[client])}>
             Copy with token
           </Btn>
-          <p className="mt-2 text-[11px] text-neutral-500">Tools: catalog_query, culling_batch_update, develop_apply_parameters, mask_create_and_edit, batch_export, photo_inspect. Resources: openlight://catalog/summary, selection/active, photo/{"{id}"}/state|telemetry|preview.</p>
+          <p className="mt-2 text-[11px] text-neutral-500">Tools: catalog_query, culling_batch_update, develop_apply_parameters, mask_create_and_edit, retouch_remove_objects, batch_export, photo_inspect. Resources: openlight://catalog/summary, selection/active, photo/{"{id}"}/state|telemetry|preview.</p>
         </section>
 
         <section className={`${card} flex min-h-64 flex-1 flex-col`}>

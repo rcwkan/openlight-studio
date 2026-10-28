@@ -1,6 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, Culling, Filter, flagName, ImmichAlbum, LABEL_COLORS, LABELS, Photo, Settings, Source, thumbUrl } from "./api";
 import { Btn, Panel, Stars } from "./controls";
 
@@ -16,8 +16,16 @@ type Props = {
   select: (id: number, mods: SelectMods) => void;
   openDevelop: (id: number) => void;
   cull: (u: Culling) => void;
-  onImport: () => void;
-  onRemote: (source: Source) => void;
+  settings: Settings | null;
+  dataDir: string;
+  onAddFolder: () => void;
+  onOpenFolder: (folder: string) => void;
+  onImmich: (album: string | null, name: string) => void;
+  /** Next page of the Immich album being shown, null when it is fully loaded */
+  nextPage: number | null;
+  onLoadMore: () => void;
+  onPickGoogle: () => void;
+  onConnect: (source: Source) => void;
   onExport: () => void;
   onVirtualCopy: () => void;
   onRemove: () => void;
@@ -27,27 +35,82 @@ const short = (folder: string) => folder.split(/[\\/]/).slice(-2).join("/");
 
 export function Library(p: Props) {
   const [size, setSize] = useState(170);
+  const [albums, setAlbums] = useState<ImmichAlbum[]>([]);
   const f = p.filter;
+  const immichUrl = p.settings?.immich_url;
+  useEffect(() => {
+    if (immichUrl) api.immichAlbums().then(setAlbums, () => setAlbums([]));
+  }, [immichUrl]);
+  // Google Photos picks are downloaded into the catalog folder; list them under Google Photos, not Folders.
+  const sep = p.dataDir.includes("\\") ? "\\" : "/";
+  const remoteDir = `${p.dataDir}${sep}remote`;
+  const googleDir = `${remoteDir}${sep}Google Photos`;
+  const local = p.folders.filter(([folder]) => folder !== remoteDir && !folder.startsWith(remoteDir + sep));
+  const show = (patch: Filter) => p.setFilter({ ...f, folder: null, immich_album: null, view: null, ...patch });
+  const gridRef = useRef<HTMLDivElement>(null);
+  const endRef = useRef<HTMLDivElement>(null);
+  const loadMore = useRef(p.onLoadMore);
+  loadMore.current = p.onLoadMore;
+  // Large Immich albums load a page at a time: ask for the next one when the end of the grid
+  // comes near. Observing again after each page keeps loading until the grid overflows.
+  useEffect(() => {
+    if (!p.nextPage || !endRef.current) return;
+    const io = new IntersectionObserver(([e]) => e.isIntersecting && loadMore.current(), { root: gridRef.current, rootMargin: "600px" });
+    io.observe(endRef.current);
+    return () => io.disconnect();
+  }, [p.nextPage, p.photos.length]);
+  const side = "px-1 text-neutral-500 hover:text-white";
+  const manage = (source: Source) => (
+    <button title="Connection" className={side} onClick={() => p.onConnect(source)}>
+      ⋯
+    </button>
+  );
   return (
     <div className="flex min-h-0 flex-1">
       <aside className="flex w-56 shrink-0 flex-col overflow-y-auto border-r border-neutral-800 bg-neutral-900">
-        <Panel title="Catalog">
-          <Btn className="mb-2 w-full" onClick={p.onImport}>
-            Import folder…
-          </Btn>
-          <Btn className="mb-2 w-full" onClick={() => p.onRemote("immich")}>
-            Import from Immich…
-          </Btn>
-          <Btn className="mb-2 w-full" onClick={() => p.onRemote("google")}>
-            Import from Google Photos…
-          </Btn>
-          <FolderRow label="All Photographs" active={!f.folder} onClick={() => p.setFilter({ ...f, folder: null })} />
+        <Panel title="Library">
+          <FolderRow label="All Photographs" active={!f.folder && !f.immich_album} onClick={() => show({})} />
         </Panel>
-        <Panel title="Folders">
-          {p.folders.length === 0 && <p className="text-[11px] text-neutral-500">No folders yet.</p>}
-          {p.folders.map(([folder, n]) => (
-            <FolderRow key={folder} label={short(folder)} title={folder} count={n} active={f.folder === folder} onClick={() => p.setFilter({ ...f, folder })} />
+        <Panel
+          title="Folders"
+          right={
+            <button title="Add a folder" className={side} onClick={p.onAddFolder}>
+              ＋
+            </button>
+          }
+        >
+          {local.length === 0 && <p className="text-[11px] text-neutral-500">Add a folder to browse and edit its photos in place.</p>}
+          {local.map(([folder, n]) => (
+            <FolderRow key={folder} label={short(folder)} title={folder} count={n} active={f.folder === folder} onClick={() => p.onOpenFolder(folder)} />
           ))}
+        </Panel>
+        <Panel title="Immich" right={immichUrl && manage("immich")}>
+          {immichUrl ? (
+            <>
+              <FolderRow label="★ Favorites" active={f.view === "immich:"} onClick={() => p.onImmich(null, "Favorites")} />
+              {albums.map((a) => (
+                <FolderRow key={a.id} label={a.name} count={a.count} active={f.view === `immich:${a.id}`} onClick={() => p.onImmich(a.id, a.name)} />
+              ))}
+            </>
+          ) : (
+            <Btn className="w-full" onClick={() => p.onConnect("immich")}>
+              Connect Immich…
+            </Btn>
+          )}
+        </Panel>
+        <Panel title="Google Photos" right={p.settings?.google_client_id && manage("google")}>
+          {p.settings?.google_client_id ? (
+            <>
+              <Btn className="mb-2 w-full" onClick={p.onPickGoogle}>
+                Pick photos…
+              </Btn>
+              <FolderRow label="Picked photos" count={p.folders.find(([d]) => d === googleDir)?.[1] ?? 0} active={f.folder === googleDir} onClick={() => show({ folder: googleDir })} />
+            </>
+          ) : (
+            <Btn className="w-full" onClick={() => p.onConnect("google")}>
+              Connect Google Photos…
+            </Btn>
+          )}
         </Panel>
       </aside>
 
@@ -91,21 +154,27 @@ export function Library(p: Props) {
           </select>
           <span className="ml-auto text-neutral-500">
             {p.selected.length > 1 ? `${p.selected.length} selected / ` : ""}
-            {p.photos.length} photos
+            {p.photos.length}
+            {p.nextPage ? "+" : ""} photos
           </span>
           <input type="range" className="ol-range w-24" min={110} max={320} value={size} onChange={(e) => setSize(+e.target.value)} title="Thumbnail size" />
         </div>
 
-        {p.photos.length === 0 ? (
+        {p.photos.length === 0 && !p.nextPage ? (
           <div className="flex flex-1 flex-col items-center justify-center gap-3 text-neutral-500">
-            <p>{p.folders.length ? "No photos match the filter." : "Import a folder of JPEG, TIFF, PNG or RAW files to start."}</p>
-            {!p.folders.length && <Btn onClick={p.onImport}>Import folder…</Btn>}
+            <p>{p.folders.length || f.immich_album ? "No photos here." : "Add a folder of JPEG, TIFF, PNG or RAW files, or connect Immich or Google Photos, to start."}</p>
+            {!p.folders.length && !f.immich_album && <Btn onClick={p.onAddFolder}>Add folder…</Btn>}
           </div>
         ) : (
-          <div className="grid flex-1 content-start gap-2 overflow-y-auto p-3" style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${size}px, 1fr))` }}>
+          <div ref={gridRef} className="grid flex-1 content-start gap-2 overflow-y-auto p-3" style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${size}px, 1fr))` }}>
             {p.photos.map((ph) => (
               <Cell key={ph.id} photo={ph} size={size} selected={p.selected.includes(ph.id)} active={p.active?.id === ph.id} onClick={(m) => p.select(ph.id, m)} onOpen={() => p.openDevelop(ph.id)} />
             ))}
+            {p.nextPage && (
+              <div ref={endRef} className="col-span-full py-4 text-center text-[11px] text-neutral-500">
+                Loading more…
+              </div>
+            )}
           </div>
         )}
       </main>
@@ -227,7 +296,9 @@ function Metadata(p: Props & { photo: Photo }) {
       <Panel title="Actions">
         <div className="flex flex-wrap gap-1">
           <Btn onClick={() => p.openDevelop(ph.id)}>Develop</Btn>
-          <Btn onClick={p.onExport}>Export {p.selected.length > 1 ? `${p.selected.length}` : ""}…</Btn>
+          <Btn onClick={p.onExport}>
+            {ph.path.startsWith("immich://") ? "Save to Immich" : "Export"} {p.selected.length > 1 ? `${p.selected.length}` : ""}…
+          </Btn>
           <Btn onClick={p.onVirtualCopy}>Virtual copy</Btn>
           <Btn onClick={p.onRemove} title="Removes from the catalog only; files stay on disk">
             Remove
@@ -246,13 +317,13 @@ const lastFolder = () => {
   }
 };
 
-export function ExportDialog({ ids, settings, onClose }: { ids: number[]; settings: Settings | null; onClose: () => void }) {
+export function ExportDialog({ ids, settings, dest: initialDest = "", onClose }: { ids: number[]; settings: Settings | null; dest?: Source | ""; onClose: () => void }) {
   const [format, setFormat] = useState("JPEG");
   const [space, setSpace] = useState("sRGB");
   const [quality, setQuality] = useState(90);
   const [edge, setEdge] = useState("");
   const [folder, setFolder] = useState(lastFolder);
-  const [dest, setDest] = useState<Source | "">(""); // "" = folder
+  const [dest, setDest] = useState<Source | "">(initialDest); // "" = folder
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState("");
   const [result, setResult] = useState<string | null>(null);
@@ -349,26 +420,21 @@ export function ExportDialog({ ids, settings, onClose }: { ids: number[]; settin
   );
 }
 
-/** Connect Immich / Google Photos and pick what to import; the import itself runs in App (status bar). */
-export function RemoteDialog({ source, settings, setSettings, onImport, onClose }: { source: Source; settings: Settings; setSettings: (s: Settings) => void; onImport: (album: string | null) => void; onClose: () => void }) {
+/** Connect or disconnect Immich / Google Photos; their photos are browsed from the sidebar. */
+export function RemoteDialog({ source, settings, setSettings, onClose }: { source: Source; settings: Settings; setSettings: (s: Settings) => void; onClose: () => void }) {
   const immich = source === "immich";
   const connected = immich ? !!settings.immich_url : !!settings.google_client_id;
   const [url, setUrl] = useState(settings.immich_url);
   const [clientId, setClientId] = useState(settings.google_client_id);
   const [secret, setSecret] = useState(""); // Immich API key or Google client secret
-  const [albums, setAlbums] = useState<ImmichAlbum[]>([]);
-  const [album, setAlbum] = useState(""); // "" = favorites
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
-  useEffect(() => {
-    if (immich && connected) api.immichAlbums().then(setAlbums, (e) => setError(String(e)));
-  }, [immich, connected]);
   const run = async (label: string, job: () => Promise<Settings>) => {
     setBusy(label);
     setError("");
     try {
       setSettings(await job());
-      setSecret("");
+      onClose();
     } catch (e) {
       setError(String(e));
     }
@@ -400,42 +466,26 @@ export function RemoteDialog({ source, settings, setSettings, onImport, onClose 
             </div>
             <p className="text-[11px] text-neutral-500">
               {immich
-                ? "Create a key in Immich under Account Settings → API Keys with album.read, asset.read and asset.download (plus asset.upload to upload exports). It is stored in the OS keychain."
-                : "In Google Cloud Console, enable the Photos Picker API (and the Photos Library API to upload exports), create an OAuth client of type Desktop app and add your account as a test user. Signing in opens your browser."}
+                ? "Create a key in Immich under Account Settings → API Keys with album.read, asset.read, asset.view, asset.download, asset.upload, asset.update and stack.create. It is stored in the OS keychain."
+                : "In Google Cloud Console, enable the Photos Picker API (and the Photos Library API to save edits), create an OAuth client of type Desktop app and add your account as a test user. Signing in opens your browser."}
             </p>
           </>
         ) : immich ? (
-          <div className="grid grid-cols-[110px_1fr] items-center gap-2">
-            <span className="text-neutral-400">Server</span>
-            <span className="truncate text-neutral-200">{settings.immich_url}</span>
-            <span className="text-neutral-400">Import</span>
-            <select className={field} value={album} onChange={(e) => setAlbum(e.target.value)}>
-              <option value="">★ Favorites</option>
-              {albums.map((a) => (
-                <option key={a.id} value={a.id}>
-                  {a.name} ({a.count})
-                </option>
-              ))}
-            </select>
-          </div>
+          <p className="text-neutral-300">
+            Connected to <span className="text-neutral-100">{settings.immich_url}</span>. Albums appear in the sidebar. Opening a photo downloads it once; Save to Immich stacks your edit on top of the
+            original, which stays untouched. Albums shared with you show only the photos in your own library.
+          </p>
         ) : (
-          <p className="text-neutral-300">Signed in. Pick photos opens Google Photos in your browser; press Done there and OpenLight downloads your picks.</p>
-        )}
-        {connected && (
-          <p className="text-[11px] text-neutral-500">
-            Originals download into the catalog folder; formats OpenLight can't open (HEIC, video) are skipped. To upload edits, pick this destination in Export.
-            {immich && " Albums shared with you import only the photos in your own library."}
+          <p className="text-neutral-300">
+            Signed in. Pick photos opens Google Photos in your browser. Google only lets apps open photos you pick and add new ones, so picked photos are downloaded and saving an edit uploads it as
+            a new photo.
           </p>
         )}
         {busy && <p className="text-sky-300">{busy}</p>}
         {error && <p className="break-words text-red-400">{error}</p>}
         <div className="flex justify-end gap-2">
           <Btn onClick={onClose}>Close</Btn>
-          {connected ? (
-            <Btn active disabled={!!busy} onClick={() => (onImport(immich ? album || null : null), onClose())}>
-              {immich ? "Import" : "Pick photos…"}
-            </Btn>
-          ) : (
+          {!connected && (
             <Btn
               active
               disabled={!!busy || !secret || !(immich ? url : clientId)}

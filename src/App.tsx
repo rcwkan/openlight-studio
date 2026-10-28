@@ -5,12 +5,14 @@ import { Agent, Log } from "./Agent";
 import { api, AppInfo, Culling, Develop as Dev, Filter, LABELS, Photo, setThumbsDir, Settings, Source } from "./api";
 import { Develop } from "./Develop";
 import { ExportDialog, Library, RemoteDialog, SelectMods } from "./Library";
+import { SettingsView } from "./Settings";
 
-type Module = "library" | "develop" | "agent";
+type Module = "library" | "develop" | "agent" | "settings";
 const MODULES: [Module, string][] = [
   ["library", "Library"],
   ["develop", "Develop"],
   ["agent", "AI & MCP"],
+  ["settings", "Settings"],
 ];
 
 export default function App() {
@@ -27,6 +29,8 @@ export default function App() {
   const [status, setStatus] = useState("");
   const [exportIds, setExportIds] = useState<number[] | null>(null);
   const [remote, setRemote] = useState<Source | null>(null);
+  const [albumPages, setAlbumPages] = useState<{ album: string | null; next: number | null } | null>(null);
+  const loadingPage = useRef(false);
 
   const reload = useCallback(async () => {
     const [ps, fs] = await Promise.all([api.query(filter), api.folders()]);
@@ -47,7 +51,8 @@ export default function App() {
         const ph = await api.photo(e.payload.id);
         if (ph) setPhotos((ps) => ps.map((p) => (p.id === ph.id ? ph : p)));
       }),
-      listen<{ label?: string; done: number; total: number }>("import-progress", (e) => setStatus(`${e.payload.label ?? "Importing"} ${e.payload.done} / ${e.payload.total}`)),
+      listen<{ label?: string; done: number; total: number }>("import-progress", (e) => setStatus(`${e.payload.label ?? "Adding photos"} ${e.payload.done} / ${e.payload.total}`)),
+      listen<string>("remote-error", (e) => setStatus(e.payload)),
       listen<{ source: string; message: string }>("agent-log", (e) => setLogs((l) => [...l.slice(-499), { t: new Date().toLocaleTimeString(), ...e.payload }])),
     ];
     return () => subs.forEach((s) => s.then((f) => f()));
@@ -94,30 +99,61 @@ export default function App() {
     );
   };
 
-  const doImport = async () => {
-    const dir = await open({ directory: true, title: "Import a folder of photos" });
-    if (typeof dir !== "string") return;
-    setStatus("Scanning…");
-    try {
-      const n = await api.importFolder(dir);
-      setStatus(`Imported ${n} new photo(s)`);
-      setFilter((f) => ({ ...f, folder: dir }));
-    } catch (e) {
-      setStatus(`Import failed: ${e}`);
-    }
-    setTimeout(() => setStatus(""), 5000);
+  // A folder is a live source: opening it picks up files added since it was last read.
+  const openFolder = (folder: string) => {
+    setFilter((f) => ({ ...f, folder, immich_album: null, view: null }));
+    api.importFolder(folder).then(
+      (n) => setStatus(n ? `${n} new photo(s) in ${folder}` : ""),
+      (e) => setStatus(`Could not read ${folder}: ${e}`),
+    );
+    setTimeout(() => setStatus(""), 8000);
   };
-  const importRemote = async (source: Source, album: string | null) => {
-    setStatus(source === "immich" ? "Searching Immich…" : "Pick photos in the Google Photos tab, then press Done…");
+  const addFolder = async () => {
+    const dir = await open({ directory: true, title: "Add a folder of photos" });
+    if (typeof dir === "string") openFolder(dir);
+  };
+  const openImmich = async (album: string | null, name: string) => {
+    setStatus(`Opening ${name}…`);
     try {
-      const r = source === "immich" ? await api.immichImport(album) : await api.googleImport();
-      const notes = [r.skipped && `${r.skipped} skipped (format not supported)`, r.failed && `${r.failed} failed (${r.error})`];
-      setStatus([`Imported ${r.imported} new photo(s)`, ...notes.filter(Boolean)].join(", "));
-      setFilter((f) => ({ ...f, folder: r.folder }));
+      const { next } = await api.immichOpen(album, 1);
+      setAlbumPages({ album, next });
+      setFilter((f) => ({ ...f, folder: null, immich_album: album ?? "favorites", view: `immich:${album ?? ""}` }));
+      setStatus("");
     } catch (e) {
-      setStatus(`Import failed: ${e}`);
+      setStatus(`Immich: ${e}`);
+    }
+  };
+  // Albums arrive a page at a time; the grid asks for the next page as its end comes near.
+  const nextPage = albumPages?.next && filter.view === `immich:${albumPages.album ?? ""}` ? albumPages.next : null;
+  const loadMore = async () => {
+    const cur = albumPages;
+    if (!nextPage || !cur || loadingPage.current) return;
+    loadingPage.current = true;
+    try {
+      const { next } = await api.immichOpen(cur.album, nextPage);
+      setAlbumPages((s) => (s === cur ? { ...cur, next } : s)); // ignore if the album was reopened meanwhile
+    } catch (e) {
+      setStatus(`Immich: ${e}`);
+      setAlbumPages((s) => (s === cur ? { ...cur, next: null } : s)); // stop rather than retry on every scroll
+    }
+    loadingPage.current = false;
+  };
+  const pickGoogle = async () => {
+    setStatus("Pick photos in the Google Photos tab, then press Done…");
+    try {
+      const r = await api.googleImport();
+      const notes = [r.skipped && `${r.skipped} skipped (format not supported)`, r.failed && `${r.failed} failed (${r.error})`];
+      setStatus([`Added ${r.imported} photo(s) from Google Photos`, ...notes.filter(Boolean)].join(", "));
+      setFilter((f) => ({ ...f, folder: r.folder, immich_album: null, view: null }));
+    } catch (e) {
+      setStatus(`Google Photos: ${e}`);
     }
     setTimeout(() => setStatus(""), 8000);
+  };
+  // Saving an Immich photo uploads the edit back to Immich by default.
+  const exportDest = (ids: number[]) => {
+    const ps = photos.filter((p) => ids.includes(p.id));
+    return ps.length > 0 && ps.every((p) => p.path.startsWith("immich://")) ? "immich" : "";
   };
   const virtualCopy = async () => {
     if (activeId == null) return;
@@ -135,7 +171,7 @@ export default function App() {
 
   const keys = useRef<(e: KeyboardEvent) => void>(() => {});
   keys.current = (e) => {
-    if (e.metaKey || e.ctrlKey || e.altKey || module === "agent") return;
+    if (e.metaKey || e.ctrlKey || e.altKey || module === "agent" || module === "settings") return;
     const k = e.key.toLowerCase();
     if (k === "g") setModule("library");
     else if (k === "d" && active) setModule("develop");
@@ -199,8 +235,15 @@ export default function App() {
           select={select}
           openDevelop={(id) => (focus(id), setModule("develop"))}
           cull={cull}
-          onImport={doImport}
-          onRemote={setRemote}
+          settings={settings}
+          dataDir={info?.data_dir ?? ""}
+          onAddFolder={addFolder}
+          onOpenFolder={openFolder}
+          onImmich={openImmich}
+          nextPage={nextPage}
+          onLoadMore={loadMore}
+          onPickGoogle={pickGoogle}
+          onConnect={setRemote}
           onExport={() => setExportIds(targets())}
           onVirtualCopy={virtualCopy}
           onRemove={remove}
@@ -219,10 +262,9 @@ export default function App() {
         />
       )}
       {module === "agent" && <Agent info={info} settings={settings} setSettings={setSettings} logs={logs} clearLogs={() => setLogs([])} />}
-      {exportIds && exportIds.length > 0 && <ExportDialog ids={exportIds} settings={settings} onClose={() => setExportIds(null)} />}
-      {remote && settings && (
-        <RemoteDialog source={remote} settings={settings} setSettings={setSettings} onImport={(album) => importRemote(remote, album)} onClose={() => setRemote(null)} />
-      )}
+      {module === "settings" && <SettingsView />}
+      {exportIds && exportIds.length > 0 && <ExportDialog ids={exportIds} settings={settings} dest={exportDest(exportIds)} onClose={() => setExportIds(null)} />}
+      {remote && settings && <RemoteDialog source={remote} settings={settings} setSettings={setSettings} onClose={() => setRemote(null)} />}
     </div>
   );
 }

@@ -3,6 +3,7 @@ mod catalog;
 mod develop;
 mod mcp;
 mod remote;
+mod storage;
 
 use develop::{Develop, Img, Opts, es};
 use serde::{Deserialize, Serialize};
@@ -135,14 +136,23 @@ impl Core {
         catalog::get_develop(&self.db(), id)
     }
 
+    /// The file behind a catalog path; an `immich://` photo downloads on first use.
+    pub fn local_file(&self, path: &str) -> Result<PathBuf, String> {
+        match remote::immich_id(path) {
+            Some(id) => remote::immich_original(self, id),
+            None => Ok(PathBuf::from(path)),
+        }
+    }
+
     /// Decoded working-space proxy, cached for the last few files.
     pub fn proxy(&self, path: &str) -> Result<Arc<Img>, String> {
         if let Some((_, img)) = self.cache.lock().unwrap().iter().find(|(p, _)| p == path) {
             return Ok(img.clone());
         }
+        let file = self.local_file(path)?;
         let img = {
             let _g = self.decode_lock.lock().unwrap();
-            Arc::new(develop::load(Path::new(path), Some(PROXY_EDGE))?)
+            Arc::new(develop::load(&file, Some(PROXY_EDGE))?)
         };
         let mut c = self.cache.lock().unwrap();
         c.retain(|(p, _)| p != path);
@@ -186,11 +196,37 @@ impl Core {
         Ok(())
     }
 
+    /// Rating, flag, label or keyword change. Stars and pick/reject of Immich photos are
+    /// mirrored to the server in the background; a failure shows in the status bar.
+    pub fn cull(self: &Arc<Self>, ids: &[i64], u: &catalog::Culling) -> Result<usize, String> {
+        let n = catalog::update(&self.db(), ids, u)?;
+        if u.rating.is_some() || u.flag.is_some() {
+            let (core, ids) = (self.clone(), ids.to_vec());
+            std::thread::spawn(move || {
+                if let Err(e) = remote::immich_push(&core, &ids) {
+                    eprintln!("immich push: {e}");
+                    core.emit("remote-error", json!(format!("Immich was not updated: {e}")));
+                }
+            });
+        }
+        Ok(n)
+    }
+
     pub fn virtual_copy(&self, id: i64) -> Result<i64, String> {
         let new = catalog::virtual_copy(&self.db(), id)?;
         let _ = fs::copy(self.thumb_path(id), self.thumb_path(new));
         self.emit("catalog-changed", json!({}));
         Ok(new)
+    }
+
+    /// Removes photos and their virtual copies from the catalog; files on disk stay.
+    pub fn remove(&self, ids: &[i64]) -> Result<usize, String> {
+        let gone = catalog::remove(&self.db(), ids)?;
+        for &id in &gone {
+            let _ = fs::remove_file(self.thumb_path(id));
+        }
+        self.emit("catalog-changed", json!({}));
+        Ok(gone.len())
     }
 
     /// Full-resolution export of the current edits. Never overwrites existing files.
@@ -201,9 +237,10 @@ impl Core {
         for (i, &id) in ids.iter().enumerate() {
             let p = self.photo(id)?;
             let d = self.develop(id)?;
+            let file = self.local_file(&p.path)?;
             let src = {
                 let _g = self.decode_lock.lock().unwrap();
-                develop::load(Path::new(&p.path), max_edge)?
+                develop::load(&file, max_edge)?
             };
             let img = develop::render(&src, &d, &Opts::default());
             let stem = Path::new(&p.filename).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
@@ -274,7 +311,7 @@ fn set_selection(core: St, ids: Vec<i64>) {
 
 #[tauri::command(async)]
 fn update_photos(core: St, ids: Vec<i64>, update: catalog::Culling) -> Result<usize, String> {
-    catalog::update(&core.db(), &ids, &update)
+    core.cull(&ids, &update)
 }
 
 #[tauri::command(async)]
@@ -283,13 +320,8 @@ fn virtual_copy(core: St, id: i64) -> Result<i64, String> {
 }
 
 #[tauri::command(async)]
-fn remove_photos(core: St, ids: Vec<i64>) -> Result<(), String> {
-    catalog::remove(&core.db(), &ids)?;
-    for id in ids {
-        let _ = fs::remove_file(core.thumb_path(id));
-    }
-    core.emit("catalog-changed", json!({}));
-    Ok(())
+fn remove_photos(core: St, ids: Vec<i64>) -> Result<usize, String> {
+    core.remove(&ids)
 }
 
 #[tauri::command(async)]
@@ -306,7 +338,7 @@ fn default_develop() -> Develop {
 #[tauri::command(async)]
 fn render_preview(core: St, id: i64, develop: Develop, skip_crop: bool, overlay_mask: Option<usize>) -> Result<tauri::ipc::Response, String> {
     let photo = core.photo(id)?;
-    let out = develop::render(&*core.proxy(&photo.path)?, &develop, &Opts { skip_crop, overlay_mask });
+    let out = develop::render(&*core.proxy(&photo.path)?, &develop, &Opts { skip_crop, overlay_mask, ..Default::default() });
     let rgba = develop::to_rgba8(&out);
     let mut buf = Vec::with_capacity(8 + 4096 + rgba.len());
     buf.extend((out.w as u32).to_le_bytes());
@@ -414,10 +446,10 @@ fn immich_albums(core: St) -> Result<Vec<Value>, String> {
     remote::immich_albums(&core)
 }
 
-/// `album` None imports the favorites.
+/// Browse an album (None: the favorites) in place; returns the catalog ids to show.
 #[tauri::command(async)]
-fn immich_import(core: St, album: Option<String>) -> Result<Value, String> {
-    remote::immich_import(&core, album.as_deref())
+fn immich_open(core: St, album: Option<String>, page: Option<u32>) -> Result<Value, String> {
+    remote::immich_open(&core, album.as_deref(), page.unwrap_or(1))
 }
 
 #[tauri::command(async)]
@@ -433,6 +465,17 @@ fn google_import(core: St) -> Result<Value, String> {
 #[tauri::command]
 fn remote_disconnect(core: St, source: String) -> Result<Settings, String> {
     remote::disconnect(&core, &source)
+}
+
+#[tauri::command(async)]
+fn storage_report(core: St) -> Result<Value, String> {
+    storage::report(&core)
+}
+
+/// `thumbs` | `originals` | `missing` | `history` | `compact`
+#[tauri::command(async)]
+fn clean_up(core: St, what: String) -> Result<usize, String> {
+    storage::clean(&core, &what)
 }
 
 pub fn run() {
@@ -470,10 +513,12 @@ pub fn run() {
             ai_run,
             immich_connect,
             immich_albums,
-            immich_import,
+            immich_open,
             google_connect,
             google_import,
             remote_disconnect,
+            storage_report,
+            clean_up,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

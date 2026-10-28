@@ -143,8 +143,9 @@ struct Snapshot {
     state: develop::Develop,
 }
 
+/// The preview is the full uncropped frame, so coordinates the model reads off it are mask coordinates.
 fn snapshot(core: &Core, id: i64, dir: &PathBuf) -> Result<Snapshot, String> {
-    let img = core.render(id, &Opts::default())?;
+    let img = core.render(id, &Opts { full_frame: true, ..Default::default() })?;
     let jpeg = develop::encode_jpeg(&img, 1536, 85)?;
     let telemetry = develop::telemetry(&img);
     let state = core.develop(id)?;
@@ -217,8 +218,12 @@ fn run_cli(core: &Arc<Core>, p: &Provider, id: i64, prompt: &str, dir: &PathBuf)
     let agent_prompt = format!(
         "You are editing a photo in OpenLight Studio through its MCP server \"openlight\". Photo id: {id}. \
          A rendered preview is at {} and histogram telemetry at {}. User goal: \"{prompt}\". \
-         Call photo_inspect (photo_id \"{id}\") to see the image, apply non-destructive edits with develop_apply_parameters \
+         Call photo_inspect (photo_id \"{id}\", full_frame true) to see the image, apply non-destructive edits with develop_apply_parameters \
          and mask_create_and_edit, then photo_inspect again to verify (for example zero highlight clipping) and iterate if needed. \
+         To select an object or area (\"select the castle\"), create a mask named after it with one polygon operation tracing its outline \
+         in the full-frame image, and leave local_adjustments at 0 unless an adjustment was asked for; check it with photo_inspect show_mask \
+         (the mask's index) and fix the outline if it misses or spills. To remove objects (\"remove the people\"), call retouch_remove_objects \
+         with a generous outline per object, then inspect the result. \
          Finish with a one-paragraph summary of what you changed.",
         snap.image.display(),
         snap.telemetry_path.display()
@@ -290,16 +295,20 @@ fn run_cli(core: &Arc<Core>, p: &Provider, id: i64, prompt: &str, dir: &PathBuf)
 }
 
 fn response_schema() -> Value {
-    let params = mcp::tools()[2]["inputSchema"]["properties"]["parameters"].clone();
-    let mask = mcp::tools()[3]["inputSchema"]["properties"].clone();
+    let tools = mcp::tools();
+    let props = |name: &str| {
+        tools.as_array().and_then(|a| a.iter().find(|t| t["name"] == name)).map(|t| t["inputSchema"]["properties"].clone()).unwrap_or_default()
+    };
+    let (mask, remove) = (props("mask_create_and_edit"), props("retouch_remove_objects"));
     json!({
         "type": "object",
         "required": ["reasoning_summary", "global_parameter_patch", "mask_operations", "requires_another_visual_pass"],
         "properties": {
             "reasoning_summary": { "type": "string" },
-            "global_parameter_patch": params,
+            "global_parameter_patch": props("develop_apply_parameters")["parameters"],
             "mask_operations": { "type": "array", "items": { "type": "object", "properties": {
                 "mask_name": mask["mask_name"], "operations": mask["operations"], "local_adjustments": mask["local_adjustments"] } } },
+            "remove_objects": remove["objects"],
             "requires_another_visual_pass": { "type": "boolean" }
         }
     })
@@ -386,7 +395,10 @@ fn run_http(core: &Arc<Core>, p: &Provider, id: i64, prompt: &str, dir: &PathBuf
         "You are an expert photo retoucher controlling OpenLight Studio, a non-destructive RAW editor. You see the current \
          rendered photo, its histogram telemetry and its full edit state. Decide parameter changes that achieve the user's goal. \
          global_parameter_patch contains ABSOLUTE values for only the parameters you change (omit everything else). \
-         Keep highlights unclipped unless asked. Set requires_another_visual_pass to true only if you need to see the result \
+         The image is the full uncropped frame; coordinates are [x, y] fractions of it, (0,0) top-left. To select an object or \
+         area (\"select the castle\"), add a mask_operations entry named after it with one polygon operation tracing its outline \
+         (local_adjustments 0 unless an adjustment was asked for). To remove objects, list them in remove_objects with a generous \
+         outline each. Keep highlights unclipped unless asked. Set requires_another_visual_pass to true only if you need to see the result \
          to refine it. Reply with only a JSON object matching this schema:\n{}",
         response_schema()
     );
@@ -425,6 +437,11 @@ fn run_http(core: &Arc<Core>, p: &Provider, id: i64, prompt: &str, dir: &PathBuf
                 },
                 Err(e) => notes.push(e),
             }
+        }
+        if let Some(objs) = r.get("remove_objects").filter(|v| v.as_array().is_some_and(|a| !a.is_empty()))
+            && let Err(e) = mcp::remove_objects(core, id, &mut d, objs)
+        {
+            notes.push(e);
         }
         let summary = r["reasoning_summary"].as_str().unwrap_or("").to_string();
         if d != snap.state {

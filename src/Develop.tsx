@@ -41,6 +41,7 @@ const COMPONENT: MaskComponent = {
   range: [0.5, 1.0],
   color: [0.5, 0.5, 0.5],
   tolerance: 50,
+  points: [],
 };
 const MASK_TYPES: [string, string][] = [
   ["linear_gradient", "Linear gradient"],
@@ -48,6 +49,8 @@ const MASK_TYPES: [string, string][] = [
   ["luminance_range", "Luminance range"],
   ["color_range", "Color range"],
 ];
+/** Polygons only come from the AI bar, so they are labelled but not offered in the add lists. */
+const TYPE_LABEL: Record<string, string> = { ...Object.fromEntries(MASK_TYPES), polygon: "Object (AI outline)" };
 const ASPECTS: [string, number | null][] = [
   ["Free", null],
   ["Original", 0],
@@ -57,9 +60,9 @@ const ASPECTS: [string, number | null][] = [
   ["16:9", 16 / 9],
 ];
 
-/** Settings copied between photos (crop and provenance stay per photo). */
+/** Settings copied between photos (crop, removals and provenance stay per photo). */
 let clipboard: Dev | null = null;
-const paste = (target: Dev, src: Dev): Dev => ({ ...structuredClone(src), crop: target.crop, ai_provenance_log: target.ai_provenance_log });
+const paste = (target: Dev, src: Dev): Dev => ({ ...structuredClone(src), crop: target.crop, retouch: target.retouch, ai_provenance_log: target.ai_provenance_log });
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 const srgbEotf = (v: number) => (v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
 
@@ -192,6 +195,21 @@ export function Develop(p: Props) {
     if (d) setDev(d);
     refreshHistory(id);
   };
+  // AI bar: a new mask from the run (e.g. "select the castle") is selected with its overlay on
+  const aiRun = async (prompt: string, provider: string) => {
+    if (id == null) throw "No photo";
+    await flush();
+    const masks = devRef.current?.masks.length ?? 0;
+    const text = await api.aiRun(id, prompt, provider);
+    const d = await api.getDevelop(id);
+    if (idRef.current === id) {
+      setDev(d);
+      refreshHistory(id);
+      if (d.masks.length > masks) (setMaskSel(d.masks.length - 1), setCompSel(0), setOverlay(true));
+    }
+    return text;
+  };
+
   const others = p.selected.filter((s) => s !== id);
   const sync = async () => {
     if (!dev) return;
@@ -505,7 +523,7 @@ export function Develop(p: Props) {
           {before && <div className="absolute left-3 top-3 rounded bg-neutral-900/80 px-2 py-1 text-[11px]">Before</div>}
         </div>
 
-        <AiBar photoId={id!} settings={p.settings} setSettings={p.setSettings} flush={flush} />
+        <AiBar settings={p.settings} setSettings={p.setSettings} run={aiRun} />
 
         <div className="flex h-[84px] shrink-0 gap-1 overflow-x-auto border-t border-neutral-800 bg-neutral-900 p-1.5">
           {p.photos.map((ph) => (
@@ -655,6 +673,22 @@ export function Develop(p: Props) {
               </Btn>
             </Panel>
 
+            <Panel title="Remove" open={false} right={reset("retouch", "removals")}>
+              {dev.retouch.length === 0 && <p className="text-[10px] text-neutral-500">Ask the AI bar, e.g. “remove the people on the sand”.</p>}
+              <div className="space-y-1">
+                {dev.retouch.map((r, i) => (
+                  <div key={i} className="flex items-center gap-2 rounded bg-neutral-800 px-2 py-1 text-[11px]">
+                    <span className="flex-1 truncate" title={r.name}>
+                      {r.name}
+                    </span>
+                    <button className="text-neutral-500 hover:text-white" title="Undo this removal" onClick={() => change({ ...dev, retouch: dev.retouch.filter((_, k) => k !== i) }, "Delete removal")}>
+                      ✕
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </Panel>
+
             <Panel title="Masks" open={false}>
               <MasksPanel
                 dev={dev}
@@ -749,7 +783,7 @@ function MasksPanel({
                     <option value="intersect">Intersect</option>
                   </select>
                 ) : null}
-                <span className="flex-1 truncate text-neutral-300">{MASK_TYPES.find((t) => t[0] === c.type)?.[1] ?? c.type}</span>
+                <span className="flex-1 truncate text-neutral-300">{TYPE_LABEL[c.type] ?? c.type}</span>
                 <label className="flex items-center gap-1 text-neutral-400">
                   <input type="checkbox" checked={c.invert} onChange={(e) => change(setPath(dev, ["masks", sel, "components", ci, "invert"], e.target.checked), "Invert mask")} />
                   Invert
@@ -761,6 +795,7 @@ function MasksPanel({
                 )}
               </div>
               {(c.type === "linear_gradient" || c.type === "radial_gradient") && <p className="text-[10px] text-neutral-500">Drag the handles on the photo.</p>}
+              {c.type === "polygon" && <p className="text-[10px] text-neutral-500">Traced by the AI; the edge snaps to the photo. Overlay (O) shows it.</p>}
               {c.type === "luminance_range" && (
                 <>
                   {S("Low", ["masks", sel, "components", ci, "range", 0], 0, 1, { step: 0.01, digits: 2, def: 0.5 })}
@@ -812,7 +847,7 @@ function MasksPanel({
   );
 }
 
-function AiBar({ photoId, settings, setSettings, flush }: { photoId: number; settings: Settings | null; setSettings: (s: Settings) => void; flush: () => Promise<void> }) {
+function AiBar({ settings, setSettings, run: runAi }: { settings: Settings | null; setSettings: (s: Settings) => void; run: (prompt: string, provider: string) => Promise<string> }) {
   const [prompt, setPrompt] = useState("");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
@@ -823,8 +858,7 @@ function AiBar({ photoId, settings, setSettings, flush }: { photoId: number; set
     setBusy(true);
     setResult(null);
     try {
-      await flush();
-      setResult({ ok: true, text: await api.aiRun(photoId, prompt, provider) });
+      setResult({ ok: true, text: await runAi(prompt, provider) });
     } catch (e) {
       setResult({ ok: false, text: String(e) });
     }
@@ -851,7 +885,7 @@ function AiBar({ photoId, settings, setSettings, flush }: { photoId: number; set
         </select>
         <input
           className="min-w-0 flex-1 rounded bg-neutral-800 px-2 py-1 outline-none placeholder:text-neutral-500 focus:ring-1 focus:ring-violet-500"
-          placeholder="Describe an edit, e.g. “warm Portra skin tones, recover the blown sky with a gradient, subtle vignette”"
+          placeholder="Describe an edit, e.g. “select the castle and warm it up”, “remove the people on the sand”, “recover the blown sky”"
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && run()}

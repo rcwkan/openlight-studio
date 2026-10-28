@@ -41,6 +41,7 @@ pub struct Develop {
     pub detail: Detail,
     pub effects: Effects,
     pub crop: Crop,
+    pub retouch: Vec<Heal>,
     pub masks: Vec<Mask>,
     pub ai_provenance_log: Vec<Value>,
 }
@@ -231,7 +232,32 @@ impl Default for Mask {
     }
 }
 
-pub const MASK_TYPES: &[&str] = &["linear_gradient", "radial_gradient", "luminance_range", "color_range"];
+pub const MASK_TYPES: &[&str] = &["linear_gradient", "radial_gradient", "luminance_range", "color_range", "polygon"];
+/// Vertex cap for AI outlines (rasterising costs vertices × rows).
+const MAX_POINTS: usize = 512;
+
+/// Object removal: the outlined area is refilled from the area at `source`, colour-matched
+/// to its surroundings (a heal, not generative).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(default)]
+pub struct Heal {
+    pub name: String,
+    /// Outline [x, y] in normalised image coords.
+    pub points: Vec<[f32; 2]>,
+    /// Normalised offset from the outline to its source area.
+    pub source: [f32; 2],
+}
+
+/// An AI outline must have 3+ vertices given as fractions of the frame.
+pub fn check_outline(points: &[[f32; 2]]) -> Result<(), String> {
+    if points.len() < 3 {
+        return Err("an outline needs at least 3 [x, y] points".into());
+    }
+    if points.iter().flatten().any(|v| !(-0.05..=1.05).contains(v)) {
+        return Err("outline points must be [x, y] fractions of the full frame (0-1), not pixels".into());
+    }
+    Ok(())
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
@@ -254,6 +280,8 @@ pub struct MaskComponent {
     /// color_range: target sRGB colour (0–1) and tolerance 0–100.
     pub color: [f32; 3],
     pub tolerance: f32,
+    /// polygon: rough outline of an object (normalised image coords); the edge snaps to the photo.
+    pub points: Vec<[f32; 2]>,
 }
 impl Default for MaskComponent {
     fn default() -> Self {
@@ -270,6 +298,7 @@ impl Default for MaskComponent {
             range: [0.5, 1.0],
             color: [0.5, 0.5, 0.5],
             tolerance: 50.0,
+            points: vec![],
         }
     }
 }
@@ -361,11 +390,24 @@ impl Develop {
         cl(&mut c.h, 0.02, 1.0);
         cl(&mut c.x, 0.0, 1.0 - c.w);
         cl(&mut c.y, 0.0, 1.0 - c.h);
+        let outline = |pts: &mut Vec<[f32; 2]>| {
+            pts.truncate(MAX_POINTS);
+            for v in pts.iter_mut().flatten() {
+                cl(v, 0.0, 1.0);
+            }
+        };
+        for r in &mut self.retouch {
+            outline(&mut r.points);
+            for v in &mut r.source {
+                cl(v, -1.0, 1.0);
+            }
+        }
         for m in &mut self.masks {
             for c in &mut m.components {
                 cl(&mut c.feather, -100.0, 100.0);
                 cl(&mut c.edge_shift, -100.0, 100.0);
                 cl(&mut c.tolerance, 0.0, 100.0);
+                outline(&mut c.points);
             }
             let a = &mut m.adjustments;
             cl(&mut a.exposure, -5.0, 5.0);
@@ -445,6 +487,9 @@ pub fn mask_from_ops(name: &str, ops: &Value, adjustments: &Value) -> Result<(Ma
         }
         if !["add", "subtract", "intersect"].contains(&c.op.as_str()) {
             return Err(format!("boolean_op '{}' must be add, subtract or intersect", c.op));
+        }
+        if c.kind == "polygon" {
+            check_outline(&c.points)?;
         }
         components.push(c);
     }
@@ -677,6 +722,8 @@ pub fn raw_preview(path: &Path) -> Option<DynamicImage> {
 pub struct Opts {
     /// Crop tool active: straighten but keep the full frame.
     pub skip_crop: bool,
+    /// Neither straighten nor crop: the frame that mask and retouch coordinates refer to.
+    pub full_frame: bool,
     /// Tint this mask's coverage red.
     pub overlay_mask: Option<usize>,
 }
@@ -687,6 +734,10 @@ pub fn render(src: &Img, d: &Develop, o: &Opts) -> Img {
     let wb = wb_gains(d.white_balance.temperature_k, d.white_balance.tint);
     let g = wb.map(|v| v * d.basic_tone.exposure.exp2());
     let mut px: Vec<Px> = src.px.par_iter().map(|p| [p[0] * g[0], p[1] * g[1], p[2] * g[2]]).collect();
+    // 1b. object removal
+    for r in &d.retouch {
+        heal(&mut px, w, h, r);
+    }
     // 2. dehaze
     if d.presence.dehaze != 0.0 {
         dehaze(&mut px, w, h, d.presence.dehaze / 100.0);
@@ -726,7 +777,7 @@ pub fn render(src: &Img, d: &Develop, o: &Opts) -> Img {
         px.par_iter_mut().zip(m).for_each(|(p, m)| *p = lerp(p.map(|c| c.clamp(0.0, 1.0)), [0.9, 0.05, 0.05], m * 0.6));
     }
     // 8. geometry, then post-crop effects
-    let mut img = crop_rotate(Img { w, h, px }, &d.crop, !o.skip_crop);
+    let mut img = if o.full_frame { Img { w, h, px } } else { crop_rotate(Img { w, h, px }, &d.crop, !o.skip_crop) };
     vignette(&mut img, &d.effects);
     img
 }
@@ -865,15 +916,297 @@ fn dehaze(px: &mut [Px], w: usize, h: usize, amount: f32) {
     });
 }
 
+/// Pixel rectangle inside an image.
+#[derive(Clone, Copy)]
+struct Win {
+    x0: usize,
+    y0: usize,
+    w: usize,
+    h: usize,
+}
+
+/// Pixel bounding box (min, max) of normalised points.
+fn bounds(points: &[[f32; 2]], w: usize, h: usize) -> ([f32; 2], [f32; 2]) {
+    points.iter().fold(([f32::MAX; 2], [f32::MIN; 2]), |(lo, hi), p| {
+        let q = [p[0] * w as f32, p[1] * h as f32];
+        ([lo[0].min(q[0]), lo[1].min(q[1])], [hi[0].max(q[0]), hi[1].max(q[1])])
+    })
+}
+
+/// Bounding box of normalised points grown by `pad` pixels, clipped to the image (may be empty).
+fn win(points: &[[f32; 2]], w: usize, h: usize, pad: f32) -> Win {
+    let (lo, hi) = bounds(points, w, h);
+    let c = |v: f32, n: usize| v.max(0.0).min(n as f32) as usize;
+    let (x0, y0) = (c((lo[0] - pad).floor(), w), c((lo[1] - pad).floor(), h));
+    let (x1, y1) = (c((hi[0] + pad).ceil(), w), c((hi[1] + pad).ceil(), h));
+    Win { x0, y0, w: x1.saturating_sub(x0), h: y1.saturating_sub(y0) }
+}
+
+/// Even-odd fill of a normalised polygon at pixel centres, over window `r` of a w×h image.
+fn fill(points: &[[f32; 2]], w: usize, h: usize, r: Win) -> Vec<f32> {
+    let mut out = vec![0.0; r.w * r.h];
+    if points.len() < 3 || out.is_empty() {
+        return out;
+    }
+    let (fw, fh) = (w as f32, h as f32);
+    out.par_chunks_mut(r.w).enumerate().for_each(|(j, row)| {
+        let y = (r.y0 + j) as f32 + 0.5;
+        let mut xs: Vec<f32> = vec![];
+        for (k, a) in points.iter().enumerate() {
+            let b = points[(k + 1) % points.len()];
+            let (ay, by) = (a[1] * fh, b[1] * fh);
+            if (ay <= y) != (by <= y) {
+                xs.push((a[0] + (y - ay) / (by - ay) * (b[0] - a[0])) * fw);
+            }
+        }
+        xs.sort_by(f32::total_cmp);
+        let col = |x: f32| ((x - 0.5).ceil().max(r.x0 as f32) as usize).min(r.x0 + r.w) - r.x0;
+        for s in xs.chunks_exact(2) {
+            row[col(s[0])..col(s[1])].fill(1.0);
+        }
+    });
+    out
+}
+
+/// Grey-guided filter (He et al.): smooths `p` except across edges in `guide`.
+fn guided(guide: &[f32], p: &[f32], w: usize, h: usize, r: f32, eps: f32) -> Vec<f32> {
+    let prod = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| x * y).collect::<Vec<f32>>();
+    let (mi, mp) = (blur(guide, w, h, r), blur(p, w, h, r));
+    let (mii, mip) = (blur(&prod(guide, guide), w, h, r), blur(&prod(guide, p), w, h, r));
+    let a: Vec<f32> = (0..p.len()).map(|i| (mip[i] - mi[i] * mp[i]) / (mii[i] - mi[i] * mi[i] + eps)).collect();
+    let b: Vec<f32> = (0..p.len()).map(|i| mp[i] - a[i] * mi[i]).collect();
+    let (ma, mb) = (blur(&a, w, h, r), blur(&b, w, h, r));
+    (0..p.len()).map(|i| (ma[i] * guide[i] + mb[i]).clamp(0.0, 1.0)).collect()
+}
+
+/// AI object outline -> soft matte. The outline is a prior: within a band around it each pixel
+/// goes to whichever side's colours it resembles (Oklab histograms of the confidently inside /
+/// outside pixels), then a guided filter snaps the edge to the photo and a contrast curve
+/// (width set by feather) drops the faint spill.
+/// ponytail: one-shot colour model + grey guide, no graph cut or matting model; edges between
+/// similar colours stay where the AI drew them.
+fn object_matte(points: &[[f32; 2]], px: &[Px], w: usize, h: usize, soft: f32) -> (Win, Vec<f32>) {
+    let s = w.max(h) as f32;
+    let (lo, hi) = bounds(points, w, h);
+    let size = (hi[0] - lo[0]).min(hi[1] - lo[1]).max(1.0);
+    let band = (0.1 * size).min(0.012 * s).max(1.0);
+    let r = ((0.001 + 0.004 * soft) * s).min(0.1 * size).max(1.0);
+    let k = 0.05 + 0.45 * soft;
+    let win = win(points, w, h, 3.0 * (band + r));
+    let n = win.w * win.h;
+    if n == 0 {
+        return (win, vec![]);
+    }
+    let at = |k: usize| px[(win.y0 + k / win.w) * w + win.x0 + k % win.w];
+    let prior = blur(&fill(points, w, h, win), win.w, win.h, band);
+    let bin = |p: Px| {
+        let q = oklab(p);
+        let f = |v: f32, lo: f32, hi: f32| (((v - lo) / (hi - lo) * 16.0) as usize).min(15);
+        f(q[0], 0.0, 1.0) * 256 + f(q[1], -0.25, 0.25) * 16 + f(q[2], -0.25, 0.25)
+    };
+    let (mut hin, mut hout) = (vec![1f32; 4096], vec![1f32; 4096]);
+    for (k, &p) in prior.iter().enumerate() {
+        if p > 0.9 {
+            hin[bin(at(k))] += 1.0;
+        } else if p < 0.1 {
+            hout[bin(at(k))] += 1.0;
+        }
+    }
+    let (nin, nout): (f32, f32) = (hin.iter().sum(), hout.iter().sum());
+    let post: Vec<f32> = prior
+        .par_iter()
+        .enumerate()
+        .map(|(k, &p)| {
+            if p <= 0.0 || p >= 1.0 {
+                return p;
+            }
+            let b = bin(at(k));
+            let (i, o) = (p * hin[b] / nin, (1.0 - p) * hout[b] / nout);
+            i / (i + o)
+        })
+        .collect();
+    let guide: Vec<f32> = (0..n).map(|k| luma(at(k)).max(0.0).sqrt()).collect();
+    (win, guided(&guide, &post, win.w, win.h, r, 1e-3).into_iter().map(|v| smooth(0.5 - k, 0.5 + k, v)).collect())
+}
+
+/// Heal sizes for an outline in pixels: dilation/feather sigma and colour-correction sigma.
+fn heal_sizes(points: &[[f32; 2]], w: usize, h: usize) -> (f32, f32) {
+    let (lo, hi) = bounds(points, w, h);
+    let m = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(1.0);
+    (1.0 + 0.05 * m, 0.5 * m)
+}
+
+/// Convex hull (Andrew's monotone chain).
+fn hull(mut p: Vec<[f32; 2]>) -> Vec<[f32; 2]> {
+    p.sort_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])));
+    p.dedup();
+    let cross = |o: [f32; 2], a: [f32; 2], b: [f32; 2]| (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+    let mut h: Vec<[f32; 2]> = vec![];
+    for &q in &p {
+        while h.len() >= 2 && cross(h[h.len() - 2], h[h.len() - 1], q) <= 0.0 {
+            h.pop();
+        }
+        h.push(q);
+    }
+    let t = h.len() + 1;
+    for &q in p.iter().rev().skip(1) {
+        while h.len() >= t && cross(h[h.len() - 2], h[h.len() - 1], q) <= 0.0 {
+            h.pop();
+        }
+        h.push(q);
+    }
+    h.pop();
+    h
+}
+
+/// Outlines whose heal areas touch become one heal over their convex hull, so each fill is
+/// matched against clean surroundings rather than the neighbouring object.
+pub fn group_outlines(objs: Vec<(String, Vec<[f32; 2]>)>, w: usize, h: usize) -> Vec<(String, Vec<[f32; 2]>)> {
+    let area = |p: &[[f32; 2]]| {
+        let ((lo, hi), g) = (bounds(p, w, h), 3.0 * heal_sizes(p, w, h).0);
+        [lo[0] - g, lo[1] - g, hi[0] + g, hi[1] + g]
+    };
+    let touch = |a: [f32; 4], b: [f32; 4]| a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3];
+    let mut out: Vec<(String, Vec<[f32; 2]>, bool)> = vec![];
+    for (mut name, mut pts) in objs {
+        let mut merged = false;
+        while let Some(i) = out.iter().position(|o| touch(area(&o.1), area(&pts))) {
+            let o = out.remove(i);
+            name = format!("{} + {name}", o.0);
+            pts.extend(o.1);
+            merged = true;
+        }
+        out.push((name, pts, merged));
+    }
+    out.into_iter().map(|(n, p, merged)| (n, if merged { hull(p) } else { p })).collect()
+}
+
+/// Heal coverage: the outline grown by ~σ with a soft edge.
+fn heal_alpha(points: &[[f32; 2]], w: usize, h: usize, r: Win, sa: f32) -> Vec<f32> {
+    blur(&fill(points, w, h, r), r.w, r.h, sa).into_iter().map(|v| (2.0 * v).min(1.0)).collect()
+}
+
+/// Replace the outlined area with the source area plus a smooth correction that matches the
+/// surroundings (normalised convolution of the boundary difference).
+fn heal(px: &mut [Px], w: usize, h: usize, hl: &Heal) {
+    if hl.points.len() < 3 {
+        return;
+    }
+    let (sa, sc) = heal_sizes(&hl.points, w, h);
+    let r = win(&hl.points, w, h, 3.0 * (sa + sc));
+    let n = r.w * r.h;
+    if n == 0 {
+        return;
+    }
+    let alpha = heal_alpha(&hl.points, w, h, r, sa);
+    let (dx, dy) = ((hl.source[0] * w as f32).round() as isize, (hl.source[1] * h as f32).round() as isize);
+    let idx = |k: usize| (r.y0 + k / r.w) * w + r.x0 + k % r.w;
+    let (mut src, mut wt) = (vec![[0.0; 3]; n], vec![0.0; n]);
+    for k in 0..n {
+        let (x, y) = ((r.x0 + k % r.w) as isize + dx, (r.y0 + k / r.w) as isize + dy);
+        let (sx, sy) = (x.clamp(0, w as isize - 1), y.clamp(0, h as isize - 1));
+        src[k] = px[sy as usize * w + sx as usize];
+        if (sx, sy) != (x, y) {
+            continue;
+        }
+        // a source pixel inside the outline itself is no colour reference
+        let (lx, ly) = (sx - r.x0 as isize, sy - r.y0 as isize);
+        let a = if lx >= 0 && ly >= 0 && (lx as usize) < r.w && (ly as usize) < r.h { alpha[ly as usize * r.w + lx as usize] } else { 0.0 };
+        wt[k] = (1.0 - alpha[k]) * (1.0 - a);
+    }
+    let den = blur(&wt, r.w, r.h, sc);
+    let corr: Vec<Vec<f32>> = (0..3)
+        .map(|c| blur(&(0..n).map(|k| (px[idx(k)][c] - src[k][c]) * wt[k]).collect::<Vec<f32>>(), r.w, r.h, sc))
+        .collect();
+    for k in 0..n {
+        if alpha[k] > 0.0 {
+            let f = if den[k] > 1e-4 { [0, 1, 2].map(|c| (src[k][c] + corr[c][k] / den[k]).max(0.0)) } else { src[k] };
+            let i = idx(k);
+            px[i] = lerp(px[i], f, alpha[k]);
+        }
+    }
+}
+
+/// Source offset (normalised) for healing `points`: the nearby area whose surroundings best match
+/// the outline's surroundings and that stays clear of the outline and of `avoid`. None if none fits.
+pub fn heal_source(img: &Img, points: &[[f32; 2]], avoid: &[&[[f32; 2]]]) -> Option<[f32; 2]> {
+    let (w, h) = (img.w, img.h);
+    let (sa, _) = heal_sizes(points, w, h);
+    let r = win(points, w, h, 9.0 * sa);
+    if r.w * r.h == 0 {
+        return None;
+    }
+    let alpha = heal_alpha(points, w, h, r, sa);
+    let near = blur(&fill(points, w, h, r), r.w, r.h, 3.0 * sa);
+    let pick = |f: &dyn Fn(usize) -> bool| -> Vec<(isize, isize)> {
+        let ks: Vec<usize> = (0..alpha.len()).filter(|&k| f(k)).collect();
+        let step = (ks.len() / 1500).max(1);
+        ks.iter().step_by(step).map(|&k| ((r.x0 + k % r.w) as isize, (r.y0 + k / r.w) as isize)).collect()
+    };
+    let ring = pick(&|k| alpha[k] < 0.01 && near[k] > 0.01);
+    let v = |x: isize, y: isize| img.px[y.clamp(0, h as isize - 1) as usize * w + x.clamp(0, w as isize - 1) as usize].map(|c| c.max(0.0).sqrt());
+    let d2 = |a: Px, b: Px| (0..3).map(|c| (a[c] - b[c]).powi(2)).sum::<f32>();
+    // area that gets replaced, as a box; the source box must not overlap it or another outline
+    let boxed = |p: &[[f32; 2]]| {
+        let (lo, hi) = bounds(p, w, h);
+        let g = 3.0 * sa;
+        [lo[0] - g, lo[1] - g, hi[0] + g, hi[1] + g]
+    };
+    let dst = boxed(points);
+    let others: Vec<[f32; 4]> = avoid.iter().map(|p| boxed(p)).collect();
+    let m = (dst[2] - dst[0]).max(dst[3] - dst[1]);
+    let valid = |dx: isize, dy: isize| {
+        let b = [dst[0] + dx as f32, dst[1] + dy as f32, dst[2] + dx as f32, dst[3] + dy as f32];
+        let apart = |o: &[f32; 4]| b[2] <= o[0] || o[2] <= b[0] || b[3] <= o[1] || o[3] <= b[1];
+        b[0] >= 0.0 && b[1] >= 0.0 && b[2] <= w as f32 && b[3] <= h as f32 && apart(&dst) && others.iter().all(apart)
+    };
+    // outlined pixels are no reference on either side: they are about to be healed
+    let outlined = |x: isize, y: isize, bs: &[[f32; 4]]| {
+        let (x, y) = (x as f32, y as f32);
+        bs.iter().any(|b| x >= b[0] && x < b[2] && y >= b[1] && y < b[3])
+    };
+    let ring: Vec<(isize, isize)> = ring.into_iter().filter(|&(x, y)| !outlined(x, y, &others)).collect();
+    let all: Vec<[f32; 4]> = others.iter().copied().chain([dst]).collect();
+    // ponytail: only the surroundings are compared, so an unlisted object inside the source area gets copied
+    let score = |(dx, dy): (isize, isize)| {
+        let (sum, n) = ring
+            .iter()
+            .filter(|&&(x, y)| !outlined(x + dx, y + dy, &all))
+            .fold((0.0, 0), |(s, n), &(x, y)| (s + d2(v(x, y), v(x + dx, y + dy)), n + 1));
+        if n == 0 || n * 2 < ring.len() {
+            return f32::INFINITY;
+        }
+        sum / n as f32 * (1.0 + 0.1 * (dx as f32).hypot(dy as f32) / m)
+    };
+    let best = |c: Vec<(isize, isize)>| {
+        c.into_par_iter()
+            .filter(|&(dx, dy)| valid(dx, dy))
+            .map(|d| (score(d), d))
+            .filter(|s| s.0.is_finite())
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|b| b.1)
+    };
+    let grid = |c: (isize, isize), rad: isize, step: usize| -> Vec<(isize, isize)> {
+        (-rad..=rad).step_by(step).flat_map(|y| (-rad..=rad).step_by(step).map(move |x| (c.0 + x, c.1 + y))).collect()
+    };
+    let step = (m / 8.0).max(1.0) as usize;
+    let rad = (3.0 * m).max(0.03 * w.max(h) as f32) as isize;
+    let coarse = best(grid((0, 0), rad, step))?;
+    let (dx, dy) = best(grid(coarse, step as isize, 1)).unwrap_or(coarse);
+    Some([dx as f32 / w as f32, dy as f32 / h as f32])
+}
+
 struct Comp {
     c: MaskComponent,
     target: Px,
+    matte: Option<(Win, Vec<f32>)>,
 }
 
 impl Comp {
     #[inline]
-    fn eval(&self, x: f32, y: f32, w: f32, h: f32, p: Px) -> f32 {
+    fn eval(&self, xi: usize, yi: usize, w: usize, h: usize, p: Px) -> f32 {
         let c = &self.c;
+        let (x, y, w, h) = ((xi as f32 + 0.5) / w as f32, (yi as f32 + 0.5) / h as f32, w as f32, h as f32);
         let soft = 0.5 + c.feather / 200.0; // 0..1
         let v = match c.kind.as_str() {
             "linear_gradient" => {
@@ -900,6 +1233,10 @@ impl Comp {
                 let tol = 0.02 + c.tolerance / 100.0 * 0.2;
                 1.0 - smooth(tol * (0.3 + 0.5 * (1.0 - soft)), tol, d)
             }
+            "polygon" => match &self.matte {
+                Some((r, v)) if xi >= r.x0 && yi >= r.y0 && xi < r.x0 + r.w && yi < r.y0 + r.h => v[(yi - r.y0) * r.w + xi - r.x0],
+                _ => 0.0,
+            },
             _ => 0.0,
         };
         let v = if c.invert { 1.0 - v } else { v };
@@ -911,16 +1248,18 @@ fn mask_weights(m: &Mask, w: usize, h: usize, px: &[Px]) -> Vec<f32> {
     let comps: Vec<Comp> = m
         .components
         .iter()
-        .map(|c| Comp { target: oklab(srgb_to_working(c.color)), c: c.clone() })
+        .map(|c| Comp {
+            target: oklab(srgb_to_working(c.color)),
+            matte: (c.kind == "polygon").then(|| object_matte(&c.points, px, w, h, 0.5 + c.feather / 200.0)),
+            c: c.clone(),
+        })
         .collect();
-    let (fw, fh) = (w as f32, h as f32);
     px.par_iter()
         .enumerate()
         .map(|(i, p)| {
-            let (x, y) = (((i % w) as f32 + 0.5) / fw, ((i / w) as f32 + 0.5) / fh);
             let mut acc: Option<f32> = None;
             for c in &comps {
-                let v = c.eval(x, y, fw, fh, *p);
+                let v = c.eval(i % w, i / w, w, h, *p);
                 acc = Some(match (acc, c.c.op.as_str()) {
                     (None, "subtract") => 1.0 - v,
                     (None, _) => v,
@@ -1620,5 +1959,62 @@ mod tests {
         assert!(luma(out.px[top]) > luma(src.px[top]) * 1.5);
         assert!((luma(out.px[bottom]) - luma(src.px[bottom])).abs() < 1e-6);
         assert!(mask_from_ops("sky", &json!([{"boolean_op": "add", "source_type": "ai_sky"}]), &json!({})).is_err());
+    }
+
+    #[test]
+    fn polygon_mask_snaps_to_the_object() {
+        // bright square on a dark ground, outlined 4px too generously
+        let (w, h) = (400, 300);
+        let px = (0..w * h)
+            .map(|i| if (150..250).contains(&(i % w)) && (100..200).contains(&(i / w)) { [0.6, 0.5, 0.3] } else { [0.02, 0.03, 0.08] })
+            .collect::<Vec<Px>>();
+        let pts = [[146.0, 96.0], [254.0, 96.0], [254.0, 204.0], [146.0, 204.0]].map(|[x, y]| [x / w as f32, y / h as f32]);
+        let m = Mask { components: vec![MaskComponent { kind: "polygon".into(), points: pts.to_vec(), ..Default::default() }], ..Default::default() };
+        let wts = mask_weights(&m, w, h, &px);
+        let at = |x: usize, y: usize| wts[y * w + x];
+        assert!(at(200, 150) > 0.99 && at(153, 150) > 0.9, "inside: {} {}", at(200, 150), at(153, 150));
+        assert!(at(147, 150) < 0.2 && at(200, 97) < 0.2, "edge not snapped: {} {}", at(147, 150), at(200, 97));
+        assert_eq!(at(20, 20), 0.0);
+        let op = |p: Value| json!([{"boolean_op": "add", "source_type": "polygon", "points": p}]);
+        assert!(mask_from_ops("castle", &op(json!([[0.1, 0.1], [0.9, 0.1], [0.5, 0.8]])), &json!({})).is_ok());
+        assert!(mask_from_ops("castle", &op(json!([[0.1, 0.1], [0.9, 0.1]])), &json!({})).is_err());
+        assert!(mask_from_ops("castle", &op(json!([[10, 20], [300, 20], [300, 200]])), &json!({})).is_err());
+    }
+
+    #[test]
+    fn heal_removes_an_object() {
+        // horizontal stripes over a vertical gradient, with a red blob in the middle
+        let (w, h) = (320, 240);
+        let ground = |y: usize| [0.2 + 0.4 * y as f32 / h as f32 + if (y / 6) % 2 == 0 { 0.05 } else { 0.0 }; 3];
+        let blob = |x: usize, y: usize| (x as f32 - 160.0).hypot(y as f32 - 120.0) < 15.0;
+        let px = (0..w * h).map(|i| if blob(i % w, i / w) { [0.9, 0.05, 0.05] } else { ground(i / w) }).collect();
+        let img = Img { w, h, px };
+        let pts: Vec<[f32; 2]> = (0..16)
+            .map(|k| {
+                let a = k as f32 / 16.0 * 2.0 * PI;
+                [(160.0 + 19.0 * a.cos()) / w as f32, (120.0 + 19.0 * a.sin()) / h as f32]
+            })
+            .collect();
+        let source = heal_source(&img, &pts, &[]).expect("a source area");
+        let d = Develop { retouch: vec![Heal { name: "blob".into(), points: pts, source }], ..Default::default() };
+        let out = render(&img, &d, &Opts::default());
+        let err = (100..140)
+            .flat_map(|y| (140..180).map(move |x| (x, y)))
+            .map(|(x, y)| (0..3).map(|c| (out.px[y * w + x][c] - ground(y)[c]).abs()).fold(0.0, f32::max))
+            .fold(0.0, f32::max);
+        assert!(err < 0.03, "healed area is off the ground by {err} (source {source:?})");
+    }
+
+    #[test]
+    fn touching_outlines_heal_as_one() {
+        let sq = |x: f32, y: f32| vec![[x, y], [x + 0.05, y], [x + 0.05, y + 0.1], [x, y + 0.1]];
+        let (a, b) = (sq(0.3, 0.5), sq(0.36, 0.52));
+        let g = group_outlines(vec![("a".into(), a.clone()), ("far".into(), sq(0.8, 0.1)), ("b".into(), b.clone())], 1600, 1068);
+        assert_eq!(g.len(), 2);
+        assert_eq!((g[0].0.as_str(), g[1].0.as_str()), ("far", "a + b"));
+        assert_eq!(g[0].1, sq(0.8, 0.1));
+        // hull of both squares: the 6 outer corners
+        assert_eq!(g[1].1.len(), 6);
+        assert!(g[1].1.contains(&a[0]) && g[1].1.contains(&b[2]) && !g[1].1.contains(&b[0]));
     }
 }

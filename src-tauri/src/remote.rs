@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
     fs, io,
-    path::Path,
+    path::{Path, PathBuf},
     process::Command,
     sync::atomic::{AtomicUsize, Ordering},
     time::{Duration, Instant},
@@ -46,6 +46,9 @@ fn json_of(what: &str, reply: Reply) -> Result<Value, String> {
     let body = r.body_mut().read_to_string().map_err(es)?;
     if status >= 400 {
         return Err(format!("{what} returned HTTP {status}: {}", body.chars().take(300).collect::<String>()));
+    }
+    if body.trim().is_empty() {
+        return Ok(Value::Null); // 204 No Content
     }
     serde_json::from_str(&body).map_err(|_| format!("{what} did not reply with JSON; check the address"))
 }
@@ -115,54 +118,167 @@ pub fn immich_albums(core: &Core) -> Result<Vec<Value>, String> {
     immich_albums_at(&url, &key)
 }
 
-/// Download and import an album, or the favorites when `album` is None.
-pub fn immich_import(core: &Core, album: Option<&str>) -> Result<Value, String> {
-    let (url, key) = immich(core)?;
-    import_from_immich(core, &url, &key, album)
+/// Catalog path of an Immich photo: `immich://<asset id>`.
+pub fn immich_id(path: &str) -> Option<&str> {
+    path.strip_prefix("immich://")
 }
 
-fn import_from_immich(core: &Core, url: &str, key: &str, album: Option<&str>) -> Result<Value, String> {
-    let (folder, count) = match album {
-        Some(id) => {
-            let a = immich_albums_at(url, key)?
-                .into_iter()
-                .find(|a| a["id"] == id)
-                .ok_or("album not found on the Immich server")?;
-            (a["name"].as_str().unwrap_or("Album").to_string(), a["count"].as_u64())
-        }
-        None => ("Favorites".to_string(), None),
-    };
+/// Photos per page when browsing an album; the grid asks for the next page as you scroll.
+const PAGE: u32 = 250;
+
+/// One page of an album's images (the favorites when `album` is None), oldest first like the
+/// grid, plus the next page number if there is one.
+fn immich_page(url: &str, key: &str, album: Option<&str>, page: u32) -> Result<(Vec<Value>, Option<u32>), String> {
     // ponytail: pre-3.2 search fields (deprecated, still served by Immich 3.x) keep older servers working; move to `filter` + `cursor` once those are rare
-    let mut assets = vec![];
-    let mut page = 1;
-    loop {
-        let mut q = json!({"type": "IMAGE", "size": 1000, "page": page});
-        match album {
-            Some(id) => q["albumIds"] = json!([id]),
-            None => q["isFavorite"] = json!(true),
-        }
-        let r = json_of("Immich", agent().post(&format!("{url}/api/search/metadata")).header("x-api-key", key).send_json(&q))?;
-        assets.extend(r["assets"]["items"].as_array().cloned().unwrap_or_default());
-        match r["assets"]["nextPage"].as_str().and_then(|p| p.parse().ok()) {
-            Some(next) if next > page => page = next,
-            _ => break,
-        }
+    let mut q = json!({"type": "IMAGE", "size": PAGE, "page": page, "order": "asc", "withExif": true});
+    match album {
+        Some(id) => q["albumIds"] = json!([id]),
+        None => q["isFavorite"] = json!(true),
     }
-    // A server that ignored a filter would otherwise hand over the whole library.
+    let r = json_of("Immich", agent().post(&format!("{url}/api/search/metadata")).header("x-api-key", key).send_json(&q))?;
+    let mut assets = r["assets"]["items"].as_array().cloned().unwrap_or_default();
     if album.is_none() {
-        assets.retain(|a| a["isFavorite"] == true);
-    } else if count.is_some_and(|n| assets.len() as u64 > n) {
-        return Err("this Immich server ignored the album filter; update Immich and try again".into());
+        assets.retain(|a| a["isFavorite"] == true); // a server that ignored the filter would list everything
     }
-    let items: Vec<Item> = assets
-        .iter()
-        .filter_map(|a| {
-            let (id, name) = (a["id"].as_str()?, a["originalFileName"].as_str()?);
-            save_ext(name, "")?; // originals keep their format: skip HEIC, video… before downloading
-            Some(Item { id: id.into(), name: name.into(), url: format!("{url}/api/assets/{id}/original") })
-        })
-        .collect();
-    fetch_and_import(core, &["Immich", &folder], assets.len() - items.len(), items, ("x-api-key", key))
+    let next = r["assets"]["nextPage"].as_str().and_then(|p| p.parse().ok()).filter(|n| *n > page);
+    Ok((assets, next))
+}
+
+/// Browse an album (None: the favorites) in place, a page at a time. Each asset becomes an
+/// `immich://<id>` catalog row with the server's thumbnail; nothing else downloads until a
+/// photo is opened or exported. Page 1 starts the album over, so photos removed in Immich
+/// drop out. Returns the next page number, or null at the end.
+pub fn immich_open(core: &Core, album: Option<&str>, page: u32) -> Result<Value, String> {
+    let (url, key) = immich(core)?;
+    open_from_immich(core, &url, &key, album, page)
+}
+
+fn open_from_immich(core: &Core, url: &str, key: &str, album: Option<&str>, page: u32) -> Result<Value, String> {
+    let (assets, next) = immich_page(url, key, album, page.max(1))?;
+    let member = album.unwrap_or("favorites");
+    let mut need_thumb = vec![];
+    {
+        let mut c = core.db();
+        let tx = c.transaction().map_err(es)?;
+        if page <= 1 {
+            tx.execute("DELETE FROM immich_albums WHERE album = ?", [member]).map_err(es)?;
+        }
+        for a in &assets {
+            let (Some(asset), Some(name)) = (a["id"].as_str(), a["originalFileName"].as_str()) else { continue };
+            let (path, x) = (format!("immich://{asset}"), &a["exifInfo"]);
+            let m = catalog::Meta {
+                // localDateTime is the wall-clock capture time, as the catalog stores it
+                captured_at: a["localDateTime"].as_str().and_then(|t| t.get(..19)).map(|t| t.replace('T', " ")),
+                camera: catalog::camera_name(x["make"].as_str().map(String::from), x["model"].as_str().map(String::from)),
+                lens: x["lensModel"].as_str().map(String::from),
+                iso: x["iso"].as_i64(),
+                aperture: x["fNumber"].as_f64(),
+                shutter: x["exposureTime"].as_str().map(String::from),
+                focal_length: x["focalLength"].as_f64(),
+                orientation: 1,
+            };
+            if let Some(id) = catalog::add_photo(&tx, &path, "Immich", name, &m, &develop::Develop::default())? {
+                let (w, h) = (a["width"].as_i64().or(x["exifImageWidth"].as_i64()), a["height"].as_i64().or(x["exifImageHeight"].as_i64()));
+                tx.execute("UPDATE photos SET width = ?, height = ? WHERE id = ?", (w.unwrap_or(0), h.unwrap_or(0), id)).map_err(es)?;
+            }
+            // A master's stars and pick/reject follow Immich (changes made here are pushed as they
+            // happen): rating 1-5 = stars, -1 = rejected (stars kept), favorite = pick.
+            let rating = x["rating"].as_i64();
+            tx.execute(
+                "UPDATE photos SET rating = CASE WHEN ?1 = -1 THEN rating ELSE ?2 END,
+                   flag = CASE WHEN ?1 = -1 THEN -1 WHEN ?3 THEN 1 ELSE 0 END
+                 WHERE path = ?4 AND master_id IS NULL",
+                (rating, rating.unwrap_or(0).clamp(0, 5), a["isFavorite"] == true, &path),
+            )
+            .map_err(es)?;
+            tx.execute("INSERT OR IGNORE INTO immich_albums (album, path) VALUES (?, ?)", (member, &path)).map_err(es)?;
+            let mut st = tx.prepare_cached("SELECT id FROM photos WHERE path = ? AND master_id IS NULL").map_err(es)?;
+            for id in st.query_map([&path], |r| r.get::<_, i64>(0)).map_err(es)?.flatten() {
+                if !core.thumb_path(id).exists() {
+                    need_thumb.push((id, asset));
+                }
+            }
+        }
+        tx.commit().map_err(es)?;
+    }
+    let (agent, done) = (agent(), AtomicUsize::new(0));
+    need_thumb.par_iter().for_each(|(id, asset)| {
+        let res = (|| {
+            let mut r = agent.get(&format!("{url}/api/assets/{asset}/thumbnail")).header("x-api-key", key).call().map_err(es)?;
+            if r.status().as_u16() >= 400 {
+                return Err(format!("HTTP {}", r.status().as_u16()));
+            }
+            let img = image::load_from_memory(&r.body_mut().read_to_vec().map_err(es)?).map_err(es)?;
+            catalog::write_jpeg(&core.thumb_path(*id), &img)
+        })();
+        if let Err(e) = res {
+            eprintln!("immich thumbnail {asset}: {e}");
+        }
+        let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+        core.emit("import-progress", json!({"label": "Loading thumbnails", "done": n, "total": need_thumb.len()}));
+    });
+    core.emit("catalog-changed", json!({}));
+    Ok(json!({"next": next}))
+}
+
+/// Mirror these photos' stars and pick/reject to Immich: stars → rating 1-5 (none → unrated),
+/// reject → rating -1, pick → favorite. Masters only; virtual copies stay local.
+pub fn immich_push(core: &Core, ids: &[i64]) -> Result<(), String> {
+    push_to_immich(core, ids, || immich(core))
+}
+
+fn push_to_immich(core: &Core, ids: &[i64], creds: impl FnOnce() -> Result<(String, String), String>) -> Result<(), String> {
+    // One push at a time, each reading the catalog as it runs, so the last one sends the latest state.
+    static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _turn = TURN.lock().unwrap_or_else(|e| e.into_inner());
+    let photos = catalog::query(&core.db(), &catalog::Filter { ids: Some(ids.to_vec()), ..Default::default() })?;
+    let mut groups: HashMap<(Option<i64>, bool), Vec<&str>> = HashMap::new();
+    for p in photos.iter().filter(|p| p.master_id.is_none()) {
+        let Some(asset) = immich_id(&p.path) else { continue };
+        let rating = if p.flag == -1 { Some(-1) } else { Some(p.rating).filter(|r| *r > 0) };
+        groups.entry((rating, p.flag == 1)).or_default().push(asset);
+    }
+    if groups.is_empty() {
+        return Ok(());
+    }
+    let (url, key) = creds()?;
+    let agent = agent();
+    for ((rating, favorite), assets) in groups {
+        let body = json!({"ids": assets, "rating": rating, "isFavorite": favorite});
+        json_of("Immich", agent.put(&format!("{url}/api/assets")).header("x-api-key", &key).send_json(&body))?;
+    }
+    Ok(())
+}
+
+/// The file an `immich://<id>` photo edits from, downloaded once: the original, or for
+/// formats OpenLight can't decode (HEIC…) Immich's full-size JPEG/WebP rendition.
+pub fn immich_original(core: &Core, id: &str) -> Result<PathBuf, String> {
+    original_from_immich(core, id, || immich(core))
+}
+
+/// Cache of opened Immich photos; clearing it only means downloading them again.
+pub fn originals_dir(core: &Core) -> PathBuf {
+    core.dir.join("remote").join("Immich").join("originals")
+}
+
+/// `creds` is only asked for on a cache miss, so downloaded photos open offline.
+fn original_from_immich(core: &Core, id: &str, creds: impl FnOnce() -> Result<(String, String), String>) -> Result<PathBuf, String> {
+    let name: String = core
+        .db()
+        .query_row("SELECT filename FROM photos WHERE path = ? LIMIT 1", [format!("immich://{id}")], |r| r.get(0))
+        .map_err(es)?;
+    let dir = originals_dir(core);
+    fs::create_dir_all(&dir).map_err(es)?;
+    let mut it = Item { id: id.into(), name, url: String::new() };
+    let stem = local_stem(&it);
+    let mut cached = fs::read_dir(&dir).map_err(es)?.flatten().map(|e| e.path());
+    if let Some(p) = cached.find(|p| develop::is_supported(p) && p.file_stem().is_some_and(|s| s == stem.as_str())) {
+        return Ok(p);
+    }
+    let (url, key) = creds()?;
+    let what = if save_ext(&it.name, "").is_some() { "original" } else { "thumbnail?size=fullsize" };
+    it.url = format!("{url}/api/assets/{id}/{what}");
+    download(&agent(), &it, ("x-api-key", &key), &dir, &stem)?.ok_or_else(|| format!("{}: Immich sent a format OpenLight can't open", it.name))
 }
 
 // ---------------------------------------------------------------------------
@@ -369,13 +485,13 @@ fn file_name(path: &str) -> String {
     Path::new(path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
-/// Capture time in UTC for Immich's required `fileCreatedAt` (EXIF times are read as this
-/// computer's local time), else now. The file's own EXIF date wins where it has one.
-const TAKEN_UTC: &str = "SELECT COALESCE(strftime('%Y-%m-%dT%H:%M:%SZ', captured_at, 'utc'), \
-                         strftime('%Y-%m-%dT%H:%M:%SZ', 'now')) FROM photos WHERE id = ?";
+/// Catalog path, plus the capture time in UTC for Immich's required `fileCreatedAt` (EXIF
+/// times are read as this computer's local time), else now. The file's own EXIF date wins.
+const UPLOAD_ROW: &str = "SELECT path, COALESCE(strftime('%Y-%m-%dT%H:%M:%SZ', captured_at, 'utc'), \
+                          strftime('%Y-%m-%dT%H:%M:%SZ', 'now')) FROM photos WHERE id = ?";
 
 fn immich_upload(core: &Core, agent: &ureq::Agent, url: &str, key: &str, id: i64, file: &str) -> Result<String, String> {
-    let taken: String = core.db().query_row(TAKEN_UTC, [id], |r| r.get(0)).map_err(es)?;
+    let (path, taken): (String, String) = core.db().query_row(UPLOAD_ROW, [id], |r| Ok((r.get(0)?, r.get(1)?))).map_err(es)?;
     let name = file_name(file);
     let device_asset_id = format!("openlight-{}", crate::new_token());
     // deviceAssetId/deviceId are required before Immich 3 and ignored after.
@@ -387,7 +503,16 @@ fn immich_upload(core: &Core, agent: &ureq::Agent, url: &str, key: &str, id: i64
     ];
     let (content_type, body) = multipart(&fields, &name, &fs::read(file).map_err(es)?);
     let reply = agent.post(&format!("{url}/api/assets")).header("x-api-key", key).header("content-type", &content_type).send(&body[..]);
-    json_of("Immich", reply)?; // 201 created, or 200 when Immich already has these exact bytes
+    let v = json_of("Immich", reply)?; // 201 created, or 200 when Immich already has these exact bytes
+    // Saving an Immich photo back: the edit goes on top of its stack and the original stays.
+    if let (Some(orig), Some(new)) = (immich_id(&path), v["id"].as_str()) {
+        let asset = json_of("Immich", agent.get(&format!("{url}/api/assets/{orig}")).header("x-api-key", key).call())?;
+        let top = asset["stack"]["primaryAssetId"].as_str().unwrap_or(orig);
+        if new != top {
+            let stack = agent.post(&format!("{url}/api/stacks")).header("x-api-key", key).send_json(json!({"assetIds": [new, top]}));
+            json_of("Immich", stack)?;
+        }
+    }
     Ok(name)
 }
 
@@ -489,25 +614,25 @@ fn save_ext(name: &str, content_type: &str) -> Option<String> {
     if raw || develop::IMG_EXTS.contains(&named.as_str()) { Some(named) } else { served.map(String::from) }
 }
 
-/// Stream one original to `<dir>/<stem>.<ext>`; Ok(false) when its format is unsupported.
-fn download(agent: &ureq::Agent, it: &Item, auth: (&str, &str), dir: &Path, stem: &str) -> Result<bool, String> {
+/// Stream one file to `<dir>/<stem>.<ext>`; None when its format is unsupported.
+fn download(agent: &ureq::Agent, it: &Item, auth: (&str, &str), dir: &Path, stem: &str) -> Result<Option<PathBuf>, String> {
     let mut r = agent.get(&it.url).header(auth.0, auth.1).call().map_err(es)?;
     let status = r.status().as_u16();
     if status >= 400 {
         return Err(format!("HTTP {status}"));
     }
     let ct = r.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("");
-    let Some(ext) = save_ext(&it.name, ct) else { return Ok(false) };
+    let Some(ext) = save_ext(&it.name, ct) else { return Ok(None) };
     // Write aside, then rename: an interrupted download never looks complete.
-    let part = dir.join(format!("{stem}.{ext}.part"));
+    let (path, part) = (dir.join(format!("{stem}.{ext}")), dir.join(format!("{stem}.{ext}.part")));
     let res = fs::File::create(&part)
         .and_then(|mut f| io::copy(&mut r.body_mut().as_reader(), &mut f))
-        .and_then(|_| fs::rename(&part, dir.join(format!("{stem}.{ext}"))));
+        .and_then(|_| fs::rename(&part, &path));
     if let Err(e) = res {
         let _ = fs::remove_file(&part);
         return Err(es(e));
     }
-    Ok(true)
+    Ok(Some(path))
 }
 
 /// Download what `remote/<folder…>` doesn't have yet, then import that folder.
@@ -522,7 +647,7 @@ fn fetch_and_import(core: &Core, folder: &[&str], skipped: usize, items: Vec<Ite
     let todo: Vec<(String, Item)> =
         items.into_iter().map(|it| (local_stem(&it), it)).filter(|(stem, _)| !have.contains(stem)).collect();
     let (agent, done) = (agent(), AtomicUsize::new(0));
-    let results: Vec<Result<bool, String>> = todo
+    let results: Vec<Result<Option<PathBuf>, String>> = todo
         .par_iter()
         .map(|(stem, it)| {
             let r = download(&agent, it, auth, &dir, stem).map_err(|e| format!("{}: {e}", it.name));
@@ -540,7 +665,7 @@ fn fetch_and_import(core: &Core, folder: &[&str], skipped: usize, items: Vec<Ite
     Ok(json!({
         "folder": dir,
         "imported": imported,
-        "skipped": skipped + results.iter().filter(|r| matches!(r, Ok(false))).count(),
+        "skipped": skipped + results.iter().filter(|r| matches!(r, Ok(None))).count(),
         "failed": failed.len(),
         "error": failed.first(),
     }))
@@ -577,55 +702,86 @@ mod tests {
         assert_eq!(immich_base(" https://photos.example.net/ "), "https://photos.example.net");
     }
 
-    /// Fake Immich on loopback: a two-page album with a JPEG, a HEIC and an asset that fails.
+    /// Fake Immich on loopback: browse a two-page album in place, open a JPEG original and a
+    /// HEIC (through its full-size rendition) on demand, then save an edit back as a stack.
     #[test]
-    fn immich_album_downloads_and_imports_once() {
+    fn immich_album_opens_in_place_and_saves_back() {
         let mut jpeg = vec![];
         image::DynamicImage::new_rgb8(8, 8).write_to(&mut io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg).unwrap();
         let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
         let url = format!("http://127.0.0.1:{}", server.server_addr().to_ip().unwrap().port());
+        let originals = std::sync::Arc::new(AtomicUsize::new(0));
+        let hits = originals.clone();
         std::thread::spawn(move || {
             for mut req in server.incoming_requests() {
                 assert!(req.headers().iter().any(|h| h.field.equiv("x-api-key") && h.value.as_str() == "k"));
                 let mut bytes = vec![];
                 req.as_reader().read_to_end(&mut bytes).unwrap();
                 let body = String::from_utf8_lossy(&bytes);
+                let json = |v: Value| ("application/json", v.to_string().into_bytes());
+                let put = *req.method() == tiny_http::Method::Put;
                 let (ct, data) = match req.url() {
-                    "/api/albums" => ("application/json", json!([{"id": "a1", "albumName": "Trip/2024", "assetCount": 3}]).to_string().into_bytes()),
+                    "/api/albums" => json(json!([{"id": "a1", "albumName": "Trip", "assetCount": 2}])),
                     "/api/search/metadata" => {
-                        let first = serde_json::from_str::<Value>(&body).unwrap()["page"] == 1;
+                        let q = serde_json::from_str::<Value>(&body).unwrap();
+                        assert_eq!((q["order"].as_str(), q["size"].as_u64()), (Some("asc"), Some(250)));
+                        let first = q["page"] == 1;
                         let items = if first {
-                            json!([{"id": "u-1", "originalFileName": "IMG_1.JPG"}, {"id": "u-2", "originalFileName": "IMG_2.HEIC"}])
+                            json!([{"id": "u-1", "originalFileName": "IMG_1.JPG", "localDateTime": "2024-05-01T12:34:56.000Z", "isFavorite": true,
+                                    "exifInfo": {"make": "FUJIFILM", "model": "X-T5", "iso": 200, "rating": 4}}])
                         } else {
-                            json!([{"id": "u-3", "originalFileName": "IMG_3.JPG"}])
+                            json!([{"id": "u-2", "originalFileName": "IMG_2.HEIC"}])
                         };
-                        ("application/json", json!({"assets": {"items": items, "nextPage": if first { json!("2") } else { Value::Null }}}).to_string().into_bytes())
+                        json(json!({"assets": {"items": items, "nextPage": if first { json!("2") } else { Value::Null }}}))
                     }
-                    "/api/assets/u-1/original" => ("image/jpeg", jpeg.clone()),
+                    "/api/assets/u-1/thumbnail" | "/api/assets/u-2/thumbnail" | "/api/assets/u-2/thumbnail?size=fullsize" => ("image/jpeg", jpeg.clone()),
+                    "/api/assets/u-1/original" => {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        ("image/jpeg", jpeg.clone())
+                    }
+                    "/api/assets" if put => {
+                        let v = serde_json::from_str::<Value>(&body).unwrap();
+                        assert_eq!(v, json!({"ids": ["u-1"], "rating": -1, "isFavorite": false}));
+                        ("", vec![]) // 204 No Content, as Immich replies
+                    }
                     "/api/assets" => {
                         // EXIF local time → UTC: the day can shift with this machine's time zone.
-                        assert!(body.contains("name=\"assetData\"; filename=\"IMG_1_u1.jpg\""), "{body}");
                         assert!(body.contains("name=\"fileCreatedAt\"\r\n\r\n2024-0"), "{body}");
-                        ("application/json", json!({"id": "n1", "status": "created"}).to_string().into_bytes())
+                        json(json!({"id": "n1", "status": "created"}))
+                    }
+                    "/api/assets/u-1" => json(json!({"id": "u-1", "stack": null})),
+                    "/api/stacks" => {
+                        assert_eq!(serde_json::from_str::<Value>(&body).unwrap()["assetIds"], json!(["n1", "u-1"]));
+                        json(json!({"id": "s1"}))
                     }
                     _ => ("text/plain", vec![]),
                 };
-                let code = if data.is_empty() { 500 } else { 200 };
+                let code = if ct.is_empty() { 204 } else if data.is_empty() { 500 } else { 200 };
                 let h = tiny_http::Header::from_bytes(&b"Content-Type"[..], ct.as_bytes()).unwrap();
                 let _ = req.respond(tiny_http::Response::from_data(data).with_status_code(code).with_header(h));
             }
         });
         let dir = std::env::temp_dir().join(format!("ols-remote-test-{}", crate::new_token()));
         let core = Core::open(dir.clone()).unwrap();
-        let counts = |r: &Value| (r["imported"].as_u64(), r["skipped"].as_u64(), r["failed"].as_u64());
-        let r = import_from_immich(&core, &url, "k", Some("a1")).unwrap();
-        assert_eq!(counts(&r), (Some(1), Some(1), Some(1)), "{r}");
-        assert!(dir.join("remote/Immich/Trip_2024/IMG_1_u1.jpg").exists());
-        let again = import_from_immich(&core, &url, "k", Some("a1")).unwrap();
-        assert_eq!(counts(&again), (Some(0), Some(1), Some(1)), "{again}");
-        let id: i64 = core.db().query_row("UPDATE photos SET captured_at = '2024-05-01 12:34:56' RETURNING id", [], |r| r.get(0)).unwrap();
-        let file = dir.join("remote/Immich/Trip_2024/IMG_1_u1.jpg").display().to_string();
-        assert_eq!(immich_upload(&core, &agent(), &url, "k", id, &file), Ok("IMG_1_u1.jpg".to_string()));
+        let page = |n| open_from_immich(&core, &url, "k", Some("a1"), n).unwrap()["next"].as_u64();
+        let album = || catalog::query(&core.db(), &catalog::Filter { immich_album: Some("a1".into()), ..Default::default() }).unwrap();
+        assert_eq!((page(1), album().len()), (Some(2), 1), "one page at a time");
+        assert_eq!((page(2), album().len()), (None, 2));
+        assert!(album().iter().all(|p| core.thumb_path(p.id).exists()));
+        let p = album().into_iter().find(|p| p.path == "immich://u-1").unwrap();
+        assert_eq!((p.camera.as_deref(), p.captured_at.as_deref()), (Some("FUJIFILM X-T5"), Some("2024-05-01 12:34:56")));
+        assert_eq!((p.rating, p.flag), (4, 1), "Immich stars and favorite arrive as rating and pick");
+        assert_eq!((page(1), album().len()), (Some(2), 1), "reopening starts the album over");
+        let creds = || Ok((url.clone(), "k".to_string()));
+        let reject = catalog::Culling { rating: Some(2), flag: Some("reject".into()), ..Default::default() };
+        catalog::update(&core.db(), &[p.id], &reject).unwrap();
+        push_to_immich(&core, &[p.id], creds).unwrap();
+        assert_eq!(originals.load(Ordering::SeqCst), 0, "browsing must not download originals");
+        let file = original_from_immich(&core, "u-1", creds).unwrap();
+        assert_eq!(original_from_immich(&core, "u-1", creds).unwrap(), file);
+        assert_eq!(originals.load(Ordering::SeqCst), 1, "an opened original is downloaded once");
+        assert!(original_from_immich(&core, "u-2", creds).unwrap().ends_with("IMG_2_u2.jpg"));
+        assert_eq!(immich_upload(&core, &agent(), &url, "k", p.id, &file.display().to_string()), Ok("IMG_1_u1.jpg".to_string()));
         let _ = fs::remove_dir_all(&dir);
     }
 }

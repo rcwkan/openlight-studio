@@ -18,10 +18,13 @@ use std::{
 const INSTRUCTIONS: &str = "OpenLight Studio photo catalog and non-destructive RAW editor. \
 Find photos with catalog_query, look at them with photo_inspect (preview image + histogram telemetry), \
 edit with develop_apply_parameters / mask_create_and_edit, verify with photo_inspect again. \
+Select an object by tracing it as a polygon mask; remove objects with retouch_remove_objects. \
 Every mutation is one undoable history step in the app.";
 
 pub fn tools() -> Value {
     let ids = json!({ "type": "array", "items": { "type": "string" } });
+    let outline = json!({ "type": "array", "minItems": 3, "items": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
+        "description": "outline vertices [x, y] as fractions (0-1) of the full uncropped frame, (0,0) = top-left; trace the edge closely, 12-60 points" });
     let wheel = json!({ "type": "object", "properties": { "hue": { "type": "number" }, "sat": { "type": "number" }, "lum": { "type": "number" } } });
     let parameters = json!({
         "type": "object",
@@ -93,7 +96,7 @@ pub fn tools() -> Value {
         },
         {
             "name": "mask_create_and_edit",
-            "description": "Create (or replace, by mask_name) a boolean mask and its local adjustments. Supported source_type values in this build: linear_gradient (start/end: [x,y] 0-1, full effect at start), radial_gradient (center [x,y], radius [rx,ry] as fractions of width/height), luminance_range (range [low,high] 0-1), color_range (color: sRGB [r,g,b] 0-1, tolerance 0-100). AI semantic types need segmentation models that are not installed.",
+            "description": "Create (or replace, by mask_name) a boolean mask and its local adjustments. Supported source_type values in this build: polygon (points: outline of an object or area, e.g. to select the castle, a person or the sky; the edge snaps to the photo), linear_gradient (start/end: [x,y] 0-1, full effect at start), radial_gradient (center [x,y], radius [rx,ry] as fractions of width/height), luminance_range (range [low,high] 0-1), color_range (color: sRGB [r,g,b] 0-1, tolerance 0-100). Coordinates refer to the full uncropped frame (photo_inspect full_frame). AI semantic types (ai_subject, ai_sky…) need segmentation models that are not installed: trace a polygon instead. A selection with all-zero local_adjustments changes nothing until adjusted.",
             "inputSchema": { "type": "object", "required": ["photo_id", "mask_name", "operations", "local_adjustments"], "properties": {
                 "photo_id": { "type": "string" },
                 "mask_name": { "type": "string" },
@@ -109,7 +112,8 @@ pub fn tools() -> Value {
                     "radius": { "type": "array", "items": { "type": "number" } },
                     "range": { "type": "array", "items": { "type": "number" } },
                     "color": { "type": "array", "items": { "type": "number" } },
-                    "tolerance": { "type": "number", "minimum": 0, "maximum": 100 } } } },
+                    "tolerance": { "type": "number", "minimum": 0, "maximum": 100 },
+                    "points": outline } } },
                 "local_adjustments": { "type": "object", "description": "exposure (-5..5), contrast, highlights, shadows, whites, blacks, temperature_shift, tint_shift, saturation (-100..100)" } } }
         },
         {
@@ -129,9 +133,45 @@ pub fn tools() -> Value {
             "inputSchema": { "type": "object", "required": ["photo_id"], "properties": {
                 "photo_id": { "type": "string" },
                 "max_edge": { "type": "integer", "enum": [512, 1024, 1536], "default": 1024 },
+                "full_frame": { "type": "boolean", "default": false, "description": "skip crop and straighten: the frame that mask and retouch coordinates refer to" },
+                "show_mask": { "type": "integer", "minimum": 0, "description": "tint the coverage of the mask at this index red, to check a selection" },
                 "include_histogram_bins": { "type": "boolean", "default": false } } }
+        },
+        {
+            "name": "retouch_remove_objects",
+            "description": "Remove objects or distractions (people, cars, signs, litter, dust spots) from a photo. Each outline is refilled from a nearby area with matching surroundings and colour-matched to them (a non-generative heal, best on sand, sky, grass, water or walls; it cannot invent hidden structure). Outline each object generously, including its shadow. Removals are listed in the Develop view and are undoable.",
+            "inputSchema": { "type": "object", "required": ["photo_id", "objects"], "properties": {
+                "photo_id": { "type": "string" },
+                "objects": { "type": "array", "items": { "type": "object", "required": ["name", "points"], "properties": {
+                    "name": { "type": "string", "description": "what is removed, e.g. \"person left\"" },
+                    "points": outline } } } } }
         }
     ])
+}
+
+/// Appends a heal per `{name, points}` object, each filled from an automatically chosen area.
+pub fn remove_objects(core: &Core, id: i64, d: &mut develop::Develop, objects: &Value) -> Result<Vec<String>, String> {
+    let objs = objects
+        .as_array()
+        .ok_or("objects must be an array")?
+        .iter()
+        .map(|o| {
+            let points: Vec<[f32; 2]> = serde_json::from_value(o["points"].clone()).map_err(|e| format!("invalid points: {e}"))?;
+            develop::check_outline(&points)?;
+            Ok((o["name"].as_str().filter(|s| !s.is_empty()).unwrap_or("object").to_string(), points))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let img = core.proxy(&core.photo(id)?.path)?;
+    let objs = develop::group_outlines(objs, img.w, img.h);
+    let taken: Vec<Vec<[f32; 2]>> = d.retouch.iter().map(|r| r.points.clone()).chain(objs.iter().map(|o| o.1.clone())).collect();
+    let mut names = vec![];
+    for (name, points) in objs {
+        let avoid: Vec<&[[f32; 2]]> = taken.iter().filter(|t| **t != points).map(|t| &t[..]).collect();
+        let source = develop::heal_source(&img, &points, &avoid).ok_or_else(|| format!("no clear area near '{name}' to fill it from"))?;
+        names.push(name.clone());
+        d.retouch.push(develop::Heal { name, points, source });
+    }
+    Ok(names)
 }
 
 /// Handle one JSON-RPC message. None for notifications and client responses.
@@ -243,7 +283,7 @@ fn call_tool(core: &Arc<Core>, name: &str, a: &Value) -> Value {
                 color_label: a["color_label"].as_str().map(String::from),
                 keywords: None,
             };
-            let n = catalog::update(&core.db(), &ids, &u)?;
+            let n = core.cull(&ids, &u)?;
             core.emit("catalog-changed", json!({}));
             Ok(vec![text(json!({ "updated": n, "virtual_copy_ids": copies }))])
         }
@@ -295,13 +335,26 @@ fn call_tool(core: &Arc<Core>, name: &str, a: &Value) -> Value {
             }
             Ok(vec![text(json!({ "files": files, "notes": notes }))])
         }
+        "retouch_remove_objects" => {
+            let id = parse_id(&a["photo_id"])?;
+            let mut d = core.develop(id)?;
+            let names = remove_objects(core, id, &mut d, &a["objects"])?;
+            d.clamp();
+            d.ai_provenance_log.push(provenance(core, "mcp", &format!("retouch_remove_objects: {}", names.join(", "))));
+            core.commit(id, &d, &format!("AI: remove {}", names.join(", ")))?;
+            Ok(vec![text(json!({ "photo_id": id.to_string(), "removed": names, "retouch_count": d.retouch.len() }))])
+        }
         "photo_inspect" => {
             let id = parse_id(&a["photo_id"])?;
             let edge = a["max_edge"].as_u64().unwrap_or(1024).clamp(256, 2048) as u32;
-            let img = core.render(id, &Opts::default())?;
+            let opts = Opts { full_frame: a["full_frame"].as_bool().unwrap_or(false), overlay_mask: a["show_mask"].as_u64().map(|m| m as usize), ..Default::default() };
+            let img = core.render(id, &opts)?;
             let mut t = develop::telemetry(&img);
             if !a["include_histogram_bins"].as_bool().unwrap_or(false) {
                 t.as_object_mut().map(|o| o.remove("histogram"));
+            }
+            if opts.overlay_mask.is_some() {
+                t = json!("not measured: the mask overlay tints the preview");
             }
             let jpeg = develop::encode_jpeg(&img, edge, 85)?;
             let state = core.develop(id)?;
