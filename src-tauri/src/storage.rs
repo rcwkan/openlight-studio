@@ -71,9 +71,65 @@ pub fn report(core: &Core) -> Result<Value, String> {
     let orphans = orphan_thumbs(core)?;
     let originals = du(&remote::originals_dir(core));
     let folders = folders(core)?;
+    let db_bytes = du(&dir.join("catalog.olcat")).0;
     let wal = du(&dir.join("catalog.olcat-wal")).0;
-    let catalog = du(&dir.join("catalog.olcat")).0 + wal + du(&dir.join("catalog.olcat-shm")).0;
+    let shm = du(&dir.join("catalog.olcat-shm")).0;
+    let catalog = db_bytes + wal + shm;
     let (total, thumbs, google) = (du(dir).0, du(&dir.join("thumbs")).0, du(&dir.join("remote").join("Google Photos")).0);
+
+    let immich_dir = dir.join("remote").join("Immich");
+    let mut immich_albums = Vec::new();
+    let mut immich_albums_bytes = 0u64;
+    let mut immich_albums_count = 0u64;
+    if immich_dir.is_dir() {
+        if let Ok(entries) = fs::read_dir(&immich_dir) {
+            for entry in entries.flatten() {
+                if entry.file_name() != "originals" && entry.path().is_dir() {
+                    let (b, c) = du(&entry.path());
+                    immich_albums_bytes += b;
+                    immich_albums_count += c;
+                    immich_albums.push(json!({
+                        "name": entry.file_name().to_string_lossy(),
+                        "path": entry.path().to_string_lossy(),
+                        "bytes": b,
+                        "photos": c,
+                    }));
+                }
+            }
+        }
+    }
+
+    let mut other_details = Vec::new();
+    let mut other_bytes = 0u64;
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name == "thumbs" || name == "remote" || name.starts_with("catalog.olcat") {
+                continue;
+            }
+            let (b, _) = du(&entry.path());
+            other_bytes += b;
+            other_details.push(json!({
+                "name": name,
+                "bytes": b,
+            }));
+        }
+    }
+    let remote_dir = dir.join("remote");
+    if let Ok(entries) = fs::read_dir(&remote_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name != "Immich" && name != "Google Photos" {
+                let (b, _) = du(&entry.path());
+                other_bytes += b;
+                other_details.push(json!({
+                    "name": format!("remote/{name}"),
+                    "bytes": b,
+                }));
+            }
+        }
+    }
+
     let c = core.db();
     let one = |sql: &str| -> Result<i64, String> { c.query_row(sql, [], |r| r.get(0)).map_err(es) };
     let free = one("SELECT (SELECT freelist_count FROM pragma_freelist_count()) * (SELECT page_size FROM pragma_page_size())")?;
@@ -87,21 +143,37 @@ pub fn report(core: &Core) -> Result<Value, String> {
         )
         .map_err(es)?;
     let missing: usize = folders.values().map(|f| f.missing.len()).sum();
+    let orphan_bytes: u64 = orphans.iter().map(|p| du(p).0).sum();
+    let all_count = orphans.len() + originals.1 as usize + steps.max(0) as usize;
+    let all_bytes = orphan_bytes + originals.0 + step_bytes.max(0) as u64 + free.max(0) as u64 + wal;
+
     Ok(json!({
         "data_dir": dir,
         "total": total,
         "catalog": catalog,
+        "catalog_details": {
+            "db": db_bytes,
+            "wal": wal,
+            "shm": shm,
+            "free": free,
+        },
         "thumbs": thumbs,
         "originals": originals.0,
+        "immich_albums": immich_albums,
+        "immich_albums_bytes": immich_albums_bytes,
         "google": google,
+        "other": other_bytes,
+        "other_details": other_details,
         "summary": catalog::summary(&c)?,
         "immich_photos": one("SELECT COUNT(*) FROM photos WHERE master_id IS NULL AND path LIKE 'immich://%'")?,
         "history_steps": one("SELECT COUNT(*) FROM history")?,
         "ai": {"photos": ai.0, "edits": ai.1},
         "folders": folders.iter().map(|(k, f)| json!({"folder": k, "photos": f.photos, "bytes": f.bytes, "missing": f.missing.len(), "online": f.online})).collect::<Vec<_>>(),
         "clean": {
-            "thumbs": {"count": orphans.len(), "bytes": orphans.iter().map(|p| du(p).0).sum::<u64>()},
+            "all": {"count": all_count, "bytes": all_bytes},
+            "thumbs": {"count": orphans.len(), "bytes": orphan_bytes},
             "originals": {"count": originals.1, "bytes": originals.0},
+            "immich_albums": {"count": immich_albums_count, "bytes": immich_albums_bytes},
             "missing": {"count": missing, "bytes": 0},
             "history": {"count": steps, "bytes": step_bytes},
             "compact": {"count": 0, "bytes": free as u64 + wal},
@@ -121,9 +193,44 @@ pub fn clean(core: &Core, what: &str) -> Result<usize, String> {
                 _ => n,
             }
         }
+        "immich_albums" => {
+            let immich_dir = core.dir.join("remote").join("Immich");
+            let mut count = 0;
+            if immich_dir.is_dir() {
+                for entry in fs::read_dir(&immich_dir).into_iter().flatten().flatten() {
+                    if entry.file_name() != "originals" && entry.path().is_dir() {
+                        let folder_str = entry.path().to_string_lossy().to_string();
+                        let ids: Vec<i64> = {
+                            let c = core.db();
+                            let mut st = c.prepare("SELECT id FROM photos WHERE folder = ?").map_err(es)?;
+                            st.query_map([&folder_str], |r| r.get(0)).map_err(es)?.collect::<Result<_, _>>().map_err(es)?
+                        };
+                        if !ids.is_empty() {
+                            core.remove(&ids)?;
+                        }
+                        count += du(&entry.path()).1 as usize;
+                        let _ = fs::remove_dir_all(entry.path());
+                    }
+                }
+            }
+            count
+        }
         "missing" => core.remove(&folders(core)?.into_values().flat_map(|f| f.missing).collect::<Vec<_>>())?,
         "history" => catalog::clear_history(&core.db())?,
         "compact" => 0,
+        "all" => {
+            let mut count = 0;
+            if let Ok(orphans) = orphan_thumbs(core) {
+                count += orphans.iter().filter(|p| fs::remove_file(p).is_ok()).count();
+            }
+            let dir = remote::originals_dir(core);
+            count += du(&dir).1 as usize;
+            let _ = fs::remove_dir_all(&dir);
+            if let Ok(h) = catalog::clear_history(&core.db()) {
+                count += h;
+            }
+            count
+        }
         _ => return Err(format!("unknown clean-up '{what}'")),
     };
     if what != "thumbs" && what != "originals" {
@@ -181,6 +288,49 @@ mod tests {
         for k in ["thumbs", "originals", "missing", "history"] {
             assert_eq!(r["clean"][k]["count"], 0, "{k}");
         }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clean_all_and_immich_albums() {
+        let dir = std::env::temp_dir().join(format!("ols-storage-test-all-{}", crate::new_token()));
+        let core = Core::open(dir.join("data")).unwrap();
+        let photos = dir.join("photos");
+        fs::create_dir_all(&photos).unwrap();
+        fs::write(photos.join("a.jpg"), [0u8; 10]).unwrap();
+        let add = |p: PathBuf| {
+            let folder = p.parent().unwrap().to_string_lossy().to_string();
+            catalog::add_photo(&core.db(), &p.to_string_lossy(), &folder, "x.jpg", &Default::default(), &Default::default()).unwrap().unwrap()
+        };
+        let kept = add(photos.join("a.jpg"));
+        let mut d = core.develop(kept).unwrap();
+        d.basic_tone.exposure = 1.0;
+        catalog::save_develop(&core.db(), kept, &d, "Exposure").unwrap();
+        fs::write(core.thumb_path(kept), [0u8; 5]).unwrap();
+        fs::write(core.thumb_path(999), [0u8; 5]).unwrap();
+        fs::create_dir_all(remote::originals_dir(&core)).unwrap();
+        fs::write(remote::originals_dir(&core).join("cached.jpg"), [0u8; 7]).unwrap();
+
+        // Create a mock Immich album
+        let immich_album = dir.join("data").join("remote").join("Immich").join("Trip 2026");
+        fs::create_dir_all(&immich_album).unwrap();
+        let album_photo = immich_album.join("photo1.jpg");
+        fs::write(&album_photo, [0u8; 20]).unwrap();
+        let _ = add(album_photo);
+
+        let r = report(&core).unwrap();
+        assert_eq!(r["immich_albums"][0]["name"], "Trip 2026");
+        assert_eq!(r["clean"]["all"]["count"].as_u64().unwrap(), 3); // 1 orphan thumb + 1 original + 1 history step
+
+        // clean("all") cleans orphan thumbs, originals, history, and compacts
+        let cleaned = clean(&core, "all").unwrap();
+        assert_eq!(cleaned, 3);
+
+        // clean("immich_albums") cleans the downloaded album and photos
+        let cleaned_albums = clean(&core, "immich_albums").unwrap();
+        assert_eq!(cleaned_albums, 1);
+        assert!(!immich_album.exists());
+
         let _ = fs::remove_dir_all(&dir);
     }
 }

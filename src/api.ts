@@ -123,16 +123,25 @@ export type HistoryEntry = { id: number; label: string; created_at: string; curr
 export type Rendered = { hist: Uint32Array[]; image: ImageData };
 /** upload: send the renders to Immich / Google Photos instead of keeping them in `folder` */
 export type ExportReq = { ids: number[]; folder: string; format: string; color_space: string; quality: number; max_edge: number | null; upload?: Source | null };
-export type CleanUp = "thumbs" | "originals" | "missing" | "history" | "compact";
+export type CleanUp = "thumbs" | "originals" | "immich_albums" | "missing" | "history" | "compact" | "all";
 type Named = { name: string; count: number }[];
+export type ImmichAlbumStorage = { name: string; path: string; bytes: number; photos: number };
+export type OtherDetail = { name: string; bytes: number };
+export type CatalogDetails = { db: number; wal: number; shm: number; free: number };
+
 /** Sizes in bytes. `folders` are local folders; an offline one is not there at all (e.g. an unplugged drive). */
 export type StorageReport = {
   data_dir: string;
   total: number;
   catalog: number;
+  catalog_details?: CatalogDetails;
   thumbs: number;
   originals: number;
+  immich_albums?: ImmichAlbumStorage[];
+  immich_albums_bytes?: number;
   google: number;
+  other?: number;
+  other_details?: OtherDetail[];
   summary: { total_photos: number; virtual_copies: number; edited: number; picks: number; rejects: number; rated_3_plus: number; cameras: Named; lenses: Named };
   immich_photos: number;
   history_steps: number;
