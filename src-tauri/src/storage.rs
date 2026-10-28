@@ -1,6 +1,10 @@
 //! Settings → Storage: what the catalog folder holds, a library analysis and clean-up.
 
-use crate::{Core, catalog, develop::es, remote};
+use crate::{
+    Core, catalog,
+    develop::{self, es},
+    remote,
+};
 use rayon::prelude::*;
 use serde_json::{Value, json};
 use std::{
@@ -18,6 +22,11 @@ fn du(path: &Path) -> (u64, u64) {
         Ok(m) => (m.len(), 1),
         Err(_) => (0, 0),
     }
+}
+
+/// Photo files directly in `dir`; `.olxmp` sidecars and partial downloads are not photos.
+fn photo_files(dir: &Path) -> u64 {
+    fs::read_dir(dir).into_iter().flatten().flatten().filter(|e| develop::is_supported(&e.path())).count() as u64
 }
 
 /// Thumbnails whose photo is no longer in the catalog. The folder is listed before the ids
@@ -85,7 +94,7 @@ pub fn report(core: &Core) -> Result<Value, String> {
         if let Ok(entries) = fs::read_dir(&immich_dir) {
             for entry in entries.flatten() {
                 if entry.file_name() != "originals" && entry.path().is_dir() {
-                    let (b, c) = du(&entry.path());
+                    let (b, c) = (du(&entry.path()).0, photo_files(&entry.path()));
                     immich_albums_bytes += b;
                     immich_albums_count += c;
                     immich_albums.push(json!({
@@ -208,7 +217,7 @@ pub fn clean(core: &Core, what: &str) -> Result<usize, String> {
                         if !ids.is_empty() {
                             core.remove(&ids)?;
                         }
-                        count += du(&entry.path()).1 as usize;
+                        count += photo_files(&entry.path()) as usize;
                         let _ = fs::remove_dir_all(entry.path());
                     }
                 }
@@ -316,10 +325,12 @@ mod tests {
         fs::create_dir_all(&immich_album).unwrap();
         let album_photo = immich_album.join("photo1.jpg");
         fs::write(&album_photo, [0u8; 20]).unwrap();
+        fs::write(immich_album.join("photo1.jpg.olxmp"), b"{}").unwrap();
         let _ = add(album_photo);
 
         let r = report(&core).unwrap();
         assert_eq!(r["immich_albums"][0]["name"], "Trip 2026");
+        assert_eq!(r["immich_albums"][0]["photos"], 1, "the sidecar is not a photo");
         assert_eq!(r["clean"]["all"]["count"].as_u64().unwrap(), 3); // 1 orphan thumb + 1 original + 1 history step
 
         // clean("all") cleans orphan thumbs, originals, history, and compacts

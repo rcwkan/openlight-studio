@@ -14,6 +14,7 @@ const size = (n: number) => {
   return `${n.toFixed(i && n < 10 ? 1 : 0)} ${units[i]}`;
 };
 const num = (n: number) => n.toLocaleString();
+const plural = (n: number, word: string) => `${num(n)} ${word}${n === 1 ? "" : "s"}`;
 const short = (folder: string) => folder.split(/[\\/]/).slice(-2).join("/");
 
 /** Storage usage of the catalog folder, a library analysis and clean-up. */
@@ -72,17 +73,17 @@ export function SettingsView() {
   const c = r.clean;
   // key, title, what it is, amount, button, confirmation for what can't be recovered
   const cleans: [CleanUp, string, string, string, string, string?][] = [
-    ["thumbs", "Orphaned thumbnails", "Previews of photos that are no longer in the catalog.", `${num(c.thumbs.count)} files · ${size(c.thumbs.bytes)}`, "Delete"],
-    ["originals", "Immich photo cache", "Kept after you open or export an Immich photo; downloaded again when needed while Immich is connected.", `${num(c.originals.count)} files · ${size(c.originals.bytes)}`, "Clear"],
+    ["thumbs", "Orphaned thumbnails", "Previews of photos that are no longer in the catalog.", `${plural(c.thumbs.count, "file")} · ${size(c.thumbs.bytes)}`, "Delete"],
+    ["originals", "Immich photo cache", "Kept after you open or export an Immich photo; downloaded again when needed while Immich is connected.", `${plural(c.originals.count, "file")} · ${size(c.originals.bytes)}`, "Clear"],
     ...(c.immich_albums && c.immich_albums.bytes > 0
       ? [
           [
             "immich_albums" as CleanUp,
             "Downloaded Immich albums",
             "Full albums downloaded from Immich. Photos remain safe on your Immich server.",
-            `${num(c.immich_albums.count)} files · ${size(c.immich_albums.bytes)}`,
+            `${plural(c.immich_albums.count, "photo")} · ${size(c.immich_albums.bytes)}`,
             "Clear",
-            `Remove all downloaded Immich albums (${size(c.immich_albums.bytes)}) from local storage? Photos remain on your Immich server and can be re-synced anytime.`,
+            `Delete the downloaded Immich albums (${plural(c.immich_albums.count, "photo")}, ${size(c.immich_albums.bytes)})?\n\nTheir photos are also removed from the catalog, with any edits, ratings and keywords you made to them here. The originals stay on your Immich server, where you can browse them in place.`,
           ] as [CleanUp, string, string, string, string, string?],
         ]
       : []),
@@ -90,11 +91,11 @@ export function SettingsView() {
       "missing",
       "Missing photos",
       "Catalog entries whose file was deleted or moved. Offline folders are left alone.",
-      `${num(c.missing.count)} photos`,
+      plural(c.missing.count, "photo"),
       "Remove",
       `Remove ${c.missing.count} missing photo(s) and their virtual copies from the catalog? Their ratings, keywords and edit history are lost.`,
     ],
-    ["history", "Edit history", "Undo steps. Every photo keeps its current edits.", `${num(c.history.count)} steps · ${size(c.history.bytes)}`, "Clear", `Clear ${c.history.count} undo step(s)? Every photo keeps its current edits, but earlier steps can no longer be restored.`],
+    ["history", "Edit history", "Undo steps. Every photo keeps its current edits.", `${plural(c.history.count, "step")} · ${size(c.history.bytes)}`, "Clear", `Clear ${c.history.count} undo step(s)? Every photo keeps its current edits, but earlier steps can no longer be restored.`],
     ["compact", "Compact catalog", "Rewrites the catalog file without its unused space.", `${size(c.compact.bytes)} unused`, "Compact"],
   ];
 
@@ -179,7 +180,7 @@ export function SettingsView() {
                       <div key={alb.path} className="flex items-center justify-between gap-2 border-b border-neutral-900 pb-1 last:border-b-0">
                         <div className="truncate">
                           <span className="text-neutral-200">{alb.name}</span>
-                          <span className="ml-1.5 text-neutral-500">({num(alb.photos)} photos)</span>
+                          <span className="ml-1.5 text-neutral-500">({plural(alb.photos, "photo")})</span>
                         </div>
                         <span className="shrink-0 tabular-nums text-neutral-300">{size(alb.bytes)}</span>
                       </div>
