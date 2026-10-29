@@ -76,7 +76,7 @@ export function Seg<T extends string>({ options, value, onChange }: { options: [
   return (
     <div className="flex overflow-hidden rounded bg-neutral-800 text-[11px]">
       {options.map(([v, label]) => (
-        <button key={v} onClick={() => onChange(v)} className={`flex-1 px-2 py-1 ${v === value ? "bg-neutral-600 text-white" : "text-neutral-400 hover:text-neutral-200"}`}>
+        <button key={v} onClick={() => onChange(v)} className={`flex-1 whitespace-nowrap px-1.5 py-1 ${v === value ? "bg-neutral-600 text-white" : "text-neutral-400 hover:text-neutral-200"}`}>
           {label}
         </button>
       ))}

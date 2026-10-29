@@ -171,7 +171,7 @@ export default function App() {
 
   const keys = useRef<(e: KeyboardEvent) => void>(() => {});
   keys.current = (e) => {
-    if (e.metaKey || e.ctrlKey || e.altKey || module === "agent" || module === "settings") return;
+    if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey || module === "agent" || module === "settings") return;
     const k = e.key.toLowerCase();
     if (k === "g") setModule("library");
     else if (k === "d" && active) setModule("develop");

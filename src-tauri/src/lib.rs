@@ -343,23 +343,120 @@ fn default_develop() -> Develop {
     Develop::default()
 }
 
+/// Preview-only overlays: soft-proof gamut (sRGB | DisplayP3 | AdobeRGB) and clipping warnings,
+/// Visualize Spots threshold.
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct Proof {
+    gamut: Option<String>,
+    clipping: bool,
+    spots: Option<f32>,
+}
+
 /// Binary reply: u32 width, u32 height, 4x256 u32 histogram (R, G, B, luma), RGBA8 pixels.
+/// The histogram is of the photo itself, not of the overlays.
 #[tauri::command(async)]
-fn render_preview(core: St, id: i64, develop: Develop, skip_crop: bool, overlay_mask: Option<usize>, full_frame: Option<bool>) -> Result<tauri::ipc::Response, String> {
+fn render_preview(core: St, id: i64, develop: Develop, skip_crop: bool, overlay_mask: Option<usize>, full_frame: Option<bool>, proof: Option<Proof>) -> Result<tauri::ipc::Response, String> {
     let photo = core.photo(id)?;
     let opts = Opts { skip_crop, overlay_mask, full_frame: full_frame.unwrap_or(false) };
-    let out = develop::render(&*core.proxy(&photo.path)?, &develop, &opts);
-    let rgba = develop::to_rgba8(&out);
+    let mut out = develop::render(&*core.proxy(&photo.path)?, &develop, &opts);
+    let mut rgba = develop::to_rgba8(&out);
+    let hist = develop::histogram(&rgba);
+    let proof = proof.unwrap_or_default();
+    if proof.gamut.is_some() || proof.clipping || proof.spots.is_some() {
+        if let Some(t) = proof.spots {
+            develop::visualize_spots(&mut out, t);
+        }
+        develop::proof(&mut out, proof.gamut.as_deref(), proof.clipping);
+        rgba = develop::to_rgba8(&out);
+    }
     let mut buf = Vec::with_capacity(8 + 4096 + rgba.len());
     buf.extend((out.w as u32).to_le_bytes());
     buf.extend((out.h as u32).to_le_bytes());
-    for ch in develop::histogram(&rgba) {
+    for ch in hist {
         for v in ch {
             buf.extend(v.to_le_bytes());
         }
     }
     buf.extend(rgba);
     Ok(tauri::ipc::Response::new(buf))
+}
+
+/// Upright: the Transform that `mode` (off | auto | level | vertical | full | guided) gives `develop`.
+#[tauri::command(async)]
+fn upright(core: St, id: i64, develop: Develop, mode: String) -> Result<develop::Transform, String> {
+    develop::upright(&*core.proxy(&core.photo(id)?.path)?, &develop, &mode)
+}
+
+/// Lateral chromatic aberration measured on the photo: [ca_red_cyan, ca_blue_yellow].
+#[tauri::command(async)]
+fn auto_ca(core: St, id: i64) -> Result<[f32; 2], String> {
+    Ok(develop::estimate_ca(&*core.proxy(&core.photo(id)?.path)?))
+}
+
+/// Spot removal: heals a circle of `radius` (fraction of the long edge) at (x, y) of the full frame
+/// from a matching nearby area; one history step.
+#[tauri::command(async)]
+fn heal_spot(core: St, id: i64, x: f32, y: f32, radius: f32) -> Result<Develop, String> {
+    if !x.is_finite() || !y.is_finite() || !radius.is_finite() || radius <= 0.0 || radius > 1.0 {
+        return Err("invalid spot coordinates or radius".to_string());
+    }
+    let img = core.proxy(&core.photo(id)?.path)?;
+    let n = img.w.max(img.h) as f32;
+    let (rx, ry) = (radius * n / img.w as f32, radius * n / img.h as f32);
+    let points: Vec<[f32; 2]> = (0..24)
+        .map(|k| {
+            let a = k as f32 / 24.0 * std::f32::consts::TAU;
+            [(x + rx * a.cos()).clamp(0.0, 1.0), (y + ry * a.sin()).clamp(0.0, 1.0)]
+        })
+        .collect();
+    let mut d = core.develop(id)?;
+    mcp::remove_objects(&core, id, &mut d, &json!([{ "name": "Spot", "points": points }]))?;
+    d.clamp();
+    core.commit(id, &d, "Spot removal")?;
+    Ok(d)
+}
+
+/// Auto fine tune to a profile (develop::PROFILES): white balance and tone measured on the photo plus the look.
+#[tauri::command(async)]
+fn auto_develop(core: St, id: i64, develop: Develop, profile: String) -> Result<Develop, String> {
+    develop::auto(&*core.proxy(&core.photo(id)?.path)?, &develop, &profile)
+}
+
+#[tauri::command(async)]
+fn auto_white_balance(core: St, id: i64) -> Result<develop::WhiteBalance, String> {
+    Ok(develop::auto_wb(&*core.proxy(&core.photo(id)?.path)?))
+}
+
+/// Auto tone under the white balance of `develop`.
+#[tauri::command(async)]
+fn auto_tone(core: St, id: i64, develop: Develop) -> Result<develop::BasicTone, String> {
+    Ok(develop::auto_tone(&*core.proxy(&core.photo(id)?.path)?, &develop.white_balance))
+}
+
+/// Removes the objects in selection `mask` (its AI outlines), each healed from a matching nearby area,
+/// and drops the selection; one history step.
+#[tauri::command(async)]
+fn remove_selection(core: St, id: i64, mask: usize) -> Result<Develop, String> {
+    let mut d = core.develop(id)?;
+    let m = d.masks.get(mask).ok_or("that selection no longer exists")?;
+    let name = m.name.clone();
+    let objs: Vec<Value> = m
+        .components
+        .iter()
+        .filter(|c| c.kind == "polygon" && c.op == "add")
+        .map(|c| json!({ "name": if c.name.is_empty() { &name } else { &c.name }, "points": c.points }))
+        .collect();
+    if objs.is_empty() {
+        return Err(format!("'{name}' has no AI-selected object to remove: pick one with ✦ Select"));
+    }
+    mcp::remove_objects(&core, id, &mut d, &json!(objs))?;
+    if mask < d.masks.len() {
+        d.masks.remove(mask);
+    }
+    d.clamp();
+    core.commit(id, &d, &format!("Remove {name}"))?;
+    Ok(d)
 }
 
 #[tauri::command(async)]
@@ -449,6 +546,9 @@ fn ai_run(core: St, id: i64, prompt: String, provider: String) -> Result<String,
 /// AI selection: the object at (x, y) of the full frame joins mask `mask` (or a new one).
 #[tauri::command(async)]
 fn ai_select(core: St, id: i64, x: f32, y: f32, provider: String, mask: Option<usize>, subtract: bool) -> Result<Value, String> {
+    if !x.is_finite() || !y.is_finite() || !(0.0..=1.0).contains(&x) || !(0.0..=1.0).contains(&y) {
+        return Err("invalid selection coordinates".to_string());
+    }
     let (develop, mask) = ai::select(core.inner(), id, [x, y], &provider, mask, subtract)?;
     Ok(json!({ "develop": develop, "mask": mask }))
 }
@@ -518,6 +618,13 @@ pub fn run() {
             get_develop,
             default_develop,
             render_preview,
+            upright,
+            auto_ca,
+            heal_spot,
+            auto_develop,
+            auto_white_balance,
+            auto_tone,
+            remove_selection,
             save_develop,
             get_history,
             goto_history,

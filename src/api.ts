@@ -74,6 +74,9 @@ export type LocalAdjust = {
 /** `tuning`: develop settings applied on top of the photo inside the mask only (absent = none). */
 export type Mask = { mask_id: string; name: string; enabled: boolean; components: MaskComponent[]; adjustments: LocalAdjust; tuning?: Develop | null };
 export type Swatch = { id: string; src_hsl: number[]; shift_hsl: number[]; range_hsl: number[]; falloff: number };
+export type Level = { black: number; gamma: number; white: number; out_black: number; out_white: number };
+/** Selective Color families, in Photoshop's order */
+export const FAMILIES = ["reds", "yellows", "greens", "cyans", "blues", "magentas", "whites", "neutrals", "blacks"] as const;
 
 export type Develop = {
   profile: string;
@@ -90,8 +93,45 @@ export type Develop = {
   color_mixer: { hue: number[]; saturation: number[]; luminance: number[] };
   point_color: Swatch[];
   color_grading_3way: { shadows: Wheel; midtones: Wheel; highlights: Wheel; global: Wheel; blending: number; balance: number };
-  detail: { sharpening: number; sharpen_radius: number; sharpen_masking: number; color_noise_reduction: number };
+  calibration: { shadows_tint: number; red_hue: number; red_saturation: number; green_hue: number; green_saturation: number; blue_hue: number; blue_saturation: number };
+  detail: { sharpening: number; sharpen_radius: number; sharpen_masking: number; color_noise_reduction: number; luminance_noise_reduction: number; luminance_detail: number };
   effects: { vignette: number; vignette_midpoint: number; vignette_feather: number };
+  grain: { amount: number; size: number; roughness: number };
+  lens: {
+    distortion: number;
+    ca_red_cyan: number;
+    ca_blue_yellow: number;
+    defringe_purple: number;
+    defringe_purple_hue: number[];
+    defringe_green: number;
+    defringe_green_hue: number[];
+    vignetting: number;
+    vignetting_midpoint: number;
+  };
+  /** upright: the Upright mode that set vertical/horizontal/rotate; guides: [[x, y], [x, y]] in the full frame */
+  transform: {
+    upright: string;
+    guides: number[][][];
+    vertical: number;
+    horizontal: number;
+    rotate: number;
+    aspect: number;
+    scale: number;
+    offset_x: number;
+    offset_y: number;
+    constrain_crop: boolean;
+  };
+  /** Pro (Photoshop adjustments). Levels in 0-255 display values; selective color [c, m, y, k]; mixer rows [r, g, b, constant] % */
+  levels: Record<"rgb" | "red" | "green" | "blue", Level>;
+  hue_saturation: { hue: number; saturation: number; lightness: number; colorize: boolean; colorize_hue: number; colorize_saturation: number };
+  selective_color: { absolute: boolean } & Record<(typeof FAMILIES)[number], number[]>;
+  channel_mixer: { red: number[]; green: number[]; blue: number[]; monochrome: boolean; gray: number[] };
+  /** colours are sRGB 0-1 */
+  gradient_map: { amount: number; shadows: number[]; highlights: number[] };
+  filters: { blur: number; invert: boolean; posterize: number; threshold: number };
+  /** angle 0/90/180/270 clockwise, then the mirrors; the crop is in the rotated frame */
+  image_rotation: { angle: number; flip_h: boolean; flip_v: boolean };
+  /** in the straightened, rotated frame */
   crop: { x: number; y: number; w: number; h: number; angle: number };
   retouch: Heal[];
   masks: Mask[];
@@ -124,6 +164,8 @@ export type RemoteImport = { folder: string; imported: number; skipped: number; 
 export type AppInfo = { data_dir: string; thumbs_dir: string; exe: string | null; mcp_url: string; mcp_status: string };
 export type HistoryEntry = { id: number; label: string; created_at: string; current: boolean };
 export type Rendered = { hist: Uint32Array[]; image: ImageData };
+/** Preview overlays: soft-proof gamut (sRGB | DisplayP3 | AdobeRGB), clipping, Visualize Spots threshold (null = off). */
+export type Proof = { gamut: string | null; clipping: boolean; spots: number | null };
 /** upload: send the renders to Immich / Google Photos instead of keeping them in `folder` */
 export type ExportReq = { ids: number[]; folder: string; format: string; color_space: string; quality: number; max_edge: number | null; upload?: Source | null };
 export type CleanUp = "thumbs" | "originals" | "immich_albums" | "missing" | "history" | "compact" | "all";
@@ -174,8 +216,21 @@ export const api = {
   getDevelop: (id: number) => invoke<Develop>("get_develop", { id }),
   defaultDevelop: () => invoke<Develop>("default_develop"),
   /** fullFrame: no crop or straighten, so view coordinates are mask coordinates */
-  render: async (id: number, develop: Develop, skipCrop: boolean, overlayMask: number | null, fullFrame = false) =>
-    parseRender(await invoke<ArrayBuffer>("render_preview", { id, develop, skipCrop, overlayMask, fullFrame })),
+  render: async (id: number, develop: Develop, skipCrop: boolean, overlayMask: number | null, fullFrame = false, proof: Proof | null = null) =>
+    parseRender(await invoke<ArrayBuffer>("render_preview", { id, develop, skipCrop, overlayMask, fullFrame, proof })),
+  /** Upright mode: off | auto | level | vertical | full | guided (uses develop.transform.guides) */
+  upright: (id: number, develop: Develop, mode: string) => invoke<Develop["transform"]>("upright", { id, develop, mode }),
+  /** Measured lateral chromatic aberration: [ca_red_cyan, ca_blue_yellow] */
+  autoCa: (id: number) => invoke<[number, number]>("auto_ca", { id }),
+  /** Heal a circle at (x, y) of the full frame; radius is a fraction of the long edge. Commits one history step. */
+  healSpot: (id: number, x: number, y: number, radius: number) => invoke<Develop>("heal_spot", { id, x, y, radius }),
+  /** Auto fine tune to a profile (natural | neutral | vivid | portrait | landscape | bw | film | moody); not saved */
+  autoDevelop: (id: number, develop: Develop, profile: string) => invoke<Develop>("auto_develop", { id, develop, profile }),
+  autoWhiteBalance: (id: number) => invoke<Develop["white_balance"]>("auto_white_balance", { id }),
+  /** under develop's white balance */
+  autoTone: (id: number, develop: Develop) => invoke<Develop["basic_tone"]>("auto_tone", { id, develop }),
+  /** Heal away the AI-selected objects of selection `mask` and drop it. Commits one history step. */
+  removeSelection: (id: number, mask: number) => invoke<Develop>("remove_selection", { id, mask }),
   save: (id: number, develop: Develop, label: string) => invoke<Develop>("save_develop", { id, develop, label }),
   history: (id: number) => invoke<HistoryEntry[]>("get_history", { id }),
   gotoHistory: (id: number, hid: number) => invoke<Develop>("goto_history", { id, hid }),
@@ -186,7 +241,7 @@ export const api = {
   regenerateToken: () => invoke<string>("regenerate_token"),
   setKey: (id: string, key: string) => invoke("set_provider_key", { id, key }),
   aiRun: (id: number, prompt: string, provider: string) => invoke<string>("ai_run", { id, prompt, provider }),
-  /** AI selection: the object at (x, y) of the full frame joins mask `mask` (null: a new mask) */
+  /** AI selection: each clicked object at (x, y) of the full frame starts its own selection (or subtracts from `mask` on ⌥-click) */
   aiSelect: (id: number, x: number, y: number, provider: string, mask: number | null, subtract: boolean) =>
     invoke<{ develop: Develop; mask: number }>("ai_select", { id, x, y, provider, mask, subtract }),
   immichConnect: (url: string, key: string) => invoke<Settings>("immich_connect", { url, key }),

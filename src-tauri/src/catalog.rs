@@ -67,6 +67,13 @@ CREATE TABLE IF NOT EXISTS immich_albums (
 pub fn open(path: &Path) -> Result<Connection, String> {
     let c = Connection::open(path).map_err(es)?;
     c.execute_batch(SCHEMA).map_err(es)?;
+    let ids: Vec<i64> = c
+        .prepare("SELECT id FROM photos WHERE json_array_length(json_extract(develop_json, '$.masks')) > 0")
+        .and_then(|mut st| st.query_map([], |r| r.get(0)).map(|rows| rows.flatten().collect()))
+        .unwrap_or_default();
+    for id in ids {
+        let _ = get_develop(&c, id);
+    }
     Ok(c)
 }
 
@@ -288,7 +295,15 @@ pub fn get_develop(c: &Connection, id: i64) -> Result<Develop, String> {
     let s: String = c
         .query_row("SELECT develop_json FROM photos WHERE id = ?", [id], |r| r.get(0))
         .map_err(|_| format!("photo {id} not found"))?;
-    Ok(serde_json::from_str(&s).unwrap_or_default())
+    let raw: Develop = serde_json::from_str(&s).unwrap_or_default();
+    let mut d = raw.clone();
+    d.clamp();
+    if d.masks != raw.masks
+        && let Ok(json) = serde_json::to_string(&d)
+    {
+        let _ = c.execute("UPDATE photos SET develop_json = ? WHERE id = ?", params![json, id]);
+    }
+    Ok(d)
 }
 
 fn set_state(c: &Connection, id: i64, json: &str, hid: i64, edited: bool) -> Result<(), String> {
@@ -332,7 +347,9 @@ pub fn goto(c: &Connection, id: i64, hid: i64) -> Result<Develop, String> {
     let json: String = c
         .query_row("SELECT develop_json FROM history WHERE id = ? AND photo_id = ?", [hid, id], |r| r.get(0))
         .map_err(|_| "history step not found".to_string())?;
-    let d: Develop = serde_json::from_str(&json).unwrap_or_default();
+    let mut d: Develop = serde_json::from_str(&json).unwrap_or_default();
+    d.clamp();
+    let json = serde_json::to_string(&d).map_err(es)?;
     set_state(c, id, &json, hid, d != Develop::default())?;
     Ok(d)
 }

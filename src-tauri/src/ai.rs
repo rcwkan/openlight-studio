@@ -259,8 +259,11 @@ pub fn run(core: &Arc<Core>, id: i64, prompt: &str, provider_id: &str) -> Result
 }
 
 const TRACE: &str = "Identify the one object under the ring (the whole object: the whole castle, one person, one car) and \
-    trace its outline. Reply with only a JSON object {\"name\": \"<short name>\", \"points\": [[x, y], ...]}: 16-60 points in \
-    order around the object's edge, following it closely, as [x, y] fractions of the full frame, (0,0) = top-left.";
+    trace its outline. If the clicked object is in the background (e.g. a castle, building, mountain, wall, or sky) and a \
+    foreground subject (e.g. a person, group of people, face, hair, or pet) stands in front of it, route the outline carefully \
+    around the entire foreground subject (including their head, hair, and body) so the foreground subject is completely excluded \
+    from the background selection. Reply with only a JSON object {\"name\": \"<short name>\", \"points\": [[x, y], ...]}: 20-80 points \
+    in order around the object's visible edge, following it closely, as [x, y] fractions of the full frame, (0,0) = top-left.";
 
 /// AI selection, step 1: the provider looks at the full frame with the click marked and returns
 /// the name and outline of the object under it. Nothing is edited.
@@ -297,15 +300,15 @@ pub fn trace(core: &Arc<Core>, id: i64, at: [f32; 2], provider_id: &str) -> Resu
     res
 }
 
-/// AI selection, step 2: the traced object is added to mask `mask` (or subtracted from it),
-/// or starts a new mask. Returns the new state and the mask's index.
+/// AI selection, step 2: each traced object starts its own selection (or is subtracted from `mask` on ⌥-click).
+/// Returns the new state and the selection's index.
 pub fn select(core: &Arc<Core>, id: i64, at: [f32; 2], provider_id: &str, mask: Option<usize>, subtract: bool) -> Result<(develop::Develop, usize), String> {
     let (name, points) = trace(core, id, at, provider_id)?;
     // read after the AI call so edits made while it ran are kept
     let mut d = core.develop(id)?;
     let op = if subtract { "subtract" } else { "add" };
     let c = develop::MaskComponent { op: op.into(), kind: "polygon".into(), name: name.clone(), points, ..Default::default() };
-    let i = match mask.filter(|&i| i < d.masks.len()) {
+    let i = match mask.filter(|&i| subtract && i < d.masks.len()) {
         Some(i) => {
             d.masks[i].components.push(c);
             i
@@ -379,7 +382,7 @@ fn run_cli(core: &Arc<Core>, p: &Provider, id: i64, prompt: &str, dir: &PathBuf,
          A rendered preview is at {} and histogram telemetry at {}. User goal: \"{prompt}\". \
          Call photo_inspect (photo_id \"{id}\", full_frame true) to see the image, apply non-destructive edits with develop_apply_parameters \
          and mask_create_and_edit, then photo_inspect again to verify (for example zero highlight clipping) and iterate if needed. \
-         To select an object or area (\"select the castle\"), create a mask named after it with one polygon operation tracing its outline \
+         To select an object or area (\"select the castle\"), create a separate mask for each object named after it with one polygon operation tracing its outline \
          in the full-frame image, and leave local_adjustments at 0 unless an adjustment was asked for; check it with photo_inspect show_mask \
          (the mask's index) and fix the outline if it misses or spills. To remove objects (\"remove the people\"), call retouch_remove_objects \
          with a generous outline per object, then inspect the result. \
@@ -584,7 +587,7 @@ fn run_http(core: &Arc<Core>, p: &Provider, id: i64, prompt: &str, dir: &PathBuf
          rendered photo, its histogram telemetry and its full edit state. Decide parameter changes that achieve the user's goal. \
          global_parameter_patch contains ABSOLUTE values for only the parameters you change (omit everything else). \
          The image is the full uncropped frame; coordinates are [x, y] fractions of it, (0,0) top-left. To select an object or \
-         area (\"select the castle\"), add a mask_operations entry named after it with one polygon operation tracing its outline \
+         area (\"select the castle\"), add a separate mask_operations entry for each object named after it with one polygon operation tracing its outline \
          (local_adjustments 0 unless an adjustment was asked for). To remove objects, list them in remove_objects with a generous \
          outline each. Keep highlights unclipped unless asked. Set requires_another_visual_pass to true only if you need to see the result \
          to refine it. Reply with only a JSON object matching this schema:\n{}",

@@ -50,6 +50,29 @@ input[type="range"].ol-range::-webkit-slider-thumb {
 .track-tint {
   --track: linear-gradient(90deg, #3fae4a, #d9d9d9, #c04bc9);
 }
+/* defringe hue ranges (low to high) and calibration primaries (- to +) */
+.track-fringe-purple {
+  --track: linear-gradient(90deg, #4f5fe0, #9b4ade, #e04aa6);
+}
+.track-fringe-green {
+  --track: linear-gradient(90deg, #d8c84a, #46a758, #12a594);
+}
+.track-red-hue {
+  --track: linear-gradient(90deg, #d6409f, #e5484d, #f76808);
+}
+.track-green-hue {
+  --track: linear-gradient(90deg, #a3c43a, #46a758, #12a594);
+}
+.track-blue-hue {
+  --track: linear-gradient(90deg, #12a5c4, #3e63dd, #8e4ec6);
+}
+/* Pro hue: colorize 0-360, and a shift of -180..180 seen from red */
+.track-hue {
+  --track: linear-gradient(90deg, #f00, #ff0, #0f0, #0ff, #00f, #f0f, #f00);
+}
+.track-hue-shift {
+  --track: linear-gradient(90deg, #0ff, #00f, #f0f, #f00, #ff0, #0f0, #0ff);
+}
 .checker {
   background-color: #111;
   background-image: conic-gradient(#141414 25%, #101010 0 50%, #141414 0 75%, #101010 0);

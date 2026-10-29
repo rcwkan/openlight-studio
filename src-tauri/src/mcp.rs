@@ -58,9 +58,20 @@ pub fn tools() -> Value {
                 "shift_hsl": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
                 "range_hsl": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
                 "falloff": { "type": "number", "minimum": 0, "maximum": 100 } } } },
-            "detail": { "type": "object", "description": "sharpening 0-150, sharpen_radius 0.5-3, sharpen_masking 0-100, color_noise_reduction 0-100" },
+            "detail": { "type": "object", "description": "sharpening 0-150, sharpen_radius 0.5-3, sharpen_masking 0-100, color_noise_reduction 0-100, luminance_noise_reduction 0-100, luminance_detail 0-100" },
             "effects": { "type": "object", "description": "vignette -100..100, vignette_midpoint 0-100, vignette_feather 0-100" },
-            "crop": { "type": "object", "description": "x, y, w, h normalised 0-1 in the straightened frame; angle -45..45 degrees" }
+            "grain": { "type": "object", "description": "amount 0-100, size 0-100, roughness 0-100" },
+            "calibration": { "type": "object", "description": "shadows_tint (+ magenta), red_hue, red_saturation, green_hue, green_saturation, blue_hue, blue_saturation: -100..100" },
+            "lens": { "type": "object", "description": "distortion -100..100 (+ corrects barrel), ca_red_cyan / ca_blue_yellow -100..100 (lateral chromatic aberration), defringe_purple / defringe_green 0-20 with defringe_purple_hue / defringe_green_hue [low, high] 0-100, vignetting -100..100 (+ brightens corners), vignetting_midpoint 0-100" },
+            "transform": { "type": "object", "description": "perspective: vertical / horizontal -100..100 (keystone), rotate -10..10 degrees, aspect -100..100, scale 50-150, offset_x / offset_y -100..100, constrain_crop bool" },
+            "levels": { "type": "object", "description": "Photoshop Levels: rgb (composite), red, green, blue, each {black 0-253, gamma 0.1-9.99, white 2-255, out_black 0-255, out_white 0-255} in display values" },
+            "hue_saturation": { "type": "object", "description": "Photoshop Hue/Saturation: hue -180..180 degrees, saturation -100..100, lightness -100..100; colorize bool with colorize_hue 0-360 and colorize_saturation 0-100" },
+            "selective_color": { "type": "object", "description": "Photoshop Selective Color: reds, yellows, greens, cyans, blues, magentas, whites, neutrals, blacks: [cyan, magenta, yellow, black] -100..100; absolute bool (default relative)" },
+            "channel_mixer": { "type": "object", "description": "Photoshop Channel Mixer: red, green, blue outputs as [red, green, blue, constant] % -200..200 (identity [100,0,0,0] etc.); monochrome bool uses gray [r, g, b, constant]" },
+            "gradient_map": { "type": "object", "description": "Photoshop Gradient Map: amount 0-100, shadows / highlights sRGB [r, g, b] 0-1" },
+            "filters": { "type": "object", "description": "blur 0-100 (Gaussian), invert bool, posterize levels (0 = off, 2-255), threshold (0 = off, 1-255)" },
+            "image_rotation": { "type": "object", "description": "angle 0 / 90 / 180 / 270 clockwise, flip_h, flip_v bool; the crop is in the rotated frame" },
+            "crop": { "type": "object", "description": "x, y, w, h normalised 0-1 in the straightened, rotated frame; angle -45..45 degrees" }
         }
     });
     json!([
@@ -88,7 +99,7 @@ pub fn tools() -> Value {
         },
         {
             "name": "develop_apply_parameters",
-            "description": "Apply non-destructive global white balance, tone, presence, curve, color mixer, 3-way color grading, Point Color, detail, effects or crop adjustments to one or more photos. Unknown keys are reported back as ignored_keys.",
+            "description": "Apply non-destructive global white balance, tone, presence, curve, color mixer, 3-way color grading, Point Color, calibration, detail, effects, grain, lens correction, perspective transform, Photoshop-style (levels, hue/saturation, selective color, channel mixer, gradient map, filters), image rotation or crop adjustments to one or more photos. Unknown keys are reported back as ignored_keys.",
             "inputSchema": { "type": "object", "required": ["photo_ids", "parameters"], "properties": {
                 "photo_ids": ids,
                 "mode": { "type": "string", "enum": ["absolute", "relative_delta"], "default": "absolute" },
@@ -134,10 +145,17 @@ pub fn tools() -> Value {
             "inputSchema": { "type": "object", "required": ["photo_id"], "properties": {
                 "photo_id": { "type": "string" },
                 "max_edge": { "type": "integer", "enum": [512, 1024, 1536], "default": 1024 },
-                "full_frame": { "type": "boolean", "default": false, "description": "skip crop and straighten: the frame that mask and retouch coordinates refer to" },
+                "full_frame": { "type": "boolean", "default": false, "description": "skip lens distortion, transform, straighten and crop: the frame that mask and retouch coordinates refer to" },
                 "show_mask": { "type": "integer", "minimum": 0, "description": "tint the coverage of the mask at this index red, to check a selection" },
                 "mark": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2, "description": "[x, y] in the full frame (with full_frame): draw a red ring there, e.g. where the user clicked" },
                 "include_histogram_bins": { "type": "boolean", "default": false } } }
+        },
+        {
+            "name": "develop_auto",
+            "description": "Auto fine tune: measure white balance and tone on each photo and apply them with a look profile (natural = plain Auto). Replaces white balance, Basic, presence and colour/B&W, plus the panels the profile uses (film: tone curve, colour grading, grain; moody: vignette); other edits stay.",
+            "inputSchema": { "type": "object", "required": ["photo_ids"], "properties": {
+                "photo_ids": ids,
+                "profile": { "type": "string", "enum": develop::PROFILES, "default": "natural" } } }
         },
         {
             "name": "retouch_remove_objects",
@@ -337,6 +355,17 @@ fn call_tool(core: &Arc<Core>, name: &str, a: &Value) -> Value {
                 notes.push("C2PA signing is not available in this build; files were exported without Content Credentials");
             }
             Ok(vec![text(json!({ "files": files, "notes": notes }))])
+        }
+        "develop_auto" => {
+            let profile = a["profile"].as_str().unwrap_or("natural");
+            let mut out = vec![];
+            for id in parse_ids(&a["photo_ids"])? {
+                let mut d = develop::auto(&*core.proxy(&core.photo(id)?.path)?, &core.develop(id)?, profile)?;
+                d.ai_provenance_log.push(provenance(core, "mcp", &format!("develop_auto: {profile}")));
+                core.commit(id, &d, &format!("AI: auto {profile}"))?;
+                out.push(json!({ "photo_id": id.to_string(), "white_balance": d.white_balance, "tone": d.basic_tone, "presence": d.presence }));
+            }
+            Ok(vec![text(json!({ "applied": out, "profile": profile }))])
         }
         "retouch_remove_objects" => {
             let id = parse_id(&a["photo_id"])?;
