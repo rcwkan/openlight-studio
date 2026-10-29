@@ -1,24 +1,55 @@
 import { ask } from "@tauri-apps/plugin-dialog";
 import { useEffect, useState } from "react";
-import { api, CleanUp, StorageReport } from "./api";
+import { api, CleanUp, JobProgress, Settings, size, Source, StorageReport } from "./api";
 import { Btn } from "./controls";
+import { Duplicate, Locations } from "./Storage";
 
 const card = "rounded-lg border border-neutral-800 bg-neutral-900 p-4";
 const heading = "mb-1 text-[11px] font-semibold uppercase tracking-wider text-neutral-400";
 
-/** Decimal units, as Finder shows them. */
-const size = (n: number) => {
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let i = 0;
-  for (; n >= 1000 && i < units.length - 1; i++) n /= 1000;
-  return `${n.toFixed(i && n < 10 ? 1 : 0)} ${units[i]}`;
-};
 const num = (n: number) => n.toLocaleString();
 const plural = (n: number, word: string) => `${num(n)} ${word}${n === 1 ? "" : "s"}`;
 const short = (folder: string) => folder.split(/[\\/]/).slice(-2).join("/");
 
+export type SettingsTab = "locations" | "duplicate" | "usage";
+const TABS: [SettingsTab, string][] = [
+  ["locations", "Locations"],
+  ["duplicate", "Duplicate"],
+  ["usage", "Usage & clean up"],
+];
+
+/** Storage: where photos come from (network drives, cloud storage, photo services, automation), copying
+ *  them between places, and what the catalog folder holds. */
+export function SettingsView(p: {
+  tab: SettingsTab;
+  setTab: (t: SettingsTab) => void;
+  settings: Settings | null;
+  setSettings: (s: Settings) => void;
+  selected: number[];
+  jobs: Record<string, JobProgress>;
+  onConnect: (s: Source) => void;
+  onAuto: () => void;
+}) {
+  const reload = () => void api.settings().then(p.setSettings);
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <nav className="flex shrink-0 items-center gap-1 border-b border-neutral-800 bg-neutral-900 px-4 py-1.5 text-[12px]">
+        <span className="mr-3 font-semibold text-neutral-300">Storage</span>
+        {TABS.map(([t, label]) => (
+          <button key={t} onClick={() => p.setTab(t)} className={`rounded px-3 py-1 ${p.tab === t ? "bg-neutral-700 text-white" : "text-neutral-400 hover:text-neutral-200"}`}>
+            {label}
+          </button>
+        ))}
+      </nav>
+      {p.settings && p.tab === "locations" && <Locations settings={p.settings} setSettings={p.setSettings} onConnect={p.onConnect} onAuto={p.onAuto} />}
+      {p.settings && p.tab === "duplicate" && <Duplicate settings={p.settings} selected={p.selected} jobs={p.jobs} />}
+      {p.tab === "usage" && <Usage onSettingsChanged={reload} />}
+    </div>
+  );
+}
+
 /** Storage usage of the catalog folder, a library analysis and clean-up. */
-export function SettingsView() {
+function Usage({ onSettingsChanged }: { onSettingsChanged: () => void }) {
   const [r, setR] = useState<StorageReport | null>(null);
   const [busy, setBusy] = useState("");
   const [note, setNote] = useState("");
@@ -32,6 +63,7 @@ export function SettingsView() {
     setNote("");
     try {
       const n = await job();
+      if (key === "cloud") onSettingsChanged(); // the accounts forget their downloaded folders
       const next = await api.storage();
       setNote(`${title}: ${n ? `${num(n)} removed, ` : ""}${size(Math.max(0, r.total - next.total))} freed`);
       setR(next);
@@ -51,13 +83,16 @@ export function SettingsView() {
   const own = r.folders.filter((f) => !f.folder.startsWith(r.data_dir + sep));
   const google = r.folders.filter((f) => f.folder.startsWith(`${r.data_dir}${sep}remote${sep}Google Photos`)).reduce((n, f) => n + f.photos, 0);
   const immichAlbumsBytes = r.immich_albums_bytes ?? 0;
-  const otherBytes = r.other ?? Math.max(0, r.total - (r.catalog + r.thumbs + r.originals + immichAlbumsBytes + r.google));
+  const cloudDir = `${r.data_dir}${sep}remote${sep}Cloud`;
+  const cloudPhotos = r.folders.filter((f) => f.folder === cloudDir || f.folder.startsWith(cloudDir + sep)).reduce((n, f) => n + f.photos, 0);
+  const otherBytes = r.other ?? Math.max(0, r.total - (r.catalog + r.thumbs + r.originals + immichAlbumsBytes + r.google + (r.cloud ?? 0)));
   const parts: [string, number, string][] = [
     ["Catalog", r.catalog, "bg-sky-500"],
     ["Thumbnails", r.thumbs, "bg-violet-500"],
     ...(immichAlbumsBytes > 0 ? [["Downloaded Immich albums", immichAlbumsBytes, "bg-cyan-500"] as [string, number, string]] : []),
     ["Immich photo cache", r.originals, "bg-amber-500"],
     ["Google Photos picks", r.google, "bg-emerald-500"],
+    ...((r.cloud ?? 0) > 0 ? [["Cloud downloads", r.cloud ?? 0, "bg-rose-500"] as [string, number, string]] : []),
     ["Other", otherBytes, "bg-neutral-500"],
   ];
   const tiles: [string, number, string?][] = [
@@ -84,6 +119,18 @@ export function SettingsView() {
             `${plural(c.immich_albums.count, "photo")} · ${size(c.immich_albums.bytes)}`,
             "Clear",
             `Delete the downloaded Immich albums (${plural(c.immich_albums.count, "photo")}, ${size(c.immich_albums.bytes)})?\n\nTheir photos are also removed from the catalog, with any edits, ratings and keywords you made to them here. The originals stay on your Immich server, where you can browse them in place.`,
+          ] as [CleanUp, string, string, string, string, string?],
+        ]
+      : []),
+    ...(c.cloud && c.cloud.bytes > 0
+      ? [
+          [
+            "cloud" as CleanUp,
+            "Cloud downloads",
+            "Folders downloaded from cloud storage. The originals stay in the cloud.",
+            `${plural(c.cloud.count, "file")} · ${size(c.cloud.bytes)}`,
+            "Clear",
+            `Delete the downloaded cloud folders (${plural(c.cloud.count, "file")}, ${size(c.cloud.bytes)})?\n\nTheir photos are also removed from the catalog, with any edits, ratings and keywords you made to them here. The originals stay in your cloud storage, where you can download them again.`,
           ] as [CleanUp, string, string, string, string, string?],
         ]
       : []),
@@ -273,6 +320,7 @@ export function SettingsView() {
         </div>
         <p className="text-neutral-400">
           From folders {num(own.reduce((n, f) => n + f.photos, 0))} · Immich {num(r.immich_photos)} · Google Photos {num(google)}
+          {cloudPhotos ? ` · Cloud storage ${num(cloudPhotos)}` : ""}
         </p>
         <div className="grid grid-cols-2 gap-4">
           {(

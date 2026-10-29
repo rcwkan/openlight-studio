@@ -708,6 +708,15 @@ pub fn local_dir(core: &Core, id: &str, path: &str) -> PathBuf {
     clean(path).split('/').filter(|s| !s.is_empty()).fold(cloud_dir(core).join(safe_name(id)), |d, s| d.join(safe_name(s)))
 }
 
+/// Each downloaded folder of every account with the folder it is downloaded to.
+pub fn local_dirs(core: &Core) -> Vec<Value> {
+    let clouds = core.settings.lock().unwrap().clouds.clone();
+    clouds
+        .iter()
+        .flat_map(|a| a.folders.iter().map(move |f| json!({ "id": a.id, "path": f, "local": local_dir(core, &a.id, f) })))
+        .collect()
+}
+
 /// Download what's new in a cloud folder (and its subfolders) and import it. Files already downloaded
 /// with the same size are kept. The folder joins the account's list in the sidebar.
 pub fn sync(core: &Arc<Core>, id: &str, path: &str) -> Result<Value, String> {

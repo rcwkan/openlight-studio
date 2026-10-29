@@ -540,8 +540,15 @@ fn get_settings(core: St) -> Settings {
 }
 
 #[tauri::command]
-fn save_settings(core: St, settings: Settings) -> Result<(), String> {
-    *core.settings.lock().unwrap() = settings;
+fn save_settings(core: St, mut settings: Settings) -> Result<(), String> {
+    {
+        let mut s = core.settings.lock().unwrap();
+        // drives and cloud accounts change through their own commands (and downloads add folders in the
+        // background): the UI's copy of them may be out of date
+        settings.network_drives = std::mem::take(&mut s.network_drives);
+        settings.clouds = std::mem::take(&mut s.clouds);
+        *s = settings;
+    }
     core.save_settings()
 }
 
@@ -615,6 +622,12 @@ fn auto_run(core: St, function: String, ids: Vec<i64>, settings: Value, job: Str
     auto::run(core.inner(), &function, &ids, &settings, &job)
 }
 
+/// The auto functions' default settings (for Reset).
+#[tauri::command]
+fn auto_defaults() -> auto::AutoSettings {
+    Default::default()
+}
+
 #[tauri::command]
 fn cancel_job(core: St, job: String) -> bool {
     auto::cancel(&core, &job)
@@ -645,6 +658,12 @@ fn network_remove(core: St, id: String) -> Result<Settings, String> {
 #[tauri::command]
 fn network_mount_point(url: String) -> Option<String> {
     storage::mount_point(&url)
+}
+
+/// Connect the share if needed, without reading it into the catalog; returns its folder.
+#[tauri::command(async)]
+fn network_connect(core: St, id: String) -> Result<String, String> {
+    storage::connect_drive(&core, &id)
 }
 
 #[tauri::command(async)]
@@ -693,6 +712,12 @@ fn cloud_browse(core: St, id: String, path: String) -> Result<Vec<cloud::Entry>,
 #[tauri::command(async)]
 fn cloud_sync(core: St, id: String, path: String) -> Result<Value, String> {
     cloud::sync(core.inner(), &id, &path)
+}
+
+/// Where each downloaded cloud folder is kept: [{id, path, local}].
+#[tauri::command]
+fn cloud_local_dirs(core: St) -> Vec<Value> {
+    cloud::local_dirs(&core)
 }
 
 #[tauri::command]
@@ -757,11 +782,13 @@ pub fn run() {
             storage_report,
             clean_up,
             auto_run,
+            auto_defaults,
             cancel_job,
             network_add,
             network_remove,
             network_mount_point,
             network_status,
+            network_connect,
             network_open,
             cloud_connect,
             cloud_dropbox_start,
@@ -770,6 +797,7 @@ pub fn run() {
             cloud_disconnect,
             cloud_browse,
             cloud_sync,
+            cloud_local_dirs,
             cloud_forget_folder,
             duplicate,
         ])

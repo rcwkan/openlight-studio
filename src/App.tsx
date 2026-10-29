@@ -2,15 +2,17 @@ import { listen } from "@tauri-apps/api/event";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Agent, Log } from "./Agent";
-import { api, AppInfo, Culling, Develop as Dev, Filter, LABELS, Photo, setThumbsDir, Settings, Source } from "./api";
+import { api, AppInfo, CloudFolder, Culling, Develop as Dev, Filter, JobProgress, LABELS, NetworkDrive, Photo, setThumbsDir, Settings, Source } from "./api";
+import { AutoView } from "./AutoView";
 import { Develop } from "./Develop";
 import { ExportDialog, Library, RemoteDialog, SelectMods } from "./Library";
-import { SettingsView } from "./Settings";
+import { SettingsTab, SettingsView } from "./Settings";
 
-type Module = "library" | "develop" | "agent" | "settings";
+type Module = "library" | "develop" | "auto" | "agent" | "settings";
 const MODULES: [Module, string][] = [
   ["library", "Library"],
   ["develop", "Develop"],
+  ["auto", "Auto"],
   ["agent", "AI & MCP"],
   ["settings", "Settings"],
 ];
@@ -31,6 +33,8 @@ export default function App() {
   const [remote, setRemote] = useState<Source | null>(null);
   const [albumPages, setAlbumPages] = useState<{ album: string | null; next: number | null } | null>(null);
   const loadingPage = useRef(false);
+  const [jobs, setJobs] = useState<Record<string, JobProgress>>({});
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>("locations");
 
   const reload = useCallback(async () => {
     const [ps, fs] = await Promise.all([api.query(filter), api.folders()]);
@@ -53,6 +57,12 @@ export default function App() {
       }),
       listen<{ label?: string; done: number; total: number }>("import-progress", (e) => setStatus(`${e.payload.label ?? "Adding photos"} ${e.payload.done} / ${e.payload.total}`)),
       listen<string>("remote-error", (e) => setStatus(e.payload)),
+      listen<JobProgress>("job-progress", (e) =>
+        setJobs((js) => {
+          const { [e.payload.job]: _, ...rest } = js;
+          return e.payload.finished ? rest : { ...rest, [e.payload.job]: e.payload };
+        }),
+      ),
       listen<{ source: string; message: string }>("agent-log", (e) => setLogs((l) => [...l.slice(-499), { t: new Date().toLocaleTimeString(), ...e.payload }])),
     ];
     return () => subs.forEach((s) => s.then((f) => f()));
@@ -61,6 +71,9 @@ export default function App() {
   useEffect(() => void api.setSelection(selected), [selected]);
 
   const active = photos.find((p) => p.id === activeId) ?? null;
+  // Auto Catalog & Culling of new photos runs in the background
+  const culling = Object.values(jobs).find((j) => j.job.startsWith("on-import-"));
+  const background = culling ? `Culling new photos${culling.total ? ` ${culling.done} / ${culling.total}` : "…"}` : "";
   const targets = () => (selected.length ? selected : activeId != null ? [activeId] : []);
 
   const select = (id: number, m: SelectMods) => {
@@ -101,7 +114,7 @@ export default function App() {
 
   // A folder is a live source: opening it picks up files added since it was last read.
   const openFolder = (folder: string) => {
-    setFilter((f) => ({ ...f, folder, immich_album: null, view: null }));
+    setFilter((f) => ({ ...f, folder, immich_album: null, ids: null, view: null }));
     api.importFolder(folder).then(
       (n) => setStatus(n ? `${n} new photo(s) in ${folder}` : ""),
       (e) => setStatus(`Could not read ${folder}: ${e}`),
@@ -117,7 +130,7 @@ export default function App() {
     try {
       const { next } = await api.immichOpen(album, 1);
       setAlbumPages({ album, next });
-      setFilter((f) => ({ ...f, folder: null, immich_album: album ?? "favorites", view: `immich:${album ?? ""}` }));
+      setFilter((f) => ({ ...f, folder: null, immich_album: album ?? "favorites", ids: null, view: `immich:${album ?? ""}` }));
       setStatus("");
     } catch (e) {
       setStatus(`Immich: ${e}`);
@@ -144,10 +157,43 @@ export default function App() {
       const r = await api.googleImport();
       const notes = [r.skipped && `${r.skipped} skipped (format not supported)`, r.failed && `${r.failed} failed (${r.error})`];
       setStatus([`Added ${r.imported} photo(s) from Google Photos`, ...notes.filter(Boolean)].join(", "));
-      setFilter((f) => ({ ...f, folder: r.folder, immich_album: null, view: null }));
+      setFilter((f) => ({ ...f, folder: r.folder, immich_album: null, ids: null, view: null }));
     } catch (e) {
       setStatus(`Google Photos: ${e}`);
     }
+    setTimeout(() => setStatus(""), 8000);
+  };
+  // A network drive opens like a folder; it is connected first when it isn't mounted.
+  const openDrive = async (d: NetworkDrive) => {
+    setFilter((f) => ({ ...f, folder: d.path, immich_album: null, ids: null, view: `drive:${d.id}` }));
+    setStatus(`Opening ${d.name}…`);
+    try {
+      const r = await api.networkOpen(d.id);
+      setStatus(r.new ? `${r.new} new photo(s) on ${d.name}` : "");
+    } catch (e) {
+      setStatus(`${d.name}: ${e}`);
+    }
+    setTimeout(() => setStatus(""), 8000);
+  };
+  // A downloaded cloud folder shows at once; what's new in the cloud is downloaded meanwhile.
+  const openCloud = async (c: CloudFolder, name: string) => {
+    setFilter((f) => ({ ...f, folder: c.local, immich_album: null, ids: null, view: `cloud:${c.id}:${c.path}` }));
+    await syncCloud(c.id, c.path, name);
+  };
+  const syncing = useRef(new Set<string>());
+  const syncCloud = async (id: string, path: string, name: string) => {
+    const key = `${id}:${path}`;
+    if (syncing.current.has(key)) return; // one download of a folder at a time
+    syncing.current.add(key);
+    setStatus(`Checking ${name}…`);
+    try {
+      const r = await api.cloudSync(id, path);
+      setStatus([`${r.imported} new photo(s) from ${name}`, r.failed && `${r.failed} failed (${r.error})`].filter(Boolean).join(", "));
+      api.settings().then(setSettings); // the folder joins the account's list
+    } catch (e) {
+      setStatus(`${name}: ${e}`);
+    }
+    syncing.current.delete(key);
     setTimeout(() => setStatus(""), 8000);
   };
   // Saving an Immich photo uploads the edit back to Immich by default.
@@ -171,7 +217,7 @@ export default function App() {
 
   const keys = useRef<(e: KeyboardEvent) => void>(() => {});
   keys.current = (e) => {
-    if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey || module === "agent" || module === "settings") return;
+    if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey || module === "auto" || module === "agent" || module === "settings") return;
     const k = e.key.toLowerCase();
     if (k === "g") setModule("library");
     else if (k === "d" && active) setModule("develop");
@@ -216,8 +262,13 @@ export default function App() {
           ))}
         </nav>
         <span className="ml-auto truncate text-[11px] text-neutral-400" title={status}>
-          {status}
+          {status || background}
         </span>
+        {!status && culling && (
+          <button className="text-[11px] text-neutral-500 hover:text-white" title="Stop culling the new photos; what is done stays" onClick={() => api.cancelJob(culling.job)}>
+            ✕
+          </button>
+        )}
         <span className="flex items-center gap-1.5 text-[11px] text-neutral-500" title={info?.mcp_url}>
           <span className={`h-2 w-2 rounded-full ${info?.mcp_status === "running" ? "bg-emerald-500" : "bg-neutral-600"}`} />
           MCP
@@ -243,6 +294,10 @@ export default function App() {
           nextPage={nextPage}
           onLoadMore={loadMore}
           onPickGoogle={pickGoogle}
+          onOpenDrive={openDrive}
+          onOpenCloud={openCloud}
+          onAddCloudFolder={syncCloud}
+          onStorage={() => (setSettingsTab("locations"), setModule("settings"))}
           onConnect={setRemote}
           onExport={() => setExportIds(targets())}
           onVirtualCopy={virtualCopy}
@@ -263,8 +318,22 @@ export default function App() {
           clearLogs={() => setLogs([])}
         />
       )}
+      {module === "auto" && (
+        <AutoView
+          settings={settings}
+          setSettings={setSettings}
+          selected={selected}
+          view={photos}
+          jobs={jobs}
+          onShow={(ids, label) => (setFilter({ ids, view: `auto:${label}` }), setModule("library"))}
+          onAiSettings={() => setModule("agent")}
+          onStorage={() => (setSettingsTab("locations"), setModule("settings"))}
+        />
+      )}
       {module === "agent" && <Agent info={info} settings={settings} setSettings={setSettings} logs={logs} clearLogs={() => setLogs([])} />}
-      {module === "settings" && <SettingsView />}
+      {module === "settings" && (
+        <SettingsView tab={settingsTab} setTab={setSettingsTab} settings={settings} setSettings={setSettings} selected={selected} jobs={jobs} onConnect={setRemote} onAuto={() => setModule("auto")} />
+      )}
       {exportIds && exportIds.length > 0 && <ExportDialog ids={exportIds} settings={settings} dest={exportDest(exportIds)} onClose={() => setExportIds(null)} />}
       {remote && settings && <RemoteDialog source={remote} settings={settings} setSettings={setSettings} onClose={() => setRemote(null)} />}
     </div>

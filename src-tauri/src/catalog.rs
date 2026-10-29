@@ -220,8 +220,8 @@ pub fn query(c: &Connection, f: &Filter) -> Result<Vec<Photo>, String> {
         if ids.is_empty() {
             return Ok(vec![]); // e.g. an empty Immich album; `IN ()` is not valid SQL
         }
-        sql += &format!(" AND id IN ({})", vec!["?"; ids.len()].join(","));
-        args.extend(ids.iter().map(|i| Sql::from(*i)));
+        // inline: a whole catalog's results can pass SQLite's limit of 32766 parameters
+        sql += &format!(" AND id IN ({})", ids.iter().map(i64::to_string).collect::<Vec<_>>().join(","));
     }
     sql += " ORDER BY COALESCE(captured_at, ''), filename, id LIMIT ?";
     args.push(f.limit.unwrap_or(1_000_000).into());

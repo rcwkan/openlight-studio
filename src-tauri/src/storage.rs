@@ -389,8 +389,8 @@ pub fn drives_online(core: &Core) -> Vec<Value> {
     drives.par_iter().map(|d| json!({ "id": d.id, "online": Path::new(&d.path).is_dir() })).collect()
 }
 
-/// Open a network drive like a folder: connect it when its folder is not there, then pick up new photos.
-pub fn open_drive(core: &Arc<Core>, id: &str) -> Result<Value, String> {
+/// Connect a network drive when its folder is not there; returns the folder.
+pub fn connect_drive(core: &Core, id: &str) -> Result<String, String> {
     let d = drive(core, id)?;
     let path = PathBuf::from(&d.path);
     if !path.is_dir() {
@@ -399,6 +399,13 @@ pub fn open_drive(core: &Arc<Core>, id: &str) -> Result<Value, String> {
         }
         connect_share(&d.url, &path)?;
     }
+    Ok(d.path)
+}
+
+/// Open a network drive like a folder: connect it when its folder is not there, then pick up new photos.
+pub fn open_drive(core: &Arc<Core>, id: &str) -> Result<Value, String> {
+    let d = drive(core, id)?;
+    let path = PathBuf::from(connect_drive(core, id)?);
     let ids = catalog::import(core, &path, &|done, total| core.emit("import-progress", json!({ "label": format!("Reading {}", d.name), "done": done, "total": total })))?;
     core.emit("catalog-changed", json!({}));
     let n = ids.len();
@@ -451,12 +458,12 @@ pub struct DuplicateOptions {
     pub keep_dates: bool,
     /// Copies in a folder join the catalog with the originals' ratings, flags, labels and keywords.
     pub catalog: bool,
-    /// Then Auto Catalog & Culling runs on them.
-    pub cull: bool,
+    /// Then Auto Catalog & Culling runs on them (unset: as Settings › Storage › Automation says for duplicates).
+    pub cull: Option<bool>,
 }
 impl Default for DuplicateOptions {
     fn default() -> Self {
-        Self { subfolders: true, only_picks: false, min_rating: 0, skip_existing: true, sidecars: true, verify: false, keep_dates: true, catalog: true, cull: false }
+        Self { subfolders: true, only_picks: false, min_rating: 0, skip_existing: true, sidecars: true, verify: false, keep_dates: true, catalog: true, cull: None }
     }
 }
 
@@ -813,11 +820,11 @@ pub fn duplicate(core: &Arc<Core>, from: &Place, to: &Place, o: &DuplicateOption
         new_ids = ids;
         core.emit("catalog-changed", json!({}));
     }
-    let culled = if o.cull && !new_ids.is_empty() && !job.cancelled() {
-        let (s, provider) = {
-            let s = core.settings.lock().unwrap();
-            (s.auto.cull.clone(), s.active_provider.clone())
-        };
+    let (s, provider, on_import) = {
+        let s = core.settings.lock().unwrap();
+        (s.auto.cull.clone(), s.active_provider.clone(), s.auto.on_import.enabled && s.auto.on_import.duplicates)
+    };
+    let culled = if o.cull.unwrap_or(on_import) && !new_ids.is_empty() && !job.cancelled() {
         let r = auto::cull(core, &new_ids, &s, &provider, job)?;
         json!({ "picks": r["picks"], "rejects": r["rejects"], "rated": r["rated"] })
     } else {
