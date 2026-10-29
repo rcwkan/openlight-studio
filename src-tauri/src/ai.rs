@@ -303,12 +303,10 @@ pub fn select(core: &Arc<Core>, id: i64, at: [f32; 2], provider_id: &str, mask: 
     let (name, points) = trace(core, id, at, provider_id)?;
     // read after the AI call so edits made while it ran are kept
     let mut d = core.develop(id)?;
-    let c = develop::MaskComponent { op: if subtract { "subtract" } else { "add" }.into(), kind: "polygon".into(), points, ..Default::default() };
+    let op = if subtract { "subtract" } else { "add" };
+    let c = develop::MaskComponent { op: op.into(), kind: "polygon".into(), name: name.clone(), points, ..Default::default() };
     let i = match mask.filter(|&i| i < d.masks.len()) {
         Some(i) => {
-            if !subtract {
-                d.masks[i].name = format!("{} + {name}", d.masks[i].name);
-            }
             d.masks[i].components.push(c);
             i
         }

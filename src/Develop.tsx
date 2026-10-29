@@ -34,6 +34,7 @@ const BANDS: [string, string][] = [
 const COMPONENT: MaskComponent = {
   op: "add",
   type: "linear_gradient",
+  name: "",
   invert: false,
   feather: 0,
   edge_shift: 0,
@@ -81,6 +82,7 @@ export function Develop(p: Props) {
   const [compSel, setCompSel] = useState(0);
   const [swatchSel, setSwatchSel] = useState<number | null>(null);
   const [overlay, setOverlay] = useState(false);
+  const [rtab, setRtab] = useState<"adjust" | "selections">("adjust");
   /** AI Select: where the click being traced was (normalised) */
   const [picking, setPicking] = useState<{ x: number; y: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -613,7 +615,26 @@ export function Develop(p: Props) {
             </Btn>
           </div>
         )}
-        {dev && T && (
+        <div className="border-b border-neutral-800 px-3 py-2">
+          <Seg options={[["adjust", "Adjust"], ["selections", dev?.masks.length ? `Selections (${dev.masks.length})` : "Selections"]]} value={rtab} onChange={setRtab} />
+        </div>
+        {dev && rtab === "selections" && (
+          <SelectionsTab
+            dev={dev}
+            change={change}
+            sel={maskSel}
+            setSel={(i) => (setMaskSel(i), setCompSel(0))}
+            compSel={compSel}
+            setCompSel={setCompSel}
+            overlay={overlay}
+            setOverlay={setOverlay}
+            pickColor={(ci) => (setCompSel(ci), setTool("maskcolor"))}
+            S={slider(dev, change)}
+            selecting={tool === "select"}
+            toggleSelecting={() => setTool(tool === "select" ? "none" : "select")}
+          />
+        )}
+        {dev && T && rtab === "adjust" && (
           <>
             <Panel
               title="Basic"
@@ -773,21 +794,6 @@ export function Develop(p: Props) {
                 </Panel>
               </>
             )}
-
-            <Panel title="Masks" open={false}>
-              <MasksPanel
-                dev={dev}
-                change={change}
-                sel={maskSel}
-                setSel={(i) => (setMaskSel(i), setCompSel(0))}
-                compSel={compSel}
-                setCompSel={setCompSel}
-                overlay={overlay}
-                setOverlay={setOverlay}
-                pickColor={(ci) => (setCompSel(ci), setTool("maskcolor"))}
-                S={slider(dev, change)}
-              />
-            </Panel>
           </>
         )}
       </aside>
@@ -795,7 +801,9 @@ export function Develop(p: Props) {
   );
 }
 
-function MasksPanel({
+/** Stored selections (masks). Each AI region is a tag that can be unselected and selected again
+ *  without asking the AI; selecting a whole selection makes the Adjust panels tune only it. */
+function SelectionsTab({
   dev,
   change,
   sel,
@@ -806,6 +814,8 @@ function MasksPanel({
   setOverlay,
   pickColor,
   S,
+  selecting,
+  toggleSelecting,
 }: {
   dev: Dev;
   change: (d: Dev, label: string) => void;
@@ -817,6 +827,8 @@ function MasksPanel({
   setOverlay: (b: boolean) => void;
   pickColor: (ci: number) => void;
   S: (label: string, path: Path, min: number, max: number, extra?: Partial<Parameters<typeof Slider>[0]>) => ReactNode;
+  selecting: boolean;
+  toggleSelecting: () => void;
 }) {
   const [newType, setNewType] = useState("linear_gradient");
   const [newOp, setNewOp] = useState("subtract");
@@ -831,32 +843,75 @@ function MasksPanel({
     change({ ...dev, masks: [...dev.masks, m] }, "Add mask");
     setSel(dev.masks.length);
   };
+  const remove = (i: number) => {
+    change({ ...dev, masks: dev.masks.filter((_, k) => k !== i) }, "Delete selection");
+    if (sel === i) setSel(null);
+    else if (sel != null && sel > i) setSel(sel - 1);
+  };
   const m = sel != null ? dev.masks[sel] : null;
   const field = "rounded bg-neutral-800 px-1 py-0.5 text-[11px]";
   return (
-    <div className="space-y-2 text-[11px]">
-      <div className="grid grid-cols-2 gap-1">
-        {MASK_TYPES.map(([t, label]) => (
-          <Btn key={t} onClick={() => add(t)}>
-            + {label}
-          </Btn>
-        ))}
-      </div>
+    <div className="space-y-2 p-3 text-[11px]">
+      <Btn active={selecting} onClick={toggleSelecting} className="w-full" title="Click objects on the photo to select them with the AI (S)">
+        {selecting ? "✦ Click objects on the photo… (S to stop)" : "✦ Select objects with AI"}
+      </Btn>
+      <p className="text-[10px] text-neutral-500">
+        {dev.masks.length
+          ? "Select one to tune only it in Adjust. Click an object's tag to unselect it (leave it out) or select it again — no new AI run; × deletes it."
+          : "No selections yet. They are stored with the photo, so you can select, unselect and reselect them later."}
+      </p>
       {dev.masks.map((mk, i) => (
-        <div key={mk.mask_id || i} onClick={() => setSel(sel === i ? null : i)} className={`flex cursor-pointer items-center gap-2 rounded px-2 py-1 ${sel === i ? "bg-neutral-700" : "bg-neutral-800 hover:bg-neutral-700/60"}`}>
-          <input type="checkbox" checked={mk.enabled} onClick={(e) => e.stopPropagation()} onChange={(e) => change(setPath(dev, ["masks", i, "enabled"], e.target.checked), "Toggle mask")} />
-          <span className="flex-1 truncate">{mk.name}</span>
-          <span className="text-neutral-500">{mk.components.length}</span>
+        <div key={mk.mask_id || i} className={`space-y-1 rounded border p-1.5 ${sel === i ? "border-violet-500/70 bg-neutral-800" : "border-neutral-800"}`}>
+          <div className="flex items-center gap-1.5">
+            <input type="checkbox" checked={mk.enabled} title="Effect on / off" onChange={(e) => change(setPath(dev, ["masks", i, "enabled"], e.target.checked), "Toggle selection")} />
+            <span className={`min-w-0 flex-1 truncate ${mk.enabled ? "" : "text-neutral-500"}`} title={mk.name}>
+              {mk.name}
+              {mk.tuning && (
+                <span className="ml-1 text-violet-300" title="Has its own tuning">
+                  ●
+                </span>
+              )}
+            </span>
+            <Btn active={sel === i} onClick={() => setSel(sel === i ? null : i)} title={sel === i ? "Back to the whole photo (Esc)" : "Tune only this selection"}>
+              {sel === i ? "Unselect" : "Select"}
+            </Btn>
+            <button className="px-1 text-neutral-500 hover:text-white" title="Delete selection" onClick={() => remove(i)}>
+              ✕
+            </button>
+          </div>
+          <div className="flex flex-wrap gap-1">
+            {mk.components.map((c, ci) => (
+              <span
+                key={ci}
+                className={`flex items-center rounded-full border text-[10px] ${c.op === "subtract" ? "border-red-800/70 bg-red-950/40 text-red-200" : "border-violet-800/70 bg-violet-950/40 text-violet-100"}`}
+              >
+                <button
+                  className="py-0.5 pl-2 pr-1"
+                  title={c.op === "subtract" ? "Unselected (left out) — click to select it again" : "Selected — click to unselect it (leave it out)"}
+                  onClick={() =>
+                    change(setPath(dev, ["masks", i, "components", ci, "op"], c.op === "subtract" ? "add" : "subtract"), `${c.op === "subtract" ? "Select" : "Unselect"} ${c.name || "region"}`)
+                  }
+                >
+                  {c.op === "subtract" ? "− " : c.op === "intersect" ? "∩ " : "+ "}
+                  {c.name || TYPE_LABEL[c.type] || c.type}
+                </button>
+                {mk.components.length > 1 && (
+                  <button className="pr-1.5 text-neutral-500 hover:text-white" title="Delete this region" onClick={() => change(setPath(dev, ["masks", i, "components"], mk.components.filter((_, k) => k !== ci)), "Delete region")}>
+                    ×
+                  </button>
+                )}
+              </span>
+            ))}
+          </div>
         </div>
       ))}
       {m && sel != null && (
         <div className="space-y-2 rounded border border-neutral-700 p-2">
           <div className="flex items-center gap-1">
-            <input className={`${field} min-w-0 flex-1`} value={m.name} onChange={(e) => change(setPath(dev, ["masks", sel, "name"], e.target.value), "Rename mask")} />
-            <Btn active={overlay} onClick={() => setOverlay(!overlay)} title="Show mask overlay (O)">
+            <input className={`${field} min-w-0 flex-1`} value={m.name} onChange={(e) => change(setPath(dev, ["masks", sel, "name"], e.target.value), "Rename selection")} />
+            <Btn active={overlay} onClick={() => setOverlay(!overlay)} title="Show the selection (O)">
               Overlay
             </Btn>
-            <Btn onClick={() => (change({ ...dev, masks: dev.masks.filter((_, k) => k !== sel) }, "Delete mask"), setSel(null))}>✕</Btn>
           </div>
           {m.components.map((c, ci) => (
             <div key={ci} onClick={() => setCompSel(ci)} className={`space-y-1 rounded p-1.5 ${compSel === ci ? "bg-neutral-800" : ""}`}>
@@ -868,7 +923,7 @@ function MasksPanel({
                     <option value="intersect">Intersect</option>
                   </select>
                 ) : null}
-                <span className="flex-1 truncate text-neutral-300">{TYPE_LABEL[c.type] ?? c.type}</span>
+                <span className="flex-1 truncate text-neutral-300">{c.name || TYPE_LABEL[c.type] || c.type}</span>
                 <label className="flex items-center gap-1 text-neutral-400">
                   <input type="checkbox" checked={c.invert} onChange={(e) => change(setPath(dev, ["masks", sel, "components", ci, "invert"], e.target.checked), "Invert mask")} />
                   Invert
@@ -932,6 +987,16 @@ function MasksPanel({
           )}
         </div>
       )}
+      <div className="border-t border-neutral-800 pt-2">
+        <p className="mb-1 text-[10px] text-neutral-500">Add a drawn mask</p>
+        <div className="grid grid-cols-2 gap-1">
+          {MASK_TYPES.map(([t, label]) => (
+            <Btn key={t} onClick={() => add(t)}>
+              + {label}
+            </Btn>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }

@@ -113,7 +113,8 @@ pub fn tools() -> Value {
                     "range": { "type": "array", "items": { "type": "number" } },
                     "color": { "type": "array", "items": { "type": "number" } },
                     "tolerance": { "type": "number", "minimum": 0, "maximum": 100 },
-                    "points": outline } } },
+                    "points": outline,
+                    "name": { "type": "string", "description": "polygon: what the region is, e.g. \"castle\" (defaults to mask_name)" } } } },
                 "local_adjustments": { "type": "object", "description": "exposure (-5..5), contrast, highlights, shadows, whites, blacks, temperature_shift, tint_shift, saturation (-100..100)" } } }
         },
         {

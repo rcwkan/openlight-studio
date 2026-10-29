@@ -43,6 +43,8 @@ export type Wheel = { hue: number; sat: number; lum: number };
 export type MaskComponent = {
   op: string;
   type: string;
+  /** tag of an AI region, e.g. "castle" */
+  name: string;
   invert: boolean;
   feather: number;
   edge_shift: number;

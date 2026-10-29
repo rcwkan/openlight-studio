@@ -272,6 +272,8 @@ pub struct MaskComponent {
     pub op: String,
     #[serde(rename = "type")]
     pub kind: String,
+    /// Tag of an AI region, e.g. "castle" (empty for drawn components).
+    pub name: String,
     pub invert: bool,
     pub feather: f32,
     pub edge_shift: f32,
@@ -294,6 +296,7 @@ impl Default for MaskComponent {
         Self {
             op: "add".into(),
             kind: "linear_gradient".into(),
+            name: String::new(),
             invert: false,
             feather: 0.0,
             edge_shift: 0.0,
@@ -494,7 +497,10 @@ pub fn mask_from_ops(name: &str, ops: &Value, adjustments: &Value) -> Result<(Ma
                 }
             }
         }
-        let c: MaskComponent = serde_json::from_value(o).map_err(|e| format!("invalid operation: {e}"))?;
+        let mut c: MaskComponent = serde_json::from_value(o).map_err(|e| format!("invalid operation: {e}"))?;
+        if c.kind == "polygon" && c.name.is_empty() {
+            c.name = name.into();
+        }
         if !MASK_TYPES.contains(&c.kind.as_str()) {
             return Err(format!(
                 "source_type '{}' needs the AI segmentation/depth models, which are not installed in this build. Available: {}",
@@ -2042,7 +2048,8 @@ mod tests {
         assert!(at(147, 150) < 0.2 && at(200, 97) < 0.2, "edge not snapped: {} {}", at(147, 150), at(200, 97));
         assert_eq!(at(20, 20), 0.0);
         let op = |p: Value| json!([{"boolean_op": "add", "source_type": "polygon", "points": p}]);
-        assert!(mask_from_ops("castle", &op(json!([[0.1, 0.1], [0.9, 0.1], [0.5, 0.8]])), &json!({})).is_ok());
+        let (castle, _) = mask_from_ops("castle", &op(json!([[0.1, 0.1], [0.9, 0.1], [0.5, 0.8]])), &json!({})).unwrap();
+        assert_eq!(castle.components[0].name, "castle", "an AI region is tagged with what it is");
         assert!(mask_from_ops("castle", &op(json!([[0.1, 0.1], [0.9, 0.1]])), &json!({})).is_err());
         assert!(mask_from_ops("castle", &op(json!([[10, 20], [300, 20], [300, 200]])), &json!({})).is_err());
     }
