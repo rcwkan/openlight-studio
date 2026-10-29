@@ -1,8 +1,9 @@
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import { useEffect, useRef, useState } from "react";
-import { api, Culling, Filter, flagName, ImmichAlbum, LABEL_COLORS, LABELS, Photo, Settings, Source, thumbUrl } from "./api";
+import { ReactNode, useEffect, useRef, useState } from "react";
+import { api, CloudAccount, CloudFolder, Culling, Filter, flagName, ImmichAlbum, LABEL_COLORS, LABELS, NetworkDrive, Photo, Settings, Source, thumbUrl } from "./api";
 import { Btn, Panel, Stars } from "./controls";
+import { CloudBrowser } from "./Storage";
 
 export type SelectMods = { shift: boolean; toggle: boolean };
 
@@ -25,6 +26,13 @@ type Props = {
   nextPage: number | null;
   onLoadMore: () => void;
   onPickGoogle: () => void;
+  /** Connects the drive when needed; settles once its new photos are read */
+  onOpenDrive: (drive: NetworkDrive) => Promise<void>;
+  onOpenCloud: (folder: CloudFolder, account: string) => void;
+  /** Download a folder of a cloud account into the catalog */
+  onAddCloudFolder: (account: string, path: string, name: string) => Promise<void>;
+  /** Settings › Storage, where drives and cloud storage are added */
+  onStorage: () => void;
   onConnect: (source: Source) => void;
   onExport: () => void;
   onVirtualCopy: () => void;
@@ -36,17 +44,30 @@ const short = (folder: string) => folder.split(/[\\/]/).slice(-2).join("/");
 export function Library(p: Props) {
   const [size, setSize] = useState(170);
   const [albums, setAlbums] = useState<ImmichAlbum[]>([]);
+  const [online, setOnline] = useState<Record<string, boolean>>({});
+  const [cloudDirs, setCloudDirs] = useState<CloudFolder[]>([]);
+  const [browse, setBrowse] = useState<CloudAccount | null>(null);
   const f = p.filter;
   const immichUrl = p.settings?.immich_url;
+  const drives = p.settings?.network_drives ?? [];
+  const clouds = p.settings?.clouds ?? [];
   useEffect(() => {
     if (immichUrl) api.immichAlbums().then(setAlbums, () => setAlbums([]));
   }, [immichUrl]);
+  const driveKey = drives.map((d) => d.id).join();
+  const checkDrives = () => api.networkStatus().then((l) => setOnline(Object.fromEntries(l.map((d) => [d.id, d.online]))));
+  useEffect(() => void (driveKey && checkDrives()), [driveKey]);
+  const cloudKey = JSON.stringify(clouds.map((a) => [a.id, a.folders]));
+  useEffect(() => void api.cloudLocalDirs().then(setCloudDirs), [cloudKey]);
   // Google Photos picks are downloaded into the catalog folder; list them under Google Photos, not Folders.
   const sep = p.dataDir.includes("\\") ? "\\" : "/";
   const remoteDir = `${p.dataDir}${sep}remote`;
   const googleDir = `${remoteDir}${sep}Google Photos`;
-  const local = p.folders.filter(([folder]) => folder !== remoteDir && !folder.startsWith(remoteDir + sep));
-  const show = (patch: Filter) => p.setFilter({ ...f, folder: null, immich_album: null, view: null, ...patch });
+  const under = (folder: string, root: string) => folder === root || folder.startsWith(root.replace(/[\\/]+$/, "") + sep);
+  const count = (root: string) => p.folders.filter(([folder]) => under(folder, root)).reduce((n, [, k]) => n + k, 0);
+  // network drives are listed under their own heading
+  const local = p.folders.filter(([folder]) => !under(folder, remoteDir) && !drives.some((d) => under(folder, d.path)));
+  const show = (patch: Filter) => p.setFilter({ ...f, folder: null, immich_album: null, ids: null, view: null, ...patch });
   const gridRef = useRef<HTMLDivElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const loadMore = useRef(p.onLoadMore);
@@ -69,7 +90,7 @@ export function Library(p: Props) {
     <div className="flex min-h-0 flex-1">
       <aside className="flex w-56 shrink-0 flex-col overflow-y-auto border-r border-neutral-800 bg-neutral-900">
         <Panel title="Library">
-          <FolderRow label="All Photographs" active={!f.folder && !f.immich_album} onClick={() => show({})} />
+          <FolderRow label="All Photographs" active={!f.folder && !f.immich_album && !f.ids} onClick={() => show({})} />
         </Panel>
         <Panel
           title="Folders"
@@ -82,6 +103,57 @@ export function Library(p: Props) {
           {local.length === 0 && <p className="text-[11px] text-neutral-500">Add a folder to browse and edit its photos in place.</p>}
           {local.map(([folder, n]) => (
             <FolderRow key={folder} label={short(folder)} title={folder} count={n} active={f.folder === folder} onClick={() => p.onOpenFolder(folder)} />
+          ))}
+        </Panel>
+        <Panel
+          title="Network drives"
+          right={
+            <button title="Add a network drive" className={side} onClick={p.onStorage}>
+              ＋
+            </button>
+          }
+        >
+          {drives.length === 0 && <p className="text-[11px] text-neutral-500">Add a share on your NAS or another computer to browse it like a folder.</p>}
+          {drives.map((d) => (
+            <FolderRow
+              key={d.id}
+              label={d.name}
+              title={`${d.url ? `${d.url} → ` : ""}${d.path}${online[d.id] ? "" : " (not connected: opening it connects it)"}`}
+              icon={<span className={`h-1.5 w-1.5 shrink-0 rounded-full ${online[d.id] ? "bg-emerald-500" : "bg-neutral-600"}`} />}
+              count={count(d.path) || undefined}
+              active={f.view === `drive:${d.id}`}
+              onClick={() => p.onOpenDrive(d).then(checkDrives)}
+            />
+          ))}
+        </Panel>
+        <Panel
+          title="Cloud storage"
+          right={
+            <button title="Connect cloud storage" className={side} onClick={p.onStorage}>
+              ＋
+            </button>
+          }
+        >
+          {clouds.length === 0 && <p className="text-[11px] text-neutral-500">Connect Nextcloud, Dropbox, OneDrive, S3 or WebDAV storage to bring in its photos.</p>}
+          {clouds.map((a) => (
+            <div key={a.id} className="mb-1">
+              <div className="flex items-center justify-between pl-2 text-[10px] uppercase tracking-wider text-neutral-500">
+                <span className="truncate">{a.name}</span>
+                <button title={`Download a folder of ${a.name}`} className={side} onClick={() => setBrowse(a)}>
+                  ＋
+                </button>
+              </div>
+              {cloudDirs
+                .filter((c) => c.id === a.id)
+                .map((c) => (
+                  <FolderRow key={c.path} label={c.path || "All files"} title={`${a.name} › ${c.path}`} count={count(c.local)} active={f.view === `cloud:${a.id}:${c.path}`} onClick={() => p.onOpenCloud(c, a.name)} />
+                ))}
+              {!a.folders.length && (
+                <button className="px-2 text-[11px] text-sky-400 hover:text-sky-300" onClick={() => setBrowse(a)}>
+                  Choose a folder…
+                </button>
+              )}
+            </div>
           ))}
         </Panel>
         <Panel title="Immich" right={immichUrl && manage("immich")}>
@@ -152,11 +224,20 @@ export function Library(p: Props) {
             <option value="true">Edited</option>
             <option value="false">Untouched</option>
           </select>
-          <span className="ml-auto text-neutral-500">
-            {p.selected.length > 1 ? `${p.selected.length} selected / ` : ""}
-            {p.photos.length}
-            {p.nextPage ? "+" : ""} photos
-          </span>
+          {f.ids ? (
+            <span className="ml-auto flex items-center gap-1.5 rounded bg-sky-900/60 px-2 py-0.5 text-sky-100" title="Photos chosen by an auto function">
+              {p.photos.length} from {f.view?.startsWith("auto:") ? f.view.slice(5) : "a result"}
+              <button title="Show all photos again" className="text-sky-300 hover:text-white" onClick={() => show({})}>
+                ✕
+              </button>
+            </span>
+          ) : (
+            <span className="ml-auto text-neutral-500">
+              {p.selected.length > 1 ? `${p.selected.length} selected / ` : ""}
+              {p.photos.length}
+              {p.nextPage ? "+" : ""} photos
+            </span>
+          )}
           <input type="range" className="ol-range w-24" min={110} max={320} value={size} onChange={(e) => setSize(+e.target.value)} title="Thumbnail size" />
         </div>
 
@@ -182,14 +263,26 @@ export function Library(p: Props) {
       <aside className="w-72 shrink-0 overflow-y-auto border-l border-neutral-800 bg-neutral-900">
         {p.active ? <Metadata {...p} photo={p.active} /> : <p className="p-4 text-[11px] text-neutral-500">Select a photo.</p>}
       </aside>
+      {browse && (
+        <CloudBrowser
+          account={browse}
+          action="Download this folder"
+          onPick={(path) => {
+            setBrowse(null);
+            p.onAddCloudFolder(browse.id, path, browse.name);
+          }}
+          onClose={() => setBrowse(null)}
+        />
+      )}
     </div>
   );
 }
 
-function FolderRow({ label, count, active, onClick, title }: { label: string; count?: number; active: boolean; onClick: () => void; title?: string }) {
+function FolderRow({ label, count, active, onClick, title, icon }: { label: string; count?: number; active: boolean; onClick: () => void; title?: string; icon?: ReactNode }) {
   return (
-    <div title={title} onClick={onClick} className={`flex cursor-pointer justify-between rounded px-2 py-1 text-[11px] ${active ? "bg-neutral-700 text-white" : "text-neutral-300 hover:bg-neutral-800"}`}>
-      <span className="truncate">{label}</span>
+    <div title={title} onClick={onClick} className={`flex cursor-pointer items-center justify-between gap-1.5 rounded px-2 py-1 text-[11px] ${active ? "bg-neutral-700 text-white" : "text-neutral-300 hover:bg-neutral-800"}`}>
+      {icon}
+      <span className="flex-1 truncate">{label}</span>
       {count != null && <span className="text-neutral-500">{count}</span>}
     </div>
   );
@@ -317,13 +410,16 @@ const lastFolder = () => {
   }
 };
 
-export function ExportDialog({ ids, settings, dest: initialDest = "", onClose }: { ids: number[]; settings: Settings | null; dest?: Source | ""; onClose: () => void }) {
+/** dest: "" (a folder) | immich | google | cloud:<account id> */
+export function ExportDialog({ ids, settings, dest: initialDest = "", onClose }: { ids: number[]; settings: Settings | null; dest?: string; onClose: () => void }) {
   const [format, setFormat] = useState("JPEG");
   const [space, setSpace] = useState("sRGB");
   const [quality, setQuality] = useState(90);
   const [edge, setEdge] = useState("");
   const [folder, setFolder] = useState(lastFolder);
-  const [dest, setDest] = useState<Source | "">(initialDest); // "" = folder
+  const [dest, setDest] = useState(initialDest); // "" = folder
+  const [uploadPath, setUploadPath] = useState("OpenLight exports");
+  const account = dest.startsWith("cloud:") ? settings?.clouds.find((a) => `cloud:${a.id}` === dest) : undefined;
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState("");
   const [result, setResult] = useState<string | null>(null);
@@ -342,8 +438,9 @@ export function ExportDialog({ ids, settings, dest: initialDest = "", onClose }:
       /* per-viewer convenience only */
     }
     try {
-      const files = await api.export({ ids, folder, format, color_space: space, quality, max_edge: edge ? +edge : null, upload: dest || null });
-      setResult(dest ? `Uploaded ${files.length} photo(s) to ${dest === "immich" ? "Immich" : "Google Photos"}` : `Exported ${files.length} file(s) to ${folder}`);
+      const files = await api.export({ ids, folder, format, color_space: space, quality, max_edge: edge ? +edge : null, upload: dest || null, upload_path: uploadPath });
+      const where = account ? `${account.name} › ${uploadPath.trim() || "/"}` : dest === "immich" ? "Immich" : "Google Photos";
+      setResult(dest ? `Uploaded ${files.length} photo(s) to ${where}` : `Exported ${files.length} file(s) to ${folder}`);
     } catch (e) {
       setResult(`Export failed: ${e}`);
     }
@@ -354,7 +451,7 @@ export function ExportDialog({ ids, settings, dest: initialDest = "", onClose }:
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => !busy && onClose()}>
       <div className="w-[440px] space-y-3 rounded-lg border border-neutral-700 bg-neutral-900 p-5 text-[12px] shadow-2xl" onClick={(e) => e.stopPropagation()}>
         <h2 className="text-sm font-semibold">Export {ids.length} photo(s)</h2>
-        <div className="grid grid-cols-[110px_1fr] items-center gap-2">
+        <div className="grid grid-cols-[110px_minmax(0,1fr)] items-center gap-2">
           <span className="text-neutral-400">Format</span>
           <select className={field} value={format} onChange={(e) => setFormat(e.target.value)}>
             <option value="JPEG">JPEG</option>
@@ -380,7 +477,7 @@ export function ExportDialog({ ids, settings, dest: initialDest = "", onClose }:
           <span className="text-neutral-400">Long edge (px)</span>
           <input className={field} placeholder="Full resolution" value={edge} onChange={(e) => setEdge(e.target.value.replace(/\D/g, ""))} />
           <span className="text-neutral-400">Destination</span>
-          <select className={field} value={dest} onChange={(e) => setDest(e.target.value as Source | "")}>
+          <select className={field} value={dest} onChange={(e) => setDest(e.target.value)}>
             <option value="">Folder</option>
             <option value="immich" disabled={!settings?.immich_url}>
               Upload to Immich{settings?.immich_url ? "" : " — connect it in Library first"}
@@ -388,7 +485,18 @@ export function ExportDialog({ ids, settings, dest: initialDest = "", onClose }:
             <option value="google" disabled={!settings?.google_client_id}>
               Upload to Google Photos{settings?.google_client_id ? "" : " — connect it in Library first"}
             </option>
+            {settings?.clouds.map((a) => (
+              <option key={a.id} value={`cloud:${a.id}`}>
+                Upload to {a.name}
+              </option>
+            ))}
           </select>
+          {account && (
+            <>
+              <span className="text-neutral-400">Into folder</span>
+              <input className={field} value={uploadPath} onChange={(e) => setUploadPath(e.target.value)} placeholder="The top of the storage" />
+            </>
+          )}
           {!dest && (
             <>
               <span className="text-neutral-400">Folder</span>

@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{f32::consts::PI, path::Path, sync::OnceLock};
 
-type M3 = [[f32; 3]; 3];
-type Px = [f32; 3];
+pub(crate) type M3 = [[f32; 3]; 3];
+pub(crate) type Px = [f32; 3];
 
 pub fn es(e: impl std::fmt::Display) -> String {
     e.to_string()
@@ -899,8 +899,8 @@ pub fn mask_from_ops(name: &str, ops: &Value, adjustments: &Value) -> Result<(Ma
 // Colour math (working space: linear Rec.2020)
 // ---------------------------------------------------------------------------
 
-const M709_2020: M3 = [[0.6274039, 0.3292830, 0.0433131], [0.0690973, 0.9195404, 0.0113623], [0.0163914, 0.0880133, 0.8955953]];
-const M2020_709: M3 = [[1.6604910, -0.5876411, -0.0728499], [-0.1245505, 1.1328999, -0.0083494], [-0.0181508, -0.1005789, 1.1187297]];
+pub(crate) const M709_2020: M3 = [[0.6274039, 0.3292830, 0.0433131], [0.0690973, 0.9195404, 0.0113623], [0.0163914, 0.0880133, 0.8955953]];
+pub(crate) const M2020_709: M3 = [[1.6604910, -0.5876411, -0.0728499], [-0.1245505, 1.1328999, -0.0083494], [-0.0181508, -0.1005789, 1.1187297]];
 const M2020_P3: M3 = [[1.3435783, -0.2821797, -0.0613986], [-0.0652975, 1.0757879, -0.0104905], [0.0028218, -0.0195985, 1.0167767]];
 const M2020_ADOBE: M3 = [[1.1519784, -0.0975031, -0.0544753], [-0.1245505, 1.1328999, -0.0083494], [-0.0225304, -0.0498065, 1.0723369]];
 const MXYZ_2020: M3 = [[1.7166513, -0.3556708, -0.2533663], [-0.6666843, 1.6164812, 0.0157686], [0.0176399, -0.0427706, 0.9421031]];
@@ -909,7 +909,7 @@ const MLMS_2020: M3 = [[2.1401404, -1.2463560, 0.1064317], [-0.8848325, 2.163172
 const IDENT: M3 = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
 
 #[inline]
-fn mul(m: &M3, p: Px) -> Px {
+pub(crate) fn mul(m: &M3, p: Px) -> Px {
     [
         m[0][0] * p[0] + m[0][1] * p[1] + m[0][2] * p[2],
         m[1][0] * p[0] + m[1][1] * p[1] + m[1][2] * p[2],
@@ -921,7 +921,7 @@ pub fn luma(p: Px) -> f32 {
     0.2627 * p[0] + 0.6780 * p[1] + 0.0593 * p[2]
 }
 #[inline]
-fn smooth(e0: f32, e1: f32, x: f32) -> f32 {
+pub(crate) fn smooth(e0: f32, e1: f32, x: f32) -> f32 {
     let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
@@ -942,7 +942,7 @@ fn pq(l: f32) -> f32 {
     ((0.835_937_5 + 18.851_563 * p) / (1.0 + 18.6875 * p)).powf(78.84375)
 }
 #[inline]
-fn oklab(p: Px) -> Px {
+pub(crate) fn oklab(p: Px) -> Px {
     let l = mul(&M2020_LMS, p).map(f32::cbrt);
     [
         0.2104542553 * l[0] + 0.7936177850 * l[1] - 0.0040720468 * l[2],
@@ -951,14 +951,14 @@ fn oklab(p: Px) -> Px {
     ]
 }
 #[inline]
-fn from_oklab(c: Px) -> Px {
+pub(crate) fn from_oklab(c: Px) -> Px {
     let l = c[0] + 0.3963377774 * c[1] + 0.2158037573 * c[2];
     let m = c[0] - 0.1055613458 * c[1] - 0.0638541728 * c[2];
     let s = c[0] - 0.0894841775 * c[1] - 1.2914855480 * c[2];
     mul(&MLMS_2020, [l * l * l, m * m * m, s * s * s])
 }
 /// sRGB-encoded (0–1) colour -> linear Rec.2020.
-fn srgb_to_working(c: Px) -> Px {
+pub(crate) fn srgb_to_working(c: Px) -> Px {
     mul(&M709_2020, c.map(srgb_eotf))
 }
 /// Fully saturated sRGB colour for an HSL hue in degrees (matches the UI colour wheels).
@@ -1028,9 +1028,25 @@ pub fn is_supported(path: &Path) -> bool {
     RAW_EXTS.contains(&e.as_str()) || IMG_EXTS.contains(&e.as_str())
 }
 
+/// Float images (32-bit TIFF, the Enhanced masters, and decoded RAWs) hold linear light.
+pub fn is_float(img: &DynamicImage) -> bool {
+    matches!(img, DynamicImage::ImageRgb32F(_) | DynamicImage::ImageRgba32F(_))
+}
+
+/// What a decoded file looks like on screen: float (linear) images get the sRGB curve.
+pub fn displayable(img: DynamicImage) -> DynamicImage {
+    if !is_float(&img) {
+        return img;
+    }
+    let buf = img.to_rgb32f();
+    let rgb = buf.as_raw().par_iter().map(|&v| oetf8(v)).collect();
+    DynamicImage::ImageRgb8(ImageBuffer::from_raw(buf.width(), buf.height(), rgb).expect("rgb8 buffer"))
+}
+
 /// Decode any supported file into the working space, optionally downscaled.
 pub fn load(path: &Path, max_edge: Option<u32>) -> Result<Img, String> {
-    let (img, linear) = if is_raw(path) { (decode_raw(path)?, true) } else { (decode_std(path)?, false) };
+    let img = if is_raw(path) { decode_raw(path)? } else { decode_std(path)? };
+    let linear = is_float(&img);
     let img = match max_edge {
         Some(m) if img.width().max(img.height()) > m => img.resize(m, m, FilterType::Triangle),
         _ => img,
@@ -1296,7 +1312,7 @@ fn box_rows(src: &[f32], w: usize, r: usize) -> Vec<f32> {
     out
 }
 
-fn transpose(src: &[f32], w: usize, h: usize) -> Vec<f32> {
+pub(crate) fn transpose(src: &[f32], w: usize, h: usize) -> Vec<f32> {
     let mut out = vec![0.0; src.len()];
     out.par_chunks_mut(h).enumerate().for_each(|(x, col)| {
         for (y, v) in col.iter_mut().enumerate() {
@@ -2957,10 +2973,17 @@ fn look(profile: &str) -> Option<Value> {
 /// Basic, presence, colour / B&W and the panels the look uses start over, so a profile applied twice
 /// changes nothing; the rest of the edit stays.
 pub fn auto(img: &Img, cur: &Develop, profile: &str) -> Result<Develop, String> {
-    let look = look(profile).ok_or_else(|| format!("unknown profile '{profile}': use {}", PROFILES.join(", ")))?;
+    look(profile).ok_or_else(|| format!("unknown profile '{profile}': use {}", PROFILES.join(", ")))?;
     let white_balance = auto_wb(img);
     let basic_tone = auto_tone(img, &white_balance);
-    let d = Develop { white_balance, basic_tone, presence: Presence::default(), profile: String::new(), ..cur.clone() };
+    look_on(&Develop { white_balance, basic_tone, ..cur.clone() }, profile)
+}
+
+/// `profile`'s look on `d`: presence, colour / B&W and the panels the look uses start over, then its
+/// numbers add to the rest (e.g. Portrait warms the white balance).
+pub fn look_on(d: &Develop, profile: &str) -> Result<Develop, String> {
+    let look = look(profile).ok_or_else(|| format!("unknown profile '{profile}': use {}", PROFILES.join(", ")))?;
+    let d = Develop { presence: Presence::default(), profile: String::new(), ..d.clone() };
     let (mut v, fresh) = (serde_json::to_value(d).map_err(es)?, serde_json::to_value(Develop::default()).map_err(es)?);
     for k in look.as_object().into_iter().flat_map(|o| o.keys()).filter(|k| !["white_balance", "basic_tone"].contains(&k.as_str())) {
         v[k.as_str()] = fresh[k.as_str()].clone();
@@ -3261,6 +3284,15 @@ fn tagged<E: ImageEncoder>(mut e: E, icc: Option<Vec<u8>>, exif: Option<Vec<u8>>
         let _ = e.set_exif_metadata(x);
     }
     e
+}
+
+/// A master in linear light: 32-bit float TIFF in Rec.709 primaries that keeps values below 0 (wide-gamut
+/// colours) and above 1 (highlights); `load` reads float files back as linear.
+pub fn export_linear(img: &Img, out: &Path) -> Result<(), String> {
+    let data: Vec<f32> = img.px.par_iter().flat_map_iter(|p| mul(&M2020_709, *p)).collect();
+    let buf: image::Rgb32FImage = ImageBuffer::from_raw(img.w as u32, img.h as u32, data).ok_or("bad buffer")?;
+    let file = std::io::BufWriter::new(std::fs::File::create(out).map_err(es)?);
+    DynamicImage::ImageRgb32F(buf).write_with_encoder(image::codecs::tiff::TiffEncoder::new(file)).map_err(es)
 }
 
 /// Encode with an embedded ICC profile and, when the capture time is known, an EXIF

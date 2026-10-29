@@ -1,17 +1,22 @@
 mod ai;
+mod auto;
 mod catalog;
+mod cloud;
 mod develop;
+mod enhance;
 mod mcp;
 mod remote;
 mod storage;
+mod vision;
 
 use develop::{Develop, Img, Opts, es};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, MutexGuard, OnceLock},
+    sync::{Arc, Mutex, MutexGuard, OnceLock, atomic::AtomicBool},
 };
 use tauri::{Emitter, Manager};
 
@@ -31,6 +36,12 @@ pub struct Settings {
     pub immich_url: String,
     /// OAuth client of the signed-in Google account; secret and refresh token are in the keychain.
     pub google_client_id: String,
+    /// Advanced settings of the auto functions, and what runs on new photos.
+    pub auto: auto::AutoSettings,
+    /// Shares on a NAS or server, browsed in place like folders.
+    pub network_drives: Vec<storage::NetworkDrive>,
+    /// Cloud storage accounts; their secrets are in the keychain.
+    pub clouds: Vec<cloud::Account>,
 }
 
 impl Default for Settings {
@@ -43,6 +54,9 @@ impl Default for Settings {
             active_provider: "cli:claude".into(),
             immich_url: String::new(),
             google_client_id: String::new(),
+            auto: Default::default(),
+            network_drives: vec![],
+            clouds: vec![],
         }
     }
 }
@@ -82,6 +96,8 @@ pub struct Core {
     pub settings: Mutex<Settings>,
     pub selection: Mutex<Vec<i64>>,
     pub mcp_status: Mutex<String>,
+    /// Cancel flags of the running jobs (auto functions, duplicating), by job id.
+    pub jobs: Mutex<HashMap<String, Arc<AtomicBool>>>,
     cache: Mutex<Vec<(String, Arc<Img>)>>,
     // ponytail: one full-size decode at a time bounds memory; a decode pool if imports/exports need throughput
     decode_lock: Mutex<()>,
@@ -97,6 +113,7 @@ impl Core {
             dir,
             selection: Default::default(),
             mcp_status: Mutex::new("not started".into()),
+            jobs: Default::default(),
             cache: Default::default(),
             decode_lock: Mutex::new(()),
             app: OnceLock::new(),
@@ -153,16 +170,19 @@ impl Core {
         }
     }
 
+    /// Full decode of a file, one at a time (full-size decodes are memory-heavy).
+    pub fn decode(&self, file: &Path, max_edge: Option<u32>) -> Result<Img, String> {
+        let _g = self.decode_lock.lock().unwrap();
+        develop::load(file, max_edge)
+    }
+
     /// Decoded working-space proxy, cached for the last few files.
     pub fn proxy(&self, path: &str) -> Result<Arc<Img>, String> {
         if let Some((_, img)) = self.cache.lock().unwrap().iter().find(|(p, _)| p == path) {
             return Ok(img.clone());
         }
         let file = self.local_file(path)?;
-        let img = {
-            let _g = self.decode_lock.lock().unwrap();
-            Arc::new(develop::load(&file, Some(PROXY_EDGE))?)
-        };
+        let img = Arc::new(self.decode(&file, Some(PROXY_EDGE))?);
         let mut c = self.cache.lock().unwrap();
         c.retain(|(p, _)| p != path);
         c.insert(0, (path.to_string(), img.clone()));
@@ -246,11 +266,7 @@ impl Core {
         for (i, &id) in ids.iter().enumerate() {
             let p = self.photo(id)?;
             let d = self.develop(id)?;
-            let file = self.local_file(&p.path)?;
-            let src = {
-                let _g = self.decode_lock.lock().unwrap();
-                develop::load(&file, max_edge)?
-            };
+            let src = self.decode(&self.local_file(&p.path)?, max_edge)?;
             let img = develop::render(&src, &d, &Opts::default());
             let stem = Path::new(&p.filename).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
             let stem = match &p.copy_name {
@@ -306,10 +322,12 @@ fn list_folders(core: St) -> Result<Vec<(String, i64)>, String> {
 #[tauri::command(async)]
 fn import_folder(core: St, path: String) -> Result<usize, String> {
     let c = core.inner().clone();
-    let n = catalog::import(&core, Path::new(&path), &|done, total| {
+    let ids = catalog::import(&core, Path::new(&path), &|done, total| {
         c.emit("import-progress", json!({"done": done, "total": total}))
     })?;
     core.emit("catalog-changed", json!({}));
+    let n = ids.len();
+    auto::after_import(core.inner(), ids, "folders");
     Ok(n)
 }
 
@@ -496,8 +514,11 @@ struct ExportReq {
     color_space: String,
     quality: u8,
     max_edge: Option<u32>,
-    /// `immich` | `google`: upload the renders instead of keeping them in `folder`.
+    /// `immich` | `google` | `cloud:<account id>`: upload the renders instead of keeping them in `folder`.
     upload: Option<String>,
+    /// cloud: the folder in the account to upload into.
+    #[serde(default)]
+    upload_path: String,
 }
 
 #[tauri::command(async)]
@@ -505,7 +526,10 @@ fn export_photos(core: St, req: ExportReq) -> Result<Vec<String>, String> {
     let export = |folder: &Path| core.export(&req.ids, folder, &req.format, &req.color_space, req.quality.clamp(1, 100), req.max_edge);
     let Some(dest) = &req.upload else { return export(Path::new(&req.folder)) };
     let tmp = std::env::temp_dir().join(format!("openlight-upload-{}", new_token()));
-    let res = export(&tmp).and_then(|files| remote::upload(&core, dest, &req.ids, &files));
+    let res = export(&tmp).and_then(|files| match dest.strip_prefix("cloud:") {
+        Some(id) => cloud::upload_files(&core, id, &req.upload_path, &files),
+        None => remote::upload(&core, dest, &req.ids, &files),
+    });
     let _ = fs::remove_dir_all(&tmp);
     res
 }
@@ -516,8 +540,15 @@ fn get_settings(core: St) -> Settings {
 }
 
 #[tauri::command]
-fn save_settings(core: St, settings: Settings) -> Result<(), String> {
-    *core.settings.lock().unwrap() = settings;
+fn save_settings(core: St, mut settings: Settings) -> Result<(), String> {
+    {
+        let mut s = core.settings.lock().unwrap();
+        // drives and cloud accounts change through their own commands (and downloads add folders in the
+        // background): the UI's copy of them may be out of date
+        settings.network_drives = std::mem::take(&mut s.network_drives);
+        settings.clouds = std::mem::take(&mut s.clouds);
+        *s = settings;
+    }
     core.save_settings()
 }
 
@@ -566,7 +597,7 @@ fn immich_albums(core: St) -> Result<Vec<Value>, String> {
 /// Browse an album (None: the favorites) in place; returns the catalog ids to show.
 #[tauri::command(async)]
 fn immich_open(core: St, album: Option<String>, page: Option<u32>) -> Result<Value, String> {
-    remote::immich_open(&core, album.as_deref(), page.unwrap_or(1))
+    remote::immich_open(core.inner(), album.as_deref(), page.unwrap_or(1))
 }
 
 #[tauri::command(async)]
@@ -576,7 +607,7 @@ fn google_connect(core: St, client_id: String, client_secret: String) -> Result<
 
 #[tauri::command(async)]
 fn google_import(core: St) -> Result<Value, String> {
-    remote::google_import(&core)
+    remote::google_import(core.inner())
 }
 
 #[tauri::command]
@@ -584,15 +615,121 @@ fn remote_disconnect(core: St, source: String) -> Result<Settings, String> {
     remote::disconnect(&core, &source)
 }
 
+/// Run an auto function (auto::FUNCTIONS) on photos with its settings; `job` names it for cancel_job.
+#[tauri::command(async)]
+fn auto_run(core: St, function: String, ids: Vec<i64>, settings: Value, job: String) -> Result<Value, String> {
+    let job = auto::Job::start(&core, &job);
+    auto::run(core.inner(), &function, &ids, &settings, &job)
+}
+
+/// The auto functions' default settings (for Reset).
+#[tauri::command]
+fn auto_defaults() -> auto::AutoSettings {
+    Default::default()
+}
+
+#[tauri::command]
+fn cancel_job(core: St, job: String) -> bool {
+    auto::cancel(&core, &job)
+}
+
 #[tauri::command(async)]
 fn storage_report(core: St) -> Result<Value, String> {
     storage::report(&core)
 }
 
-/// `thumbs` | `originals` | `missing` | `history` | `compact`
+/// `thumbs` | `originals` | `immich_albums` | `cloud` | `missing` | `history` | `compact` | `all`
 #[tauri::command(async)]
 fn clean_up(core: St, what: String) -> Result<usize, String> {
     storage::clean(&core, &what)
+}
+
+#[tauri::command]
+fn network_add(core: St, drive: storage::NetworkDrive) -> Result<Settings, String> {
+    storage::add_drive(&core, drive)
+}
+
+#[tauri::command]
+fn network_remove(core: St, id: String) -> Result<Settings, String> {
+    storage::remove_drive(&core, &id)
+}
+
+/// Where a share usually appears once connected (to fill in the folder).
+#[tauri::command]
+fn network_mount_point(url: String) -> Option<String> {
+    storage::mount_point(&url)
+}
+
+/// Connect the share if needed, without reading it into the catalog; returns its folder.
+#[tauri::command(async)]
+fn network_connect(core: St, id: String) -> Result<String, String> {
+    storage::connect_drive(&core, &id)
+}
+
+#[tauri::command(async)]
+fn network_status(core: St) -> Vec<Value> {
+    storage::drives_online(&core)
+}
+
+/// Connect the share if needed and pick up new photos, like opening a folder.
+#[tauri::command(async)]
+fn network_open(core: St, id: String) -> Result<Value, String> {
+    storage::open_drive(core.inner(), &id)
+}
+
+/// WebDAV / S3 account with its password or secret key.
+#[tauri::command(async)]
+fn cloud_connect(core: St, account: cloud::Account, secret: String) -> Result<Settings, String> {
+    cloud::connect(&core, account, &secret)
+}
+
+#[tauri::command]
+fn cloud_dropbox_start(app_key: String) -> Result<(), String> {
+    cloud::dropbox_start(&app_key)
+}
+
+#[tauri::command(async)]
+fn cloud_dropbox_finish(core: St, account: cloud::Account, code: String) -> Result<Settings, String> {
+    cloud::dropbox_finish(&core, account, &code)
+}
+
+#[tauri::command(async)]
+fn cloud_onedrive_connect(core: St, account: cloud::Account) -> Result<Settings, String> {
+    cloud::onedrive_connect(&core, account)
+}
+
+#[tauri::command]
+fn cloud_disconnect(core: St, id: String) -> Result<Settings, String> {
+    cloud::disconnect(&core, &id)
+}
+
+#[tauri::command(async)]
+fn cloud_browse(core: St, id: String, path: String) -> Result<Vec<cloud::Entry>, String> {
+    cloud::open(&core, &id)?.1.list(&path)
+}
+
+/// Download what's new in a cloud folder and show it in the catalog.
+#[tauri::command(async)]
+fn cloud_sync(core: St, id: String, path: String) -> Result<Value, String> {
+    cloud::sync(core.inner(), &id, &path)
+}
+
+/// Where each downloaded cloud folder is kept: [{id, path, local}].
+#[tauri::command]
+fn cloud_local_dirs(core: St) -> Vec<Value> {
+    cloud::local_dirs(&core)
+}
+
+#[tauri::command]
+fn cloud_forget_folder(core: St, id: String, path: String) -> Result<Settings, String> {
+    cloud::forget_folder(&core, &id, &path)
+}
+
+/// Copy the originals at `from` to `to`; `job` names it for cancel_job.
+#[tauri::command(async)]
+fn duplicate(core: St, from: storage::Place, to: storage::Place, options: storage::DuplicateOptions, job: String) -> Result<Value, String> {
+    let job = auto::Job::start(&core, &job);
+    storage::duplicate(core.inner(), &from, &to, &options, &job)
 }
 
 pub fn run() {
@@ -644,6 +781,25 @@ pub fn run() {
             remote_disconnect,
             storage_report,
             clean_up,
+            auto_run,
+            auto_defaults,
+            cancel_job,
+            network_add,
+            network_remove,
+            network_mount_point,
+            network_status,
+            network_connect,
+            network_open,
+            cloud_connect,
+            cloud_dropbox_start,
+            cloud_dropbox_finish,
+            cloud_onedrive_connect,
+            cloud_disconnect,
+            cloud_browse,
+            cloud_sync,
+            cloud_local_dirs,
+            cloud_forget_folder,
+            duplicate,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -652,7 +808,7 @@ pub fn run() {
 /// `openlight-studio --import <folder>`: headless import into the catalog.
 pub fn run_import(folder: &str) -> Result<usize, String> {
     let core = Core::open(data_dir())?;
-    catalog::import(&core, Path::new(folder), &|done, total| eprint!("\rthumbnails {done}/{total}"))
+    Ok(catalog::import(&core, Path::new(folder), &|done, total| eprint!("\rthumbnails {done}/{total}"))?.len())
 }
 
 /// `openlight-studio --mcp-stdio`: stdio MCP transport (spec §4.1).

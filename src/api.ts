@@ -33,6 +33,8 @@ export type Filter = {
   edited?: boolean | null;
   /** Loaded pages of an Immich album (album id, or "favorites") */
   immich_album?: string | null;
+  /** Only these photos (e.g. the results of an auto function) */
+  ids?: number[] | null;
   /** Sidebar row being shown; UI only, the backend ignores it */
   view?: string | null;
 };
@@ -157,6 +159,113 @@ export type Settings = {
   active_provider: string;
   immich_url: string;
   google_client_id: string;
+  auto: AutoSettings;
+  network_drives: NetworkDrive[];
+  clouds: CloudAccount[];
+};
+
+// --- auto functions: their advanced settings, as kept in Settings.auto ---
+export type AutoFunction = "cull" | "edit" | "mask" | "enhance" | "blur" | "duplicates";
+/** detail: where sharpness is checked: fast (1024 px) | screen (2048 px) | full (100%) */
+export type CullSettings = {
+  detail: string;
+  reject_blurry: boolean;
+  blur_threshold: number;
+  use_subject: boolean;
+  reject_exposure: boolean;
+  clip_limit: number;
+  burst_seconds: number;
+  similarity: number;
+  pick_best: boolean;
+  reject_similar: boolean;
+  stars: boolean;
+  labels: boolean;
+  keywords: boolean;
+  ai_keywords: boolean;
+  keep_manual: boolean;
+};
+export type EditSettings = {
+  profile: string;
+  strength: number;
+  white_balance: boolean;
+  tone: boolean;
+  look: boolean;
+  upright: string;
+  chromatic_aberration: boolean;
+  noise_reduction: boolean;
+  skip_edited: boolean;
+  virtual_copy: boolean;
+};
+export type MaskSettings = { targets: string[]; method: string; feather: number; edge_shift: number; replace: boolean; adjust: number };
+export type EnhanceSettings = {
+  denoise: boolean;
+  strength: number;
+  detail: number;
+  color: number;
+  super_resolution: boolean;
+  scale: number;
+  sharpen: number;
+  max_megapixels: number;
+  engine: string;
+  command: string;
+  format: string;
+  folder: string;
+  copy_edits: boolean;
+};
+export type BlurSettings = { detail: string; threshold: number; subject: string; motion: number; missed_focus: boolean; action: string };
+export type DuplicateSettings = { mode: string; similarity: number; window_minutes: number; keep: string; action: string };
+/** Run Auto Catalog & Culling on photos new to the catalog, by where they came from */
+export type OnImport = { enabled: boolean; folders: boolean; cloud: boolean; immich: boolean; duplicates: boolean };
+export type AutoSettings = {
+  cull: CullSettings;
+  edit: EditSettings;
+  mask: MaskSettings;
+  enhance: EnhanceSettings;
+  blur: BlurSettings;
+  duplicates: DuplicateSettings;
+  on_import: OnImport;
+};
+/** An auto function's summary; `rows` holds one entry per photo (per group for duplicates) */
+export type AutoResult = { function: AutoFunction; total: number; cancelled: boolean; rows: Record<string, unknown>[] } & Record<string, unknown>;
+/** Progress of a running job (auto function, duplicate, culling of new photos) */
+export type JobProgress = { job: string; label?: string; done: number; total: number; finished?: boolean };
+
+// --- storage ---
+export type NetworkDrive = { id: string; name: string; url: string; path: string };
+export type CloudKind = "webdav" | "s3" | "dropbox" | "onedrive";
+export type CloudAccount = { id: string; kind: CloudKind; name: string; endpoint: string; user: string; bucket: string; region: string; folders: string[] };
+export type CloudEntry = { name: string; path: string; dir: boolean; size: number };
+export type CloudFolder = { id: string; path: string; local: string };
+/** Where photos are duplicated from or to */
+export type Place =
+  | { kind: "folder"; path: string }
+  | { kind: "photos"; ids: number[] }
+  | { kind: "immich"; album: string | null }
+  | { kind: "google" }
+  | { kind: "cloud"; account: string; path: string };
+export type DuplicateOptions = {
+  subfolders: boolean;
+  only_picks: boolean;
+  min_rating: number;
+  skip_existing: boolean;
+  sidecars: boolean;
+  verify: boolean;
+  keep_dates: boolean;
+  catalog: boolean;
+  /** then Auto Catalog & Culling on the copies; unset: as Settings.auto.on_import says for duplicates */
+  cull?: boolean;
+};
+export type DuplicateResult = {
+  listed: number;
+  selected: number;
+  copied: number;
+  skipped: number;
+  failed: number;
+  bytes: number;
+  errors: string[];
+  cataloged: number;
+  culled: { picks: number; rejects: number; rated: number } | null;
+  cancelled: boolean;
 };
 export type Source = "immich" | "google";
 export type ImmichAlbum = { id: string; name: string; count: number };
@@ -166,9 +275,9 @@ export type HistoryEntry = { id: number; label: string; created_at: string; curr
 export type Rendered = { hist: Uint32Array[]; image: ImageData };
 /** Preview overlays: soft-proof gamut (sRGB | DisplayP3 | AdobeRGB), clipping, Visualize Spots threshold (null = off). */
 export type Proof = { gamut: string | null; clipping: boolean; spots: number | null };
-/** upload: send the renders to Immich / Google Photos instead of keeping them in `folder` */
-export type ExportReq = { ids: number[]; folder: string; format: string; color_space: string; quality: number; max_edge: number | null; upload?: Source | null };
-export type CleanUp = "thumbs" | "originals" | "immich_albums" | "missing" | "history" | "compact" | "all";
+/** upload: send the renders to Immich / Google Photos / `cloud:<account id>` (into `upload_path`) instead of keeping them in `folder` */
+export type ExportReq = { ids: number[]; folder: string; format: string; color_space: string; quality: number; max_edge: number | null; upload?: string | null; upload_path?: string };
+export type CleanUp = "thumbs" | "originals" | "immich_albums" | "cloud" | "missing" | "history" | "compact" | "all";
 type Named = { name: string; count: number }[];
 export type ImmichAlbumStorage = { name: string; path: string; bytes: number; photos: number };
 export type OtherDetail = { name: string; bytes: number };
@@ -185,6 +294,7 @@ export type StorageReport = {
   immich_albums?: ImmichAlbumStorage[];
   immich_albums_bytes?: number;
   google: number;
+  cloud?: number;
   other?: number;
   other_details?: OtherDetail[];
   summary: { total_photos: number; virtual_copies: number; edited: number; picks: number; rejects: number; rated_3_plus: number; cameras: Named; lenses: Named };
@@ -254,6 +364,39 @@ export const api = {
   storage: () => invoke<StorageReport>("storage_report"),
   /** Returns how many files, photos or history steps went */
   cleanUp: (what: CleanUp) => invoke<number>("clean_up", { what }),
+  /** Run an auto function on photos; `job` names it for cancelJob */
+  autoRun: (fn: AutoFunction, ids: number[], settings: object, job: string) => invoke<AutoResult>("auto_run", { function: fn, ids, settings, job }),
+  cancelJob: (job: string) => invoke<boolean>("cancel_job", { job }),
+  autoDefaults: () => invoke<AutoSettings>("auto_defaults"),
+  networkAdd: (drive: Partial<NetworkDrive>) => invoke<Settings>("network_add", { drive }),
+  networkRemove: (id: string) => invoke<Settings>("network_remove", { id }),
+  /** Where a share usually appears once connected, or null */
+  networkMountPoint: (url: string) => invoke<string | null>("network_mount_point", { url }),
+  networkStatus: () => invoke<{ id: string; online: boolean }[]>("network_status"),
+  /** Connect the share if needed; returns its folder */
+  networkConnect: (id: string) => invoke<string>("network_connect", { id }),
+  /** Connect if needed and pick up new photos, like opening a folder */
+  networkOpen: (id: string) => invoke<{ path: string; new: number }>("network_open", { id }),
+  /** WebDAV or S3 account, checked by listing it */
+  cloudConnect: (account: Partial<CloudAccount>, secret: string) => invoke<Settings>("cloud_connect", { account, secret }),
+  cloudDropboxStart: (appKey: string) => invoke("cloud_dropbox_start", { appKey }),
+  cloudDropboxFinish: (account: Partial<CloudAccount>, code: string) => invoke<Settings>("cloud_dropbox_finish", { account, code }),
+  cloudOnedriveConnect: (account: Partial<CloudAccount>) => invoke<Settings>("cloud_onedrive_connect", { account }),
+  cloudDisconnect: (id: string) => invoke<Settings>("cloud_disconnect", { id }),
+  cloudBrowse: (id: string, path: string) => invoke<CloudEntry[]>("cloud_browse", { id, path }),
+  /** Download what's new in a cloud folder and add it to the catalog */
+  cloudSync: (id: string, path: string) => invoke<{ folder: string; imported: number; downloaded: number; failed: number; error: string | null }>("cloud_sync", { id, path }),
+  cloudLocalDirs: () => invoke<CloudFolder[]>("cloud_local_dirs"),
+  cloudForgetFolder: (id: string, path: string) => invoke<Settings>("cloud_forget_folder", { id, path }),
+  duplicate: (from: Place, to: Place, options: DuplicateOptions, job: string) => invoke<DuplicateResult>("duplicate", { from, to, options, job }),
+};
+
+/** Decimal units, as Finder shows them. */
+export const size = (n: number) => {
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let i = 0;
+  for (; n >= 1000 && i < units.length - 1; i++) n /= 1000;
+  return `${n.toFixed(i && n < 10 ? 1 : 0)} ${units[i]}`;
 };
 
 let thumbsDir = "";

@@ -4,6 +4,7 @@
 use crate::{
     Core,
     develop::{self, Develop, es},
+    vision::Metrics,
 };
 use image::{DynamicImage, metadata::Orientation};
 use rayon::prelude::*;
@@ -61,6 +62,11 @@ CREATE TABLE IF NOT EXISTS immich_albums (
   album TEXT NOT NULL,
   path TEXT NOT NULL,
   PRIMARY KEY (album, path)
+);
+CREATE TABLE IF NOT EXISTS analysis (
+  path TEXT PRIMARY KEY,
+  stamp TEXT NOT NULL,
+  metrics TEXT NOT NULL
 );
 ";
 
@@ -154,6 +160,11 @@ pub struct Filter {
 
 const TEXT_COLS: &str = "(filename LIKE ? OR camera LIKE ? OR lens LIKE ? OR keywords LIKE ?)";
 
+/// pick | unflagged | reject for a stored flag.
+pub fn flag_name(f: i64) -> &'static str {
+    ["reject", "unflagged", "pick"][(f + 1).clamp(0, 2) as usize]
+}
+
 pub fn flag_value(s: &str) -> Result<i64, String> {
     match s {
         "pick" => Ok(1),
@@ -209,14 +220,23 @@ pub fn query(c: &Connection, f: &Filter) -> Result<Vec<Photo>, String> {
         if ids.is_empty() {
             return Ok(vec![]); // e.g. an empty Immich album; `IN ()` is not valid SQL
         }
-        sql += &format!(" AND id IN ({})", vec!["?"; ids.len()].join(","));
-        args.extend(ids.iter().map(|i| Sql::from(*i)));
+        // inline: a whole catalog's results can pass SQLite's limit of 32766 parameters
+        sql += &format!(" AND id IN ({})", ids.iter().map(i64::to_string).collect::<Vec<_>>().join(","));
     }
     sql += " ORDER BY COALESCE(captured_at, ''), filename, id LIMIT ?";
     args.push(f.limit.unwrap_or(1_000_000).into());
     let mut st = c.prepare(&sql).map_err(es)?;
     let rows = st.query_map(params_from_iter(args), row).map_err(es)?;
     rows.collect::<Result<_, _>>().map_err(es)
+}
+
+/// The photos with these ids, any number of them (SQLite caps the variables of one query).
+pub fn photos(c: &Connection, ids: &[i64]) -> Result<Vec<Photo>, String> {
+    let mut out = vec![];
+    for chunk in ids.chunks(10_000) {
+        out.extend(query(c, &Filter { ids: Some(chunk.to_vec()), ..Default::default() })?);
+    }
+    Ok(out)
 }
 
 /// Local folders only; Immich rows are browsed through their albums.
@@ -269,6 +289,17 @@ pub fn update(c: &Connection, ids: &[i64], u: &Culling) -> Result<usize, String>
     );
     let args = sets.into_iter().map(|(_, v)| v).chain(ids.iter().map(|i| Sql::from(*i)));
     c.execute(&sql, params_from_iter(args)).map_err(es)
+}
+
+/// `add` merged into a comma-separated keyword list (case-insensitive; the existing order is kept).
+pub fn merge_keywords(cur: &str, add: &[String]) -> String {
+    let mut out: Vec<String> = cur.split(',').map(|k| k.trim().to_string()).filter(|k| !k.is_empty()).collect();
+    for k in add.iter().map(|k| k.trim()).filter(|k| !k.is_empty()) {
+        if !out.iter().any(|o| o.eq_ignore_ascii_case(k)) {
+            out.push(k.to_string());
+        }
+    }
+    out.join(", ")
 }
 
 /// Removes photos and their virtual copies; returns every id that went.
@@ -381,9 +412,28 @@ pub fn clear_history(c: &Connection) -> Result<usize, String> {
     c.execute(&format!("DELETE {PAST_STEPS}"), []).map_err(es)
 }
 
-/// Rewrites the catalog without its free pages and empties the write-ahead log.
+/// Rewrites the catalog without its free pages (and analyses of photos no longer in it) and empties the
+/// write-ahead log.
 pub fn compact(c: &Connection) -> Result<(), String> {
-    c.execute_batch("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);").map_err(es)
+    c.execute_batch("DELETE FROM analysis WHERE path NOT IN (SELECT path FROM photos); VACUUM; PRAGMA wal_checkpoint(TRUNCATE);").map_err(es)
+}
+
+/// What the auto functions measured on a file, if it was measured with these settings (`stamp`).
+pub fn analysis(c: &Connection, path: &str, stamp: &str) -> Option<Metrics> {
+    let json: String = c.query_row("SELECT metrics FROM analysis WHERE path = ? AND stamp = ?", [path, stamp], |r| r.get(0)).ok()?;
+    serde_json::from_str(&json).ok()
+}
+
+/// The last measurement of a file, whatever its settings.
+pub fn any_analysis(c: &Connection, path: &str) -> Option<Metrics> {
+    let json: String = c.query_row("SELECT metrics FROM analysis WHERE path = ?", [path], |r| r.get(0)).ok()?;
+    serde_json::from_str(&json).ok()
+}
+
+pub fn save_analysis(c: &Connection, path: &str, stamp: &str, m: &Metrics) -> Result<(), String> {
+    let json = serde_json::to_string(m).map_err(es)?;
+    c.execute("INSERT OR REPLACE INTO analysis (path, stamp, metrics) VALUES (?, ?, ?)", params![path, stamp, json]).map_err(es)?;
+    Ok(())
 }
 
 pub fn virtual_copy(c: &Connection, id: i64) -> Result<i64, String> {
@@ -434,8 +484,14 @@ pub fn summary(c: &Connection) -> Result<Value, String> {
 // Sidecars (spec §6): `<file>.olxmp` JSON next to the original
 // ---------------------------------------------------------------------------
 
-fn sidecar_path(path: &str) -> PathBuf {
+pub fn sidecar_path(path: &str) -> PathBuf {
     PathBuf::from(format!("{path}.olxmp"))
+}
+
+/// The `.olxmp` document of a photo's edits.
+pub fn sidecar_json(p: &Photo, d: &Develop) -> String {
+    let doc = json!({"schema_version": "1.0.0", "photo_id": format!("ols:{}", p.id), "source": p.filename, "pipeline": d});
+    serde_json::to_string_pretty(&doc).unwrap_or_default()
 }
 
 pub fn read_sidecar(path: &Path) -> Option<Develop> {
@@ -451,8 +507,7 @@ pub fn write_sidecar(p: &Photo, d: &Develop) {
     if p.master_id.is_some() || crate::remote::immich_id(&p.path).is_some() {
         return;
     }
-    let doc = json!({"schema_version": "1.0.0", "photo_id": format!("ols:{}", p.id), "source": p.filename, "pipeline": d});
-    if let Err(e) = fs::write(sidecar_path(&p.path), serde_json::to_string_pretty(&doc).unwrap_or_default()) {
+    if let Err(e) = fs::write(sidecar_path(&p.path), sidecar_json(p, d)) {
         eprintln!("sidecar {}: {e}", p.path);
     }
 }
@@ -517,6 +572,11 @@ pub fn camera_name(make: Option<String>, model: Option<String>) -> Option<String
     }
 }
 
+/// EXIF orientation of a file (1 = upright).
+pub fn exif_orientation(path: &Path) -> u8 {
+    read_exif(path).orientation
+}
+
 fn read_exif(path: &Path) -> Meta {
     use exif::{In, Tag, Value as EV};
     let mut m = Meta { orientation: 1, ..Default::default() };
@@ -559,7 +619,7 @@ fn make_thumb(path: &Path, orientation: u8) -> Result<(DynamicImage, u32, u32), 
             None => to_dynamic(&develop::load(path, None)?),
         }
     } else {
-        develop::decode_std(path)?
+        develop::displayable(develop::decode_std(path)?)
     };
     Ok((img.thumbnail(THUMB, THUMB), img.width(), img.height()))
 }
@@ -590,10 +650,15 @@ fn scan(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Classic catalog import: files stay where they are. Returns the number of new photos.
-pub fn import(core: &Core, folder: &Path, progress: &(dyn Fn(usize, usize) + Sync)) -> Result<usize, String> {
+/// Classic catalog import: files stay where they are. Returns the new photos' ids.
+pub fn import(core: &Core, folder: &Path, progress: &(dyn Fn(usize, usize) + Sync)) -> Result<Vec<i64>, String> {
     let mut files = vec![];
     scan(folder, &mut files);
+    import_files(core, files, progress)
+}
+
+/// Import these files (those already in the catalog are skipped); returns the new photos' ids.
+pub fn import_files(core: &Core, mut files: Vec<PathBuf>, progress: &(dyn Fn(usize, usize) + Sync)) -> Result<Vec<i64>, String> {
     let existing: HashSet<String> = {
         let c = core.db();
         let mut st = c.prepare("SELECT path FROM photos WHERE master_id IS NULL").map_err(es)?;
@@ -642,5 +707,5 @@ pub fn import(core: &Core, folder: &Path, progress: &(dyn Fn(usize, usize) + Syn
     for (id, w, h) in dims {
         c.execute("UPDATE photos SET width = ?, height = ? WHERE id = ?", params![w, h, id]).map_err(es)?;
     }
-    Ok(total)
+    Ok(added.into_iter().map(|a| a.0).collect())
 }

@@ -18,7 +18,10 @@ use std::{
     fs, io,
     path::{Path, PathBuf},
     process::Command,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -31,7 +34,7 @@ const PICKER: &str = "https://photospicker.googleapis.com/v1";
 type Reply = Result<ureq::http::Response<ureq::Body>, ureq::Error>;
 
 /// No overall deadline (originals can be large); a stalled read gives up after a minute.
-fn agent() -> ureq::Agent {
+pub(crate) fn agent() -> ureq::Agent {
     ureq::Agent::config_builder()
         .http_status_as_error(false)
         .timeout_connect(Some(Duration::from_secs(10)))
@@ -40,7 +43,7 @@ fn agent() -> ureq::Agent {
         .into()
 }
 
-fn json_of(what: &str, reply: Reply) -> Result<Value, String> {
+pub(crate) fn json_of(what: &str, reply: Reply) -> Result<Value, String> {
     let mut r = reply.map_err(|e| format!("{what}: {e}"))?;
     let status = r.status().as_u16();
     let body = r.body_mut().read_to_string().map_err(es)?;
@@ -53,7 +56,7 @@ fn json_of(what: &str, reply: Reply) -> Result<Value, String> {
     serde_json::from_str(&body).map_err(|_| format!("{what} did not reply with JSON; check the address"))
 }
 
-fn update_settings(core: &Core, f: impl FnOnce(&mut Settings)) -> Result<Settings, String> {
+pub(crate) fn update_settings(core: &Core, f: impl FnOnce(&mut Settings)) -> Result<Settings, String> {
     let s = {
         let mut s = core.settings.lock().unwrap();
         f(&mut s);
@@ -94,7 +97,7 @@ fn immich_albums_at(url: &str, key: &str) -> Result<Vec<Value>, String> {
     Ok(albums.iter().map(|a| json!({"id": a["id"], "name": a["albumName"], "count": a["assetCount"]})).collect())
 }
 
-fn immich(core: &Core) -> Result<(String, String), String> {
+pub(crate) fn immich(core: &Core) -> Result<(String, String), String> {
     let url = core.settings.lock().unwrap().immich_url.clone();
     let key = ai::key(IMMICH_KEY).filter(|_| !url.is_empty()).ok_or("Immich is not connected")?;
     Ok((url, key))
@@ -126,6 +129,18 @@ pub fn immich_id(path: &str) -> Option<&str> {
 /// Photos per page when browsing an album; the grid asks for the next page as you scroll.
 const PAGE: u32 = 250;
 
+/// Every image of an album (the favorites when `album` is None), page by page.
+pub fn immich_assets(core: &Core, album: Option<&str>) -> Result<Vec<Value>, String> {
+    let (url, key) = immich(core)?;
+    let (mut out, mut page) = (vec![], Some(1));
+    while let Some(p) = page {
+        let (assets, next) = immich_page(&url, &key, album, p)?;
+        out.extend(assets);
+        page = next;
+    }
+    Ok(out)
+}
+
 /// One page of an album's images (the favorites when `album` is None), oldest first like the
 /// grid, plus the next page number if there is one.
 fn immich_page(url: &str, key: &str, album: Option<&str>, page: u32) -> Result<(Vec<Value>, Option<u32>), String> {
@@ -147,16 +162,20 @@ fn immich_page(url: &str, key: &str, album: Option<&str>, page: u32) -> Result<(
 /// Browse an album (None: the favorites) in place, a page at a time. Each asset becomes an
 /// `immich://<id>` catalog row with the server's thumbnail; nothing else downloads until a
 /// photo is opened or exported. Page 1 starts the album over, so photos removed in Immich
-/// drop out. Returns the next page number, or null at the end.
-pub fn immich_open(core: &Core, album: Option<&str>, page: u32) -> Result<Value, String> {
+/// drop out. Returns the next page number, or null at the end. Photos new to the catalog can be culled
+/// automatically (Settings › Storage).
+pub fn immich_open(core: &Arc<Core>, album: Option<&str>, page: u32) -> Result<Value, String> {
     let (url, key) = immich(core)?;
-    open_from_immich(core, &url, &key, album, page)
+    let mut r = open_from_immich(core, &url, &key, album, page)?;
+    let added: Vec<i64> = serde_json::from_value(r["added"].take()).unwrap_or_default();
+    crate::auto::after_import(core, added, "immich");
+    Ok(r)
 }
 
 fn open_from_immich(core: &Core, url: &str, key: &str, album: Option<&str>, page: u32) -> Result<Value, String> {
     let (assets, next) = immich_page(url, key, album, page.max(1))?;
     let member = album.unwrap_or("favorites");
-    let mut need_thumb = vec![];
+    let (mut need_thumb, mut added) = (vec![], vec![]);
     {
         let mut c = core.db();
         let tx = c.transaction().map_err(es)?;
@@ -180,6 +199,7 @@ fn open_from_immich(core: &Core, url: &str, key: &str, album: Option<&str>, page
             if let Some(id) = catalog::add_photo(&tx, &path, "Immich", name, &m, &develop::Develop::default())? {
                 let (w, h) = (a["width"].as_i64().or(x["exifImageWidth"].as_i64()), a["height"].as_i64().or(x["exifImageHeight"].as_i64()));
                 tx.execute("UPDATE photos SET width = ?, height = ? WHERE id = ?", (w.unwrap_or(0), h.unwrap_or(0), id)).map_err(es)?;
+                added.push(id);
             }
             // A master's stars and pick/reject follow Immich (changes made here are pushed as they
             // happen): rating 1-5 = stars, -1 = rejected (stars kept), favorite = pick.
@@ -218,7 +238,7 @@ fn open_from_immich(core: &Core, url: &str, key: &str, album: Option<&str>, page
         core.emit("import-progress", json!({"label": "Loading thumbnails", "done": n, "total": need_thumb.len()}));
     });
     core.emit("catalog-changed", json!({}));
-    Ok(json!({"next": next}))
+    Ok(json!({"next": next, "added": added}))
 }
 
 /// Mirror these photos' stars and pick/reject to Immich: stars → rating 1-5 (none → unrated),
@@ -261,20 +281,47 @@ pub fn originals_dir(core: &Core) -> PathBuf {
     core.dir.join("remote").join("Immich").join("originals")
 }
 
-/// `creds` is only asked for on a cache miss, so downloaded photos open offline.
-fn original_from_immich(core: &Core, id: &str, creds: impl FnOnce() -> Result<(String, String), String>) -> Result<PathBuf, String> {
+/// The downloaded file of an Immich photo, if it was opened before (`Item` names it).
+fn cached_original(core: &Core, id: &str) -> Result<(Item, Option<PathBuf>), String> {
     let name: String = core
         .db()
         .query_row("SELECT filename FROM photos WHERE path = ? LIMIT 1", [format!("immich://{id}")], |r| r.get(0))
         .map_err(es)?;
-    let dir = originals_dir(core);
-    fs::create_dir_all(&dir).map_err(es)?;
-    let mut it = Item { id: id.into(), name, url: String::new() };
+    let it = Item { id: id.into(), name, url: String::new() };
     let stem = local_stem(&it);
-    let mut cached = fs::read_dir(&dir).map_err(es)?.flatten().map(|e| e.path());
-    if let Some(p) = cached.find(|p| develop::is_supported(p) && p.file_stem().is_some_and(|s| s == stem.as_str())) {
+    let found = fs::read_dir(originals_dir(core))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| develop::is_supported(p) && p.file_stem().is_some_and(|s| s == stem.as_str()));
+    Ok((it, found))
+}
+
+/// An Immich photo's original if it is downloaded already; never downloads.
+pub fn immich_cached(core: &Core, id: &str) -> Option<PathBuf> {
+    cached_original(core, id).ok()?.1
+}
+
+/// An Immich photo's preview (about 1440 px) straight from the server: enough to analyse it without
+/// downloading the original.
+pub fn immich_preview(core: &Core, id: &str) -> Result<image::DynamicImage, String> {
+    let (url, key) = immich(core)?;
+    let mut r = agent().get(&format!("{url}/api/assets/{id}/thumbnail?size=preview")).header("x-api-key", &key).call().map_err(es)?;
+    if r.status().as_u16() >= 400 {
+        return Err(format!("Immich preview: HTTP {}", r.status().as_u16()));
+    }
+    image::load_from_memory(&r.body_mut().read_to_vec().map_err(es)?).map_err(es)
+}
+
+/// `creds` is only asked for on a cache miss, so downloaded photos open offline.
+fn original_from_immich(core: &Core, id: &str, creds: impl FnOnce() -> Result<(String, String), String>) -> Result<PathBuf, String> {
+    let (mut it, cached) = cached_original(core, id)?;
+    if let Some(p) = cached {
         return Ok(p);
     }
+    let (dir, stem) = (originals_dir(core), local_stem(&it));
+    fs::create_dir_all(&dir).map_err(es)?;
     let (url, key) = creds()?;
     let what = if save_ext(&it.name, "").is_some() { "original" } else { "thumbnail?size=fullsize" };
     it.url = format!("{url}/api/assets/{id}/{what}");
@@ -285,7 +332,7 @@ fn original_from_immich(core: &Core, id: &str, creds: impl FnOnce() -> Result<(S
 // Google Photos
 // ---------------------------------------------------------------------------
 
-fn open_browser(url: &str) -> Result<(), String> {
+pub(crate) fn open_browser(url: &str) -> Result<(), String> {
     let parsed = tauri::Url::parse(url).map_err(|e| format!("invalid URL ({e}): {url}"))?;
     if parsed.scheme() != "http" && parsed.scheme() != "https" {
         return Err(format!("refusing to open non-http/https URL: {url}"));
@@ -331,7 +378,7 @@ pub fn google_connect(core: &Core, client_id: &str, client_secret: &str) -> Resu
     )
     .map_err(es)?;
     open_browser(auth.as_str())?;
-    let code = wait_for_code(&server, &state)?;
+    let code = wait_for_code(&server, &state, "Google Photos")?;
     let tok = json_of(
         "Google sign-in",
         agent().post(GOOGLE_TOKEN).send_form([
@@ -348,8 +395,8 @@ pub fn google_connect(core: &Core, client_id: &str, client_secret: &str) -> Resu
     update_settings(core, |s| s.google_client_id = client_id.into())
 }
 
-/// Serve Google's redirect on the loopback listener and return the authorization code.
-fn wait_for_code(server: &tiny_http::Server, state: &str) -> Result<String, String> {
+/// Serve the OAuth redirect on the loopback listener and return the authorization code.
+pub(crate) fn wait_for_code(server: &tiny_http::Server, state: &str, service: &str) -> Result<String, String> {
     let deadline = Instant::now() + Duration::from_secs(300);
     while let Some(left) = deadline.checked_duration_since(Instant::now()) {
         let Some(req) = server.recv_timeout(left).map_err(es)? else { break };
@@ -361,9 +408,9 @@ fn wait_for_code(server: &tiny_http::Server, state: &str) -> Result<String, Stri
         }
         let res = match (q.get("code"), q.get("error")) {
             (Some(code), _) => Ok(code.clone()),
-            (_, err) => Err(format!("Google sign-in failed: {}", err.map_or("no code returned", String::as_str))),
+            (_, err) => Err(format!("{service} sign-in failed: {}", err.map_or("no code returned", String::as_str))),
         };
-        let page = if res.is_ok() { "OpenLight Studio is connected to Google Photos." } else { "Google sign-in did not complete." };
+        let page = if res.is_ok() { format!("OpenLight Studio is connected to {service}.") } else { format!("{service} sign-in did not complete.") };
         let ct = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/plain; charset=utf-8"[..]).expect("static header");
         let nosniff = tiny_http::Header::from_bytes(&b"X-Content-Type-Options"[..], &b"nosniff"[..]).expect("static header");
         let _ = req.respond(
@@ -373,10 +420,10 @@ fn wait_for_code(server: &tiny_http::Server, state: &str) -> Result<String, Stri
         );
         return res;
     }
-    Err("timed out waiting for Google sign-in".into())
+    Err(format!("timed out waiting for {service} sign-in"))
 }
 
-fn google_access_token(core: &Core) -> Result<String, String> {
+pub(crate) fn google_access_token(core: &Core) -> Result<String, String> {
     let client_id = core.settings.lock().unwrap().google_client_id.clone();
     let saved: Value = ai::key(GOOGLE_KEY)
         .filter(|_| !client_id.is_empty())
@@ -396,7 +443,7 @@ fn google_access_token(core: &Core) -> Result<String, String> {
 
 /// Open the Google Photos picker in the browser, wait for the user's choice, then
 /// download and import the picked photos.
-pub fn google_import(core: &Core) -> Result<Value, String> {
+pub fn google_import(core: &Arc<Core>) -> Result<Value, String> {
     let bearer = format!("Bearer {}", google_access_token(core)?);
     let agent = agent();
     let session = json_of(
@@ -487,23 +534,25 @@ fn file_name(path: &str) -> String {
 
 /// Catalog path, plus the capture time in UTC for Immich's required `fileCreatedAt` (EXIF
 /// times are read as this computer's local time), else now. The file's own EXIF date wins.
-const UPLOAD_ROW: &str = "SELECT path, COALESCE(strftime('%Y-%m-%dT%H:%M:%SZ', captured_at, 'utc'), \
+pub(crate) const UPLOAD_ROW: &str = "SELECT path, COALESCE(strftime('%Y-%m-%dT%H:%M:%SZ', captured_at, 'utc'), \
                           strftime('%Y-%m-%dT%H:%M:%SZ', 'now')) FROM photos WHERE id = ?";
+
+/// Upload one file as a new Immich asset taken at `taken` (UTC, RFC 3339). The reply's `status` is
+/// "duplicate" when Immich already has these exact bytes.
+pub(crate) fn immich_post(agent: &ureq::Agent, url: &str, key: &str, file: &Path, taken: &str) -> Result<Value, String> {
+    let name = file_name(&file.to_string_lossy());
+    let device_asset_id = format!("openlight-{}", crate::new_token());
+    // deviceAssetId/deviceId are required before Immich 3 and ignored after.
+    let fields = [("deviceAssetId", device_asset_id.as_str()), ("deviceId", "openlight-studio"), ("fileCreatedAt", taken), ("fileModifiedAt", taken)];
+    let (content_type, body) = multipart(&fields, &name, &fs::read(file).map_err(es)?);
+    let reply = agent.post(&format!("{url}/api/assets")).header("x-api-key", key).header("content-type", &content_type).send(&body[..]);
+    json_of("Immich", reply) // 201 created, or 200 when Immich already has these exact bytes
+}
 
 fn immich_upload(core: &Core, agent: &ureq::Agent, url: &str, key: &str, id: i64, file: &str) -> Result<String, String> {
     let (path, taken): (String, String) = core.db().query_row(UPLOAD_ROW, [id], |r| Ok((r.get(0)?, r.get(1)?))).map_err(es)?;
     let name = file_name(file);
-    let device_asset_id = format!("openlight-{}", crate::new_token());
-    // deviceAssetId/deviceId are required before Immich 3 and ignored after.
-    let fields = [
-        ("deviceAssetId", device_asset_id.as_str()),
-        ("deviceId", "openlight-studio"),
-        ("fileCreatedAt", taken.as_str()),
-        ("fileModifiedAt", taken.as_str()),
-    ];
-    let (content_type, body) = multipart(&fields, &name, &fs::read(file).map_err(es)?);
-    let reply = agent.post(&format!("{url}/api/assets")).header("x-api-key", key).header("content-type", &content_type).send(&body[..]);
-    let v = json_of("Immich", reply)?; // 201 created, or 200 when Immich already has these exact bytes
+    let v = immich_post(agent, url, key, Path::new(file), &taken)?;
     // Saving an Immich photo back: the edit goes on top of its stack and the original stays.
     if let (Some(orig), Some(new)) = (immich_id(&path), v["id"].as_str()) {
         let asset = json_of("Immich", agent.get(&format!("{url}/api/assets/{orig}")).header("x-api-key", key).call())?;
@@ -535,7 +584,7 @@ fn multipart(fields: &[(&str, &str)], file_name: &str, data: &[u8]) -> (String, 
 
 /// Library API upload: raw bytes for an upload token, then create the media item.
 /// ponytail: one batchCreate per file; send up to 50 per call if API quota ever matters
-fn google_upload(agent: &ureq::Agent, bearer: &str, file: &str) -> Result<String, String> {
+pub(crate) fn google_upload(agent: &ureq::Agent, bearer: &str, file: &str) -> Result<String, String> {
     let name = file_name(file);
     let mime = match Path::new(&name).extension().and_then(|e| e.to_str()).unwrap_or("") {
         "avif" => "image/avif",
@@ -584,7 +633,7 @@ struct Item {
 }
 
 /// Remote names are untrusted: keep one plain, portable path component.
-fn safe_name(s: &str) -> String {
+pub(crate) fn safe_name(s: &str) -> String {
     let s: String = s.chars().map(|c| if c.is_control() || r#"/\:*?"<>|"#.contains(c) { '_' } else { c }).take(100).collect();
     let s = s.trim().trim_matches('.').trim();
     if s.is_empty() { "untitled".into() } else { s.into() }
@@ -636,7 +685,7 @@ fn download(agent: &ureq::Agent, it: &Item, auth: (&str, &str), dir: &Path, stem
 }
 
 /// Download what `remote/<folder…>` doesn't have yet, then import that folder.
-fn fetch_and_import(core: &Core, folder: &[&str], skipped: usize, items: Vec<Item>, auth: (&str, &str)) -> Result<Value, String> {
+fn fetch_and_import(core: &Arc<Core>, folder: &[&str], skipped: usize, items: Vec<Item>, auth: (&str, &str)) -> Result<Value, String> {
     let dir = folder.iter().fold(core.dir.join("remote"), |d, f| d.join(safe_name(f)));
     fs::create_dir_all(&dir).map_err(es)?;
     let have: HashSet<String> = fs::read_dir(&dir)
@@ -660,8 +709,10 @@ fn fetch_and_import(core: &Core, folder: &[&str], skipped: usize, items: Vec<Ite
     for e in &failed {
         eprintln!("remote download {e}");
     }
-    let imported = catalog::import(core, &dir, &|done, total| core.emit("import-progress", json!({"done": done, "total": total})))?;
+    let ids = catalog::import(core, &dir, &|done, total| core.emit("import-progress", json!({"done": done, "total": total})))?;
+    let imported = ids.len();
     core.emit("catalog-changed", json!({}));
+    crate::auto::after_import(core, ids, "cloud");
     Ok(json!({
         "folder": dir,
         "imported": imported,
