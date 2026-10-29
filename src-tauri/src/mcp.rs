@@ -4,7 +4,7 @@
 //! against the catalog when the app is closed).
 
 use crate::{
-    Core, Settings, catalog,
+    Core, Settings, auto, catalog,
     develop::{self, Opts},
 };
 use base64::Engine;
@@ -19,7 +19,8 @@ const INSTRUCTIONS: &str = "OpenLight Studio photo catalog and non-destructive R
 Find photos with catalog_query, look at them with photo_inspect (preview image + histogram telemetry), \
 edit with develop_apply_parameters / mask_create_and_edit, verify with photo_inspect again. \
 Select an object by tracing it as a polygon mask; remove objects with retouch_remove_objects. \
-Every mutation is one undoable history step in the app.";
+Batch work (culling, finding blurred photos or duplicates, auto edits, auto masks, denoise and super \
+resolution) runs through auto_run. Every mutation is one undoable history step in the app.";
 
 pub fn tools() -> Value {
     let ids = json!({ "type": "array", "items": { "type": "string" } });
@@ -77,7 +78,7 @@ pub fn tools() -> Value {
     json!([
         {
             "name": "catalog_query",
-            "description": "Search and filter the OpenLight catalog by rating, flag, camera/lens and text. semantic_query is matched against filenames, keywords, camera and lens (no vision embedding model is installed in this build).",
+            "description": "Search and filter the OpenLight catalog by rating, flag, camera/lens and text. semantic_query is matched against filenames, keywords, camera and lens (no vision embedding model is installed in this build). min_eye_sharpness filters on the main subject's sharpness (0-100) measured by the auto functions; photos not analysed yet are left out.",
             "inputSchema": { "type": "object", "properties": {
                 "semantic_query": { "type": "string" },
                 "min_rating": { "type": "integer", "minimum": 0, "maximum": 5 },
@@ -156,6 +157,22 @@ pub fn tools() -> Value {
             "inputSchema": { "type": "object", "required": ["photo_ids"], "properties": {
                 "photo_ids": ids,
                 "profile": { "type": "string", "enum": develop::PROFILES, "default": "natural" } } }
+        },
+        {
+            "name": "auto_run",
+            "description": "Run one of OpenLight's auto functions on photos with its advanced settings (omitted settings keep the user's saved values): cull = Auto Catalog & Culling (stars, picks of each burst, rejects of blurred or badly exposed photos, labels, keywords); edit = auto non-destructive editing to a look profile; mask = AI masking (subject, sky, background, people selections); enhance = denoise and super resolution into a new master file; blur = find photos whose main subject is blurred; duplicates = find exact and similar duplicates. Returns a summary and a row per photo (or per duplicate group).",
+            "inputSchema": { "type": "object", "required": ["function", "photo_ids"], "properties": {
+                "function": { "type": "string", "enum": auto::FUNCTIONS },
+                "photo_ids": ids,
+                "settings": { "type": "object", "description": "cull: detail (fast|screen|full), reject_blurry, blur_threshold 0-100, use_subject, reject_exposure, clip_limit %, burst_seconds, similarity 0-100, pick_best, reject_similar, stars, labels, keywords, ai_keywords, keep_manual. edit: profile, strength 0-100, white_balance, tone, look, upright (off|level|auto|vertical|full), chromatic_aberration, noise_reduction, skip_edited, virtual_copy. mask: targets [subject|sky|background|people], method (builtin|ai), feather, edge_shift, replace, adjust 0-100. enhance: denoise, strength, detail, color, super_resolution, scale 1-4, sharpen, max_megapixels, engine (builtin|command), format (auto|float|tiff16), folder, copy_edits. blur: detail, threshold, subject (builtin|ai), motion, missed_focus, action (none|reject|label|keyword). duplicates: mode (exact|similar|both), similarity, window_minutes, keep (best|largest|sharpest|oldest|newest), action." } } }
+        },
+        {
+            "name": "ai_reconstruct_and_retouch",
+            "description": "AI Denoise or Super Resolution of one photo: writes an enhanced copy (a new master next to the original, added to the catalog with the original's edits) and returns it. amount is the denoise strength; super_resolution enlarges 2× (capped at the user's megapixel limit). The other tasks need generative models that are not installed: retouch_remove_objects heals people and distractions.",
+            "inputSchema": { "type": "object", "required": ["photo_id", "task"], "properties": {
+                "photo_id": { "type": "string" },
+                "task": { "type": "string", "enum": ["ai_denoise", "super_resolution", "remove_reflections", "remove_background_people", "remove_sensor_dust", "ai_lens_blur", "generative_remove"] },
+                "amount": { "type": "number", "minimum": 0, "maximum": 100, "default": 50 } } }
         },
         {
             "name": "retouch_remove_objects",
@@ -266,8 +283,12 @@ fn call_tool(core: &Arc<Core>, name: &str, a: &Value) -> Value {
             if semantic.is_some() {
                 notes.push("semantic_query matched by keyword (no vision embedding model in this build)");
             }
-            if a.get("min_eye_sharpness").is_some() || a.get("eyes_open_only").is_some() {
-                notes.push("eye sharpness / eyes-open culling metrics are not computed in this build; filter ignored");
+            if a.get("eyes_open_only").is_some() {
+                notes.push("eyes-open status needs a face model, which is not installed in this build; filter ignored");
+            }
+            let min_sharp = a["min_eye_sharpness"].as_f64();
+            if min_sharp.is_some() {
+                notes.push("min_eye_sharpness uses the main subject's sharpness from the auto analysis (no face model); photos not analysed yet (auto_run blur or cull) are left out");
             }
             let f = catalog::Filter {
                 min_rating: a["min_rating"].as_i64(),
@@ -277,15 +298,20 @@ fn call_tool(core: &Arc<Core>, name: &str, a: &Value) -> Value {
                 limit: Some(a["limit"].as_i64().unwrap_or(50).clamp(1, 1000)),
                 ..Default::default()
             };
-            let photos = catalog::query(&core.db(), &f)?;
+            let db = core.db();
+            let photos = catalog::query(&db, &f)?;
             let photos: Vec<Value> = photos
                 .iter()
-                .map(|p| {
-                    let flag = ["reject", "unflagged", "pick"][(p.flag + 1).clamp(0, 2) as usize];
-                    json!({ "photo_id": p.id.to_string(), "filename": p.filename, "folder": p.folder, "virtual_copy": p.copy_name,
-                        "rating": p.rating, "flag": flag, "color_label": p.color_label,
+                .filter_map(|p| {
+                    let sharp = catalog::any_analysis(&db, &p.path).map(|m| m.subject_sharpness.round());
+                    if min_sharp.is_some_and(|min| sharp.is_none_or(|s| (s as f64) < min)) {
+                        return None;
+                    }
+                    Some(json!({ "photo_id": p.id.to_string(), "filename": p.filename, "folder": p.folder, "virtual_copy": p.copy_name,
+                        "rating": p.rating, "flag": catalog::flag_name(p.flag), "color_label": p.color_label,
                         "captured_at": p.captured_at, "camera": p.camera, "lens": p.lens, "iso": p.iso, "aperture": p.aperture,
-                        "shutter": p.shutter, "focal_length": p.focal_length, "width": p.width, "height": p.height, "edited": p.edited })
+                        "shutter": p.shutter, "focal_length": p.focal_length, "width": p.width, "height": p.height, "edited": p.edited,
+                        "subject_sharpness": sharp }))
                 })
                 .collect();
             Ok(vec![text(json!({ "count": photos.len(), "photos": photos, "notes": notes }))])
@@ -366,6 +392,31 @@ fn call_tool(core: &Arc<Core>, name: &str, a: &Value) -> Value {
                 out.push(json!({ "photo_id": id.to_string(), "white_balance": d.white_balance, "tone": d.basic_tone, "presence": d.presence }));
             }
             Ok(vec![text(json!({ "applied": out, "profile": profile }))])
+        }
+        "auto_run" => {
+            let function = a["function"].as_str().ok_or("function is required")?;
+            let ids = parse_ids(&a["photo_ids"])?;
+            let job = auto::Job::start(core, &format!("mcp-{}", crate::new_token()));
+            let mut r = auto::run(core, function, &ids, a.get("settings").unwrap_or(&json!({})), &job)?;
+            if let Some(rows) = r["rows"].as_array_mut() {
+                rows.truncate(200);
+            }
+            Ok(vec![text(r)])
+        }
+        "ai_reconstruct_and_retouch" => {
+            let id = parse_id(&a["photo_id"])?;
+            let settings = match a["task"].as_str().unwrap_or("") {
+                "ai_denoise" => json!({ "denoise": true, "strength": a["amount"].as_f64().unwrap_or(50.0), "super_resolution": false }),
+                "super_resolution" => json!({ "denoise": false, "super_resolution": true, "scale": 2 }),
+                t => return Err(format!("'{t}' needs generative models that are not installed in this build: ai_denoise and super_resolution are available, and retouch_remove_objects heals people and distractions")),
+            };
+            let job = auto::Job::start(core, &format!("mcp-{}", crate::new_token()));
+            let r = auto::run(core, "enhance", &[id], &settings, &job)?;
+            let row = &r["rows"][0];
+            if let Some(e) = row["error"].as_str() {
+                return Err(e.to_string());
+            }
+            Ok(vec![text(json!({ "photo_id": id.to_string(), "enhanced_photo_id": row["new_id"].to_string(), "file": row["output"], "size": row["size"] }))])
         }
         "retouch_remove_objects" => {
             let id = parse_id(&a["photo_id"])?;

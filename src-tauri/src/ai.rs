@@ -136,7 +136,7 @@ fn get_key(p: &Provider) -> Option<String> {
 
 /// Apps launched from the Dock get a minimal PATH; CLI agents usually live in the
 /// user's login-shell PATH (~/.local/bin, Homebrew, npm globals).
-fn user_path() -> &'static str {
+pub(crate) fn user_path() -> &'static str {
     static PATH: OnceLock<String> = OnceLock::new();
     PATH.get_or_init(|| {
         let current = std::env::var("PATH").unwrap_or_default();
@@ -325,6 +325,80 @@ pub fn select(core: &Arc<Core>, id: i64, at: [f32; 2], provider_id: &str, mask: 
     d.ai_provenance_log.push(mcp::provenance(core, provider_id, &label));
     core.commit(id, &d, &label)?;
     Ok((d, i))
+}
+
+/// Ask the provider about a photo without editing it: HTTP providers see the full-frame preview, CLI agents
+/// look through photo_inspect. Returns the JSON object it replies with (`schema` describes it).
+fn ask_json(core: &Arc<Core>, id: i64, provider_id: &str, task: &str, schema: &Value) -> Result<Value, String> {
+    let p = provider(core, provider_id)?;
+    let dir = session_dir(id)?;
+    core.log(&p.id, format!("photo {id}: {}", truncate(task, 120)));
+    let res = (|| {
+        let reply = if p.kind == "cli" {
+            let agent = format!(
+                "You are looking at a photo in OpenLight Studio through its MCP server \"openlight\". Photo id: {id}. Call \
+                 photo_inspect (photo_id \"{id}\", full_frame true, max_edge 1024) to see it. Do not change the photo. {task} \
+                 Reply with only a JSON object matching this schema: {schema}"
+            );
+            run_cli(core, &p, id, &agent, &dir, Some(agent.clone()))?
+        } else {
+            let img = core.render(id, &Opts { full_frame: true, ..Default::default() })?;
+            let jpeg = base64::engine::general_purpose::STANDARD.encode(develop::encode_jpeg(&img, 1024, 85)?);
+            call_model(&p, "You analyse photos for a photo editor and reply with JSON only.", task, &jpeg, schema)?
+        };
+        parse_object(&reply)
+    })();
+    if let Err(e) = &res {
+        core.log(&p.id, format!("error: {e}"));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    res
+}
+
+/// Box [x, y, w, h] (fractions of the full frame) around `what`, e.g. "the main subject".
+pub fn locate(core: &Arc<Core>, id: i64, what: &str, provider_id: &str) -> Result<[f32; 4], String> {
+    let schema = json!({ "type": "object", "required": ["box"], "properties": { "box": { "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4 } } });
+    let task = format!(
+        "Find {what}. Reply with {{\"box\": [x0, y0, x1, y1]}}: its bounding box as fractions of the full frame, (0,0) = top-left. \
+         If there is none, reply with the box of the most prominent thing."
+    );
+    let v = ask_json(core, id, provider_id, &task, &schema)?;
+    let b: [f32; 4] = serde_json::from_value(v["box"].clone()).map_err(|e| format!("the AI's box is not [x0, y0, x1, y1]: {e}"))?;
+    let [x0, y0, x1, y1] = b.map(|v| v.clamp(0.0, 1.0));
+    if x1 - x0 < 0.01 || y1 - y0 < 0.01 {
+        return Err("the AI's box is empty".into());
+    }
+    Ok([x0, y0, x1 - x0, y1 - y0])
+}
+
+/// A traced object: its name and outline as fractions of the full frame.
+pub type Outline = (String, Vec<[f32; 2]>);
+
+/// Outlines of `what` (e.g. "the sky", "each person"), one per object. Empty when there is none.
+pub fn outline(core: &Arc<Core>, id: i64, what: &str, provider_id: &str) -> Result<Vec<Outline>, String> {
+    let schema = json!({ "type": "object", "required": ["objects"], "properties": { "objects": { "type": "array", "items": outline_schema() } } });
+    let task = format!(
+        "Trace {what}. Reply with {{\"objects\": [{{\"name\": \"<short name>\", \"points\": [[x, y], ...]}}]}}: one entry per \
+         object, 20-80 points in order around its visible edge, following it closely, as [x, y] fractions of the full frame, \
+         (0,0) = top-left. Reply with {{\"objects\": []}} if there is none."
+    );
+    let v = ask_json(core, id, provider_id, &task, &schema)?;
+    let mut out = vec![];
+    for o in v["objects"].as_array().into_iter().flatten() {
+        let points: Vec<[f32; 2]> = serde_json::from_value(o["points"].clone()).map_err(|e| format!("the AI's outline is not [[x, y], ...]: {e}"))?;
+        develop::check_outline(&points)?;
+        out.push((o["name"].as_str().filter(|s| !s.is_empty()).unwrap_or("object").to_string(), points));
+    }
+    Ok(out)
+}
+
+/// 3-8 lowercase keywords for the photo's subjects, scene and setting.
+pub fn describe(core: &Arc<Core>, id: i64, provider_id: &str) -> Result<Vec<String>, String> {
+    let schema = json!({ "type": "object", "required": ["keywords"], "properties": { "keywords": { "type": "array", "items": { "type": "string" } } } });
+    let task = "List 3 to 8 short lowercase keywords for this photo: its main subjects, the scene and the setting (e.g. dog, beach, \
+                sunset). Reply with {\"keywords\": [...]}.";
+    let v = ask_json(core, id, provider_id, task, &schema)?;
+    Ok(v["keywords"].as_array().into_iter().flatten().filter_map(|k| k.as_str()).map(|k| truncate(k.trim(), 40).to_lowercase()).filter(|k| !k.is_empty()).take(8).collect())
 }
 
 /// Strips ANSI escape sequences (CSI and OSC) from CLI agent output.
