@@ -1,0 +1,1130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenLight Studio</title>
+<meta name="description" content="Non-destructive RAW processor and photo catalog with a built-in MCP server and a pluggable AI router. Open source, local-first, MIT.">
+<meta property="og:title" content="OpenLight Studio — the photo editor your AI agent can drive">
+<meta property="og:description" content="Non-destructive RAW editing, cataloging and culling, with a built-in MCP server. Open source and local-first.">
+<link rel="icon" href="icon.png">
+<style>
+:root{
+  --bg:#0c0f12; --bg2:#12161b; --card:#171c22; --card2:#1e242b; --line:#2a323b;
+  --text:#e6e9ec; --muted:#9aa4ae; --dim:#6b7580;
+  --cyan:#25c6d8; --amber:#f6b930; --violet:#a78bfa; --green:#34d399; --red:#f87171;
+  --radius:16px; --maxw:1180px;
+  --font:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,sans-serif;
+  --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth;scroll-padding-top:72px}
+body{background:var(--bg);color:var(--text);font:16px/1.6 var(--font);-webkit-font-smoothing:antialiased;overflow-x:hidden}
+a{color:var(--cyan);text-decoration:none}
+a:hover{text-decoration:underline}
+img{max-width:100%;display:block}
+code,kbd,pre{font-family:var(--mono)}
+code{background:#1b2229;border:1px solid var(--line);border-radius:6px;padding:.08em .4em;font-size:.88em}
+kbd{display:inline-block;min-width:1.7em;text-align:center;background:#222a32;border:1px solid #3a444f;border-bottom-width:2px;border-radius:6px;padding:.05em .45em;font-size:.82em;color:var(--text)}
+.wrap{max-width:var(--maxw);margin:0 auto;padding:0 24px}
+section{padding:110px 0;position:relative}
+.eyebrow{font:600 12px/1 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--cyan);margin-bottom:14px}
+h1,h2,h3{line-height:1.12;letter-spacing:-.02em}
+h2{font-size:clamp(30px,4.4vw,48px);margin-bottom:16px}
+h3{font-size:20px;margin-bottom:8px}
+.lead{font-size:clamp(17px,1.6vw,20px);color:var(--muted);max-width:720px}
+.grad{background:linear-gradient(90deg,var(--cyan),var(--amber));-webkit-background-clip:text;background-clip:text;color:transparent}
+.btn{display:inline-flex;align-items:center;gap:8px;padding:12px 20px;border-radius:999px;font-weight:600;font-size:15px;border:1px solid var(--line);color:var(--text);background:var(--card);cursor:pointer;transition:transform .15s,background .15s,border-color .15s}
+.btn:hover{text-decoration:none;transform:translateY(-1px);border-color:#3c4651}
+.btn.primary{background:linear-gradient(135deg,var(--cyan),#1aa5c0);color:#04161a;border-color:transparent}
+.btn.small{padding:7px 14px;font-size:13px}
+.reveal{opacity:0;transform:translateY(24px);transition:opacity .7s ease,transform .7s ease}
+.reveal.in{opacity:1;transform:none}
+@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}.reveal{opacity:1;transform:none;transition:none}*{animation:none!important}}
+
+/* nav */
+nav.top{position:fixed;inset:0 0 auto 0;z-index:50;background:rgba(12,15,18,.72);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-bottom:1px solid transparent;transition:border-color .2s}
+nav.top.scrolled{border-color:var(--line)}
+nav.top .wrap{display:flex;align-items:center;gap:28px;height:64px}
+.brand{display:flex;align-items:center;gap:10px;font-weight:700;color:var(--text);font-size:16px}
+.brand img{width:30px;height:30px}
+.brand:hover{text-decoration:none}
+nav.top .links{display:flex;gap:22px;margin-left:auto}
+nav.top .links a{color:var(--muted);font-size:14px}
+nav.top .links a:hover,nav.top .links a.on{color:var(--text);text-decoration:none}
+@media (max-width:820px){nav.top .links{display:none}nav.top .btn{margin-left:auto}}
+
+/* hero */
+.hero{padding:150px 0 90px;overflow:hidden;position:relative}
+.hero::before{content:"";position:absolute;inset:-20% -10% auto;height:900px;background:radial-gradient(600px 380px at 25% 30%,rgba(37,198,216,.18),transparent 70%),radial-gradient(520px 340px at 78% 20%,rgba(246,185,48,.14),transparent 70%);pointer-events:none}
+.hero .wrap{position:relative;text-align:center}
+.hero h1{font-size:clamp(40px,7vw,80px);margin:18px auto 22px;max-width:980px}
+.hero .lead{margin:0 auto 34px}
+.pill{display:inline-flex;align-items:center;gap:8px;padding:6px 14px;border:1px solid var(--line);border-radius:999px;font-size:13px;color:var(--muted);background:rgba(23,28,34,.7)}
+.pill .dot{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 10px var(--green)}
+.cta{display:flex;gap:12px;justify-content:center;flex-wrap:wrap}
+.stack{margin-top:22px;color:var(--dim);font-size:13px;font-family:var(--mono)}
+.hero .shot{margin-top:64px;perspective:1600px}
+.hero .shot .win{transform:rotateX(9deg);transform-origin:top center;transition:transform 1.1s cubic-bezier(.2,.7,.2,1);box-shadow:0 60px 120px -30px rgba(0,0,0,.8),0 0 0 1px rgba(255,255,255,.04),0 0 80px -20px rgba(37,198,216,.35)}
+.hero .shot.in .win{transform:none}
+
+/* app window mock */
+.win{background:#111;border:1px solid #2c2c2c;border-radius:12px;overflow:hidden;text-align:left;font-size:12px;color:#d4d4d4}
+.win .tb{display:flex;align-items:center;gap:14px;height:38px;padding:0 12px;background:#1b1b1b;border-bottom:1px solid #2c2c2c}
+.lights{display:flex;gap:7px}
+.lights i{width:11px;height:11px;border-radius:50%;background:#ff5f57}
+.lights i:nth-child(2){background:#febc2e}.lights i:nth-child(3){background:#28c840}
+.modtabs{display:flex;gap:4px}
+.modtabs span{padding:4px 10px;border-radius:6px;color:#a3a3a3}
+.modtabs span.on{background:#262626;color:#fff}
+.tb .status{margin-left:auto;display:flex;align-items:center;gap:6px;color:#a3a3a3;font:10px var(--mono)}
+.tb .status i{width:8px;height:8px;border-radius:50%;background:#34d399;box-shadow:0 0 8px rgba(52,211,153,.6)}
+.win .body{display:grid;grid-template-columns:190px 1fr 250px;min-height:430px}
+.side{background:#161616;border-right:1px solid #262626;padding:12px 10px;display:flex;flex-direction:column;gap:2px}
+.side h6{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#737373;margin:10px 6px 4px;font-weight:600}
+.side div{padding:5px 8px;border-radius:6px;color:#bdbdbd;display:flex;justify-content:space-between;white-space:nowrap;overflow:hidden}
+.side div.on{background:rgba(14,165,233,.15);color:#fff}
+.side div small{color:#737373}
+.side .conn::before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;background:#34d399;margin-right:6px;vertical-align:middle}
+.canvas{background:#0d0d0d;display:flex;flex-direction:column}
+.canvas .stage{flex:1;display:flex;align-items:center;justify-content:center;padding:18px}
+.canvas .ai{display:flex;align-items:center;gap:8px;margin:0 14px 14px;padding:8px 10px;border:1px solid rgba(167,139,250,.35);background:rgba(76,29,149,.18);border-radius:10px;color:#ddd6fe}
+.canvas .ai b{color:var(--violet)}
+.canvas .ai .typed{flex:1;font-family:var(--mono);font-size:11px;white-space:nowrap;overflow:hidden}
+.canvas .ai .go{background:var(--violet);color:#1e1033;border-radius:6px;padding:2px 8px;font-weight:700;font-size:11px}
+.panel{background:#161616;border-left:1px solid #262626;padding:10px 12px;display:flex;flex-direction:column;gap:9px}
+.ptabs{display:flex;gap:2px;background:#0f0f0f;border-radius:7px;padding:2px;font-size:10.5px}
+.ptabs span{flex:1;text-align:center;padding:3px 0;border-radius:5px;color:#a3a3a3}
+.ptabs span.on{background:#2a2a2a;color:#fff}
+.hist{height:58px;border-radius:6px;background:#0f0f0f;overflow:hidden}
+.sl{display:grid;grid-template-columns:72px 1fr 34px;align-items:center;gap:8px;font-size:11px;color:#bdbdbd}
+.sl .tr{height:3px;border-radius:2px;background:#3f3f46;position:relative}
+.sl .tr i{position:absolute;top:-4px;width:11px;height:11px;border-radius:50%;background:#d4d4d8;border:2px solid #18181b;margin-left:-5px}
+.sl em{font-style:normal;text-align:right;color:#8a8a8a;font-family:var(--mono);font-size:10px}
+.panel h6{font-size:10px;color:#737373;text-transform:uppercase;letter-spacing:.08em;margin-top:4px}
+.photo{position:relative;width:100%;aspect-ratio:3/2;border-radius:4px;overflow:hidden;background:#000}
+.photo>svg,.photo>.layer{position:absolute;inset:0;width:100%;height:100%}
+@media (max-width:900px){.win .body{grid-template-columns:1fr}.side,.panel{display:none}}
+
+/* intro */
+.intro-grid{display:grid;grid-template-columns:1.1fr 1fr;gap:60px;align-items:center}
+.pillars{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.pillar{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:20px}
+.pillar .ic{font-size:22px;margin-bottom:8px}
+.pillar p{color:var(--muted);font-size:14px}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--line);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;margin-top:70px}
+.stats div{background:var(--bg2);padding:26px 20px;text-align:center}
+.stats b{display:block;font-size:34px;letter-spacing:-.02em}
+.stats span{color:var(--muted);font-size:13px}
+@media (max-width:900px){.intro-grid{grid-template-columns:1fr;gap:36px}.stats{grid-template-columns:1fr 1fr}}
+@media (max-width:480px){.pillars{grid-template-columns:1fr}}
+
+/* features */
+.features{background:linear-gradient(180deg,var(--bg),var(--bg2))}
+.fgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;margin-top:50px}
+.fcard{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:26px;transition:border-color .2s,transform .2s;position:relative;overflow:hidden}
+.fcard:hover{border-color:#3a4652;transform:translateY(-3px)}
+.fcard::after{content:"";position:absolute;inset:auto -40px -60px auto;width:160px;height:160px;border-radius:50%;background:radial-gradient(var(--glow,rgba(37,198,216,.16)),transparent 70%)}
+.fcard .ic{width:42px;height:42px;border-radius:11px;display:grid;place-items:center;font-size:20px;background:var(--card2);border:1px solid var(--line);margin-bottom:16px}
+.fcard p{color:var(--muted);font-size:14.5px}
+.fcard ul{margin:12px 0 0 0;list-style:none;display:flex;flex-wrap:wrap;gap:6px}
+.fcard li{font-size:11.5px;padding:3px 9px;border-radius:999px;background:#0f1418;border:1px solid var(--line);color:#b8c1ca}
+.fcard.wide{grid-column:span 2}
+@media (max-width:980px){.fgrid{grid-template-columns:1fr 1fr}.fcard.wide{grid-column:span 2}}
+@media (max-width:640px){.fgrid{grid-template-columns:1fr}.fcard.wide{grid-column:auto}}
+
+/* demos */
+.demo{display:grid;grid-template-columns:1fr 1fr;gap:56px;align-items:center;margin-top:90px}
+.demo:first-of-type{margin-top:50px}
+.demo.flip .demo-text{order:2}
+.demo-text p{color:var(--muted);margin-bottom:14px}
+.demo-text .tag{display:inline-block;font:600 11px var(--mono);color:var(--amber);border:1px solid rgba(246,185,48,.35);border-radius:999px;padding:3px 10px;margin-bottom:14px}
+.demo-box{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:16px;box-shadow:0 30px 70px -30px rgba(0,0,0,.7)}
+@media (max-width:900px){.demo{grid-template-columns:1fr;gap:26px}.demo.flip .demo-text{order:0}}
+
+.controls{display:grid;gap:10px;margin-top:14px}
+.ctl{display:grid;grid-template-columns:92px 1fr 46px;gap:10px;align-items:center;font-size:13px;color:var(--muted)}
+.ctl output{font:12px var(--mono);text-align:right;color:var(--text)}
+input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:4px;border-radius:2px;background:#3f3f46;outline:none}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:15px;height:15px;border-radius:50%;background:#e4e4e7;border:3px solid #18181b;box-shadow:0 0 0 1px #52525b;cursor:pointer}
+input[type=range]::-moz-range-thumb{width:12px;height:12px;border-radius:50%;background:#e4e4e7;border:3px solid #18181b;cursor:pointer}
+input[type=range]:focus-visible::-webkit-slider-thumb{box-shadow:0 0 0 3px var(--cyan)}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}
+.chip{font:600 12px var(--font);padding:6px 12px;border-radius:999px;border:1px solid var(--line);background:#0f1418;color:var(--muted);cursor:pointer}
+.chip:hover{color:var(--text);border-color:#3c4651}
+.chip.on{background:rgba(37,198,216,.14);border-color:rgba(37,198,216,.5);color:#bff4fb}
+.chip.ai{border-color:rgba(167,139,250,.45);color:#ddd6fe;background:rgba(76,29,149,.2)}
+.dhist{height:46px;margin-top:12px;border-radius:8px;background:#0b0e11;border:1px solid var(--line);overflow:hidden}
+.dhist svg{width:100%;height:100%;transition:transform .25s}
+
+.ba{position:relative;user-select:none;-webkit-user-select:none;touch-action:none;cursor:ew-resize}
+.ba .after{clip-path:inset(0 0 0 50%)}
+.ba .bar{position:absolute;top:0;bottom:0;left:50%;width:2px;background:#fff;box-shadow:0 0 10px rgba(0,0,0,.6);pointer-events:none}
+.ba .bar::after{content:"⟷";position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:36px;height:36px;border-radius:50%;background:#fff;color:#111;display:grid;place-items:center;font-size:16px;font-weight:700}
+.ba .lbl{position:absolute;top:10px;font:600 11px var(--mono);background:rgba(0,0,0,.55);padding:3px 8px;border-radius:6px;pointer-events:none}
+.ba .lbl.l{left:10px}.ba .lbl.r{right:10px}
+
+.sel{cursor:crosshair}
+.sel .ov path{fill:rgba(167,139,250,.28);stroke:#fff;stroke-width:1.6;stroke-dasharray:6 4;animation:ants .8s linear infinite;vector-effect:non-scaling-stroke}
+@keyframes ants{to{stroke-dashoffset:-20}}
+.sel .hint{position:absolute;left:50%;bottom:12px;transform:translateX(-50%);font:600 11.5px var(--font);background:rgba(0,0,0,.6);padding:5px 12px;border-radius:999px;pointer-events:none;white-space:nowrap}
+.sel .ping{position:absolute;width:26px;height:26px;margin:-13px 0 0 -13px;border-radius:50%;border:2px solid var(--violet);animation:ping .9s ease-out forwards;pointer-events:none}
+@keyframes ping{from{transform:scale(.3);opacity:1}to{transform:scale(2);opacity:0}}
+.sellist{margin-top:12px;display:flex;flex-direction:column;gap:6px;min-height:40px}
+.sellist .item{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:9px;background:#0f1418;border:1px solid var(--line);font-size:13px;animation:pop .3s ease}
+.sellist .item i{width:10px;height:10px;border-radius:3px;background:var(--violet)}
+.sellist .item span{margin-left:auto;color:var(--dim);font:11px var(--mono)}
+.sellist .empty{color:var(--dim);font-size:13px;padding:8px 2px}
+@keyframes pop{from{transform:scale(.96);opacity:0}}
+
+.cgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.cell{position:relative;border-radius:6px;overflow:hidden;aspect-ratio:3/2;border:2px solid transparent;transition:border-color .3s,opacity .3s}
+.cell svg{width:100%;height:100%;display:block}
+.cell .badge{position:absolute;left:5px;top:5px;font:700 9.5px var(--mono);padding:2px 6px;border-radius:5px;opacity:0;transform:scale(.8);transition:all .25s}
+.cell .stars{position:absolute;left:0;right:0;bottom:0;padding:10px 5px 3px;font-size:10px;color:var(--amber);background:linear-gradient(transparent,rgba(0,0,0,.7));opacity:0;transition:opacity .25s;letter-spacing:1px}
+.cell.done .stars,.cell.done .badge{opacity:1;transform:none}
+.cell.pick{border-color:var(--green)}.cell.pick .badge{background:var(--green);color:#052e1a}
+.cell.reject{opacity:.45;border-color:var(--red)}.cell.reject .badge{background:var(--red);color:#3b0909}
+.cell.scan::after{content:"";position:absolute;inset:0;background:linear-gradient(90deg,transparent,rgba(37,198,216,.45),transparent);animation:scan .5s linear}
+@keyframes scan{from{transform:translateX(-100%)}to{transform:translateX(100%)}}
+.cbar{display:flex;align-items:center;gap:12px;margin-top:12px}
+.prog{flex:1;height:6px;border-radius:3px;background:#0b0e11;border:1px solid var(--line);overflow:hidden}
+.prog i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--cyan),var(--amber));transition:width .2s}
+.csum{font:12px var(--mono);color:var(--muted);min-width:0}
+
+.term{background:#07090b;border:1px solid var(--line);border-radius:12px;overflow:hidden;font:12.5px/1.65 var(--mono)}
+.term .th{display:flex;align-items:center;gap:10px;padding:9px 12px;background:#12161b;border-bottom:1px solid var(--line);color:var(--dim);font-size:11px}
+.term pre{padding:16px;min-height:310px;white-space:pre-wrap;word-break:break-word;color:#cbd5e1}
+.term .p{color:var(--cyan)}.term .t{color:var(--violet)}.term .ok{color:var(--green)}.term .c{color:var(--dim)}.term .a{color:var(--amber)}
+.cursor{display:inline-block;width:7px;height:14px;background:var(--cyan);vertical-align:-2px;animation:blink 1s steps(1) infinite}
+@keyframes blink{50%{opacity:0}}
+
+/* usage */
+.usage{background:var(--bg2)}
+.steps{margin-top:50px;display:grid;gap:18px;counter-reset:s}
+.step{display:grid;grid-template-columns:64px 1fr;gap:20px;background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:24px}
+.step::before{counter-increment:s;content:counter(s,decimal-leading-zero);font:700 22px var(--mono);color:var(--cyan);width:56px;height:56px;border-radius:14px;display:grid;place-items:center;background:rgba(37,198,216,.08);border:1px solid rgba(37,198,216,.25)}
+.step>*,.demo>*,.intro-grid>*{min-width:0}
+.step p,.step li{color:var(--muted);font-size:15px}
+.step ul{margin:8px 0 0 18px}
+.step li{margin:3px 0}
+.step b{color:var(--text)}
+pre.code{position:relative;margin-top:12px;background:#07090b;border:1px solid var(--line);border-radius:10px;padding:14px 16px;font-size:13px;color:#cbd5e1;overflow-x:auto;white-space:pre}
+.copy{position:absolute;top:8px;right:8px;font:600 11px var(--font);padding:4px 10px;border-radius:6px;border:1px solid var(--line);background:#161c22;color:var(--muted);cursor:pointer}
+.copy:hover{color:var(--text)}
+@media (max-width:640px){.step{grid-template-columns:1fr;gap:12px;padding:20px}}
+.twocol{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:18px}
+@media (max-width:900px){.twocol{grid-template-columns:1fr}}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--dim);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.06em}
+td{color:var(--muted)}
+td:first-child{white-space:nowrap;color:var(--text)}
+.box{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:22px;min-width:0}
+.box h3{margin-bottom:12px}
+.scroll-x{overflow-x:auto}
+
+/* promo */
+.swatches{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-top:16px}
+.sw{border-radius:12px;overflow:hidden;border:1px solid var(--line);cursor:pointer;background:var(--card)}
+.sw div{height:74px}
+.sw p{padding:8px 10px;font:12px var(--mono);color:var(--muted)}
+.sw p b{display:block;color:var(--text);font:600 13px var(--font)}
+@media (max-width:760px){.swatches{grid-template-columns:repeat(2,1fr)}}
+.logo-row{display:flex;gap:16px;align-items:center;flex-wrap:wrap}
+.logo-tile{display:grid;place-items:center;width:120px;height:120px;border-radius:18px;border:1px solid var(--line)}
+.logo-tile img{width:84px}
+.logo-tile.light{background:#f4f5f8}
+.logo-tile.dark{background:#0c0f12}
+.logo-tile.brandbg{background:linear-gradient(135deg,var(--cyan),var(--amber))}
+.taglines{display:grid;gap:10px;margin-top:6px}
+.tl{display:flex;gap:12px;align-items:center;justify-content:space-between;padding:12px 14px;border-radius:10px;background:#0f1418;border:1px solid var(--line);font-size:15px}
+.tl span{min-width:0}
+.shots{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;margin-top:20px}
+.shotcard{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden}
+.shotcard .mini{aspect-ratio:16/10;background:#0d0d0d;position:relative;border-bottom:1px solid var(--line)}
+.shotcard .mini .photo{position:absolute;inset:12% 10%;width:auto;aspect-ratio:auto}
+.shotcard .num{position:absolute;top:10px;left:10px;font:700 11px var(--mono);background:var(--amber);color:#2a1d00;border-radius:6px;padding:2px 7px;z-index:2}
+.shotcard .txt{padding:16px 18px}
+.shotcard .txt p{color:var(--muted);font-size:13.5px}
+.shotcard .txt small{display:block;margin-top:8px;color:var(--dim);font:11.5px var(--mono)}
+@media (max-width:980px){.shots{grid-template-columns:1fr 1fr}}
+@media (max-width:640px){.shots{grid-template-columns:1fr}}
+.formats{display:grid;grid-template-columns:1.5fr 1fr .62fr;gap:18px;align-items:end;margin-top:20px}
+.fmt p{font:12px var(--mono);color:var(--dim);margin-top:8px}
+.card-og,.card-sq,.card-st{border-radius:12px;overflow:hidden;position:relative;background:radial-gradient(circle at 20% 20%,rgba(37,198,216,.35),transparent 55%),radial-gradient(circle at 85% 90%,rgba(246,185,48,.3),transparent 55%),#0c0f12;border:1px solid var(--line);display:flex;flex-direction:column;padding:6%}
+.card-og{aspect-ratio:1200/630}
+.card-sq{aspect-ratio:1}
+.card-st{aspect-ratio:9/16}
+.card-og h4,.card-sq h4,.card-st h4{font-size:clamp(13px,1.7vw,22px);line-height:1.15;letter-spacing:-.02em}
+.card-og .b,.card-sq .b,.card-st .b{display:flex;align-items:center;gap:6px;font:700 clamp(9px,1vw,12px) var(--font);margin-bottom:6%}
+.card-og .b img,.card-sq .b img,.card-st .b img{width:clamp(14px,1.8vw,22px)}
+.card-og .photo,.card-sq .photo,.card-st .photo{margin-top:auto;border-radius:6px;box-shadow:0 10px 30px rgba(0,0,0,.6)}
+.card-og{flex-direction:row;gap:5%;align-items:center}
+.card-og .l{flex:1}
+.card-og .photo{width:52%;margin:0}
+@media (max-width:760px){.formats{grid-template-columns:1fr 1fr}.formats .fmt:first-child{grid-column:span 2}}
+.posts{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;margin-top:20px}
+.post{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:18px;display:flex;flex-direction:column;gap:10px;position:relative}
+.post h4{font-size:13px;color:var(--dim);font-family:var(--mono);font-weight:600}
+.post p{font-size:14px;color:#cfd6dd;white-space:pre-line;flex:1}
+.post .copy{position:static;align-self:flex-start}
+@media (max-width:980px){.posts{grid-template-columns:1fr}}
+.dd{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:20px}
+.dd ul{list-style:none;display:grid;gap:9px}
+.dd li{font-size:14.5px;color:var(--muted);padding-left:26px;position:relative}
+.dd .do li::before{content:"✓";position:absolute;left:0;color:var(--green);font-weight:700}
+.dd .dont li::before{content:"✕";position:absolute;left:0;color:var(--red);font-weight:700}
+@media (max-width:760px){.dd{grid-template-columns:1fr}}
+.check{display:grid;gap:8px}
+.check label{display:flex;gap:12px;align-items:flex-start;padding:10px 12px;border-radius:10px;background:#0f1418;border:1px solid var(--line);font-size:14.5px;color:var(--muted);cursor:pointer}
+.check input{margin-top:5px;accent-color:var(--cyan)}
+.check input:checked+span{color:var(--dim);text-decoration:line-through}
+.sub{margin-top:64px}
+.sub>h3{font-size:24px;margin-bottom:6px}
+.sub>p{color:var(--muted);max-width:760px}
+
+/* footer */
+.final{text-align:center;padding:120px 0}
+.final::before{content:"";position:absolute;inset:0;background:radial-gradient(500px 260px at 50% 60%,rgba(37,198,216,.14),transparent 70%);pointer-events:none}
+.final img{width:88px;margin:0 auto 22px}
+footer{border-top:1px solid var(--line);padding:30px 0;color:var(--dim);font-size:13px}
+footer .wrap{display:flex;gap:20px;flex-wrap:wrap;justify-content:space-between}
+.toast{position:fixed;left:50%;bottom:24px;transform:translate(-50%,40px);opacity:0;background:#1e242b;border:1px solid var(--line);padding:9px 16px;border-radius:999px;font-size:13px;transition:all .25s;z-index:99;pointer-events:none}
+.toast.show{opacity:1;transform:translate(-50%,0)}
+</style>
+</head>
+<body>
+
+<!-- The sample photo: one SVG scene reused everywhere through <use>. -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1f3d73"/><stop offset=".55" stop-color="#d98a5f"/><stop offset="1" stop-color="#f6cf86"/>
+    </linearGradient>
+    <linearGradient id="lake" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#e9a56b"/><stop offset="1" stop-color="#22406e"/>
+    </linearGradient>
+    <radialGradient id="sunglow"><stop offset="0" stop-color="#fff1c7"/><stop offset=".35" stop-color="#ffd98a" stop-opacity=".7"/><stop offset="1" stop-color="#ffd98a" stop-opacity="0"/></radialGradient>
+    <symbol id="scene" viewBox="0 0 600 400" preserveAspectRatio="xMidYMid slice">
+      <rect width="600" height="400" fill="url(#sky)"/>
+      <circle cx="420" cy="178" r="110" fill="url(#sunglow)"/>
+      <circle cx="420" cy="178" r="30" fill="#fff3d1"/>
+      <path d="M0 230 L80 170 L150 210 L230 150 L320 205 L400 160 L480 200 L560 150 L600 180 V400 H0Z" fill="#6b6f92" opacity=".85"/>
+      <path d="M0 262 L60 232 L130 250 L210 222 L290 255 L380 228 L470 250 L540 226 L600 240 V400 H0Z" fill="#46506e"/>
+      <path d="M0 282 Q150 232 300 262 T600 276 V400 H0Z" fill="#2b3446"/>
+      <g fill="#1a2130">
+        <rect x="128" y="200" width="20" height="56"/><path d="M128 200 L138 186 L148 200Z"/>
+        <rect x="148" y="215" width="32" height="41"/><path d="M146 215 h4 v-6 h4 v6 h4 v-6 h4 v6 h4 v-6 h4 v6 h4 v-6 h4 v6 h2 v2 h-34z"/>
+        <rect x="178" y="195" width="20" height="61"/><path d="M178 195 L188 182 L198 195Z"/>
+        <rect x="160" y="236" width="8" height="20" fill="#0e131c"/>
+      </g>
+      <rect x="0" y="300" width="600" height="100" fill="url(#lake)" opacity=".9"/>
+      <g stroke="#fff3d1" stroke-opacity=".55" stroke-width="2">
+        <path d="M395 312 h50 M402 324 h36 M410 337 h22 M405 350 h30"/>
+      </g>
+      <path d="M0 360 Q200 330 360 372 T600 352 V400 H0Z" fill="#11161d"/>
+    </symbol>
+    <symbol id="hist" viewBox="0 0 200 50" preserveAspectRatio="none">
+      <path d="M0 50 C20 48 25 30 40 32 S60 10 75 18 S95 40 110 28 S135 6 150 20 S175 42 200 46 V50Z" fill="#60a5fa" opacity=".55"/>
+      <path d="M0 50 C18 46 30 36 45 26 S70 22 85 30 S110 12 130 22 S165 40 200 44 V50Z" fill="#f87171" opacity=".5"/>
+      <path d="M0 50 C25 47 35 26 55 30 S80 16 100 24 S130 30 150 16 S180 38 200 48 V50Z" fill="#4ade80" opacity=".45"/>
+    </symbol>
+  </defs>
+</svg>
+
+<nav class="top" id="nav">
+  <div class="wrap">
+    <a class="brand" href="#top"><img src="icon.png" alt="">OpenLight Studio</a>
+    <div class="links">
+      <a href="#intro">Intro</a>
+      <a href="#features">Features</a>
+      <a href="#demos">Demos</a>
+      <a href="#usage">Usage</a>
+      <a href="#promo">Promo kit</a>
+    </div>
+    <a class="btn small primary" href="https://github.com/rcwkan/openlight-studio">GitHub</a>
+  </div>
+</nav>
+
+<!-- HERO -->
+<header class="hero" id="top">
+  <div class="wrap">
+    <span class="pill reveal"><span class="dot"></span>Open source · MIT · v0.1</span>
+    <h1 class="reveal">The RAW editor your <span class="grad">AI agent</span> can drive.</h1>
+    <p class="lead reveal">OpenLight Studio is a non-destructive RAW processor and photo catalog with a built-in MCP server. Edit by hand, ask in plain words, or let Claude cull and grade a whole shoot — every change stays undoable.</p>
+    <div class="cta reveal">
+      <a class="btn primary" href="https://github.com/rcwkan/openlight-studio/releases">⬇ Download for macOS · Windows · Linux</a>
+      <a class="btn" href="#demos">Try the demos ↓</a>
+    </div>
+    <p class="stack reveal">Tauri v2 · Rust · React 19 · SQLite · rawler</p>
+
+    <div class="shot reveal">
+      <div class="win" role="img" aria-label="OpenLight Studio Develop view with the AI prompt bar">
+        <div class="tb">
+          <div class="lights"><i></i><i></i><i></i></div>
+          <div class="modtabs"><span>Library</span><span class="on">Develop</span><span>Settings</span></div>
+          <div class="status"><i></i>MCP</div>
+        </div>
+        <div class="body">
+          <div class="side">
+            <h6>Library</h6>
+            <div>All photos <small>2,418</small></div>
+            <div>Picks <small>312</small></div>
+            <h6>Folders</h6>
+            <div class="on">Iceland 2026 <small>486</small></div>
+            <div class="conn">NAS · photos <small>1,204</small></div>
+            <h6>Cloud &amp; services</h6>
+            <div class="conn">Immich · Favorites</div>
+            <div>Google Photos picks</div>
+            <div>Dropbox / Shoots</div>
+            <div>S3 · archive</div>
+          </div>
+          <div class="canvas">
+            <div class="stage"><div class="photo" id="heroPhoto"><svg><use href="#scene"/></svg></div></div>
+            <div class="ai"><b>✦ AI</b><span class="typed" id="heroTyped"></span><span class="go">Run</span></div>
+          </div>
+          <div class="panel">
+            <div class="ptabs"><span class="on">Adjust</span><span>Selections</span><span>Advanced</span><span>Pro</span><span>Auto</span></div>
+            <div class="hist"><svg width="100%" height="100%"><use href="#hist"/></svg></div>
+            <h6>Basic</h6>
+            <div class="sl">Temp<div class="tr"><i style="left:58%"></i></div><em>+12</em></div>
+            <div class="sl">Exposure<div class="tr"><i style="left:56%"></i></div><em>+0.35</em></div>
+            <div class="sl">Contrast<div class="tr"><i style="left:62%"></i></div><em>+18</em></div>
+            <div class="sl">Highlights<div class="tr"><i style="left:30%"></i></div><em>−42</em></div>
+            <div class="sl">Shadows<div class="tr"><i style="left:66%"></i></div><em>+31</em></div>
+            <div class="sl">Clarity<div class="tr"><i style="left:57%"></i></div><em>+14</em></div>
+            <div class="sl">Dehaze<div class="tr"><i style="left:54%"></i></div><em>+8</em></div>
+            <div class="sl">Vibrance<div class="tr"><i style="left:64%"></i></div><em>+26</em></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<!-- INTRO -->
+<section id="intro">
+  <div class="wrap">
+    <div class="intro-grid">
+      <div class="reveal">
+        <p class="eyebrow">Intro</p>
+        <h2>A full darkroom that speaks <span class="grad">MCP</span>.</h2>
+        <p class="lead">OpenLight Studio catalogs, culls and develops your photos where they already live — folders, NAS shares, cloud buckets, Immich and Google Photos — without ever touching the originals.</p>
+        <p class="lead" style="margin-top:14px">One Rust pipeline in linear Rec.2020 float renders the viewport, the MCP previews and the full-resolution export, so an agent sees exactly what you see. Every agent call is one undoable history step, logged in the photo's provenance.</p>
+      </div>
+      <div class="pillars reveal">
+        <div class="pillar"><div class="ic">🛡️</div><h3>Non-destructive</h3><p>Edits live in the catalog and an <code>.olxmp</code> sidecar. Originals are never overwritten.</p></div>
+        <div class="pillar"><div class="ic">🏠</div><h3>Local-first</h3><p>SQLite catalog on your disk. MCP listens on loopback only, behind a bearer token.</p></div>
+        <div class="pillar"><div class="ic">🤖</div><h3>Agent-ready</h3><p>Claude, Antigravity, Ollama, LM Studio, OpenAI, Gemini — pick a provider, or plug in a CLI.</p></div>
+        <div class="pillar"><div class="ic">🔓</div><h3>Open source</h3><p>MIT licensed. Read the code, file an issue, ship a pull request.</p></div>
+      </div>
+    </div>
+    <div class="stats reveal">
+      <div><b class="grad" data-count="10">0</b><span>MCP tools</span></div>
+      <div><b class="grad" data-count="6">0</b><span>Auto functions</span></div>
+      <div><b class="grad" data-count="9">0</b><span>Source types</span></div>
+      <div><b class="grad" data-count="8">0</b><span>AI providers</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- FEATURES -->
+<section class="features" id="features">
+  <div class="wrap">
+    <p class="eyebrow reveal">Features</p>
+    <h2 class="reveal">Everything from import to export.</h2>
+    <p class="lead reveal">Lightroom-class develop panels, Photoshop's everyday adjustments, and automation that runs on one photo or the whole catalog.</p>
+
+    <div class="fgrid">
+      <article class="fcard wide reveal" style="--glow:rgba(246,185,48,.18)">
+        <div class="ic">🗂️</div>
+        <h3>Your photos, wherever they live</h3>
+        <p>No import step. Add a folder, a network share or a cloud account and browse it in place. Immich albums page in 250 at a time; ratings and flags sync both ways. <b>Duplicate</b> copies between any two sources with SHA-256 verification.</p>
+        <ul><li>Folders</li><li>SMB · AFP · NFS · WebDAV</li><li>S3 · B2 · R2 · Wasabi · MinIO</li><li>Dropbox</li><li>OneDrive</li><li>Immich</li><li>Google Photos</li></ul>
+      </article>
+      <article class="fcard reveal">
+        <div class="ic">🎚️</div>
+        <h3>Develop</h3>
+        <p>White balance, tone, presence, parametric and point curves, 8-band colour mixer, Point Color, 3-way grading, detail, vignette, crop &amp; straighten.</p>
+      </article>
+      <article class="fcard reveal" style="--glow:rgba(167,139,250,.2)">
+        <div class="ic">✦</div>
+        <h3>AI Select &amp; Remove</h3>
+        <p>"Select the castle" traces an edge-snapped mask. "Remove the people" heals each outline from a matching nearby area. Or press <kbd>S</kbd> and click.</p>
+      </article>
+      <article class="fcard reveal">
+        <div class="ic">🎭</div>
+        <h3>Masks</h3>
+        <p>Linear, radial, luminance, colour range and AI outlines with add / subtract / intersect, feather and edge shift. Every panel tunes inside a mask.</p>
+      </article>
+      <article class="fcard reveal" style="--glow:rgba(246,185,48,.16)">
+        <div class="ic">📐</div>
+        <h3>Advanced optics</h3>
+        <p>Upright Auto / Level / Vertical / Full / Guided, lens distortion, auto chromatic aberration, defringe, calibration, grain, soft proofing.</p>
+      </article>
+      <article class="fcard wide reveal" style="--glow:rgba(52,211,153,.16)">
+        <div class="ic">⚡</div>
+        <h3>Six Auto functions</h3>
+        <p>Run on a selection, the current view or the whole catalog — cancellable, with results you can act on and <b>Show in Library</b>.</p>
+        <ul><li>Catalog &amp; Culling</li><li>Non-destructive Editing</li><li>AI Masking</li><li>Denoise &amp; Super Resolution</li><li>Find blurred subjects</li><li>Find duplicates</li></ul>
+      </article>
+      <article class="fcard reveal">
+        <div class="ic">🧪</div>
+        <h3>Pro tab</h3>
+        <p>Levels, Hue/Saturation with Colorize, Selective Color, Channel Mixer, Gradient Map, blur, posterize, threshold — as adjustment layers on any selection.</p>
+      </article>
+      <article class="fcard reveal" style="--glow:rgba(167,139,250,.18)">
+        <div class="ic">🔌</div>
+        <h3>Built-in MCP server</h3>
+        <p>Streamable HTTP on <code>127.0.0.1:41920</code> or stdio. Tools for query, culling, develop, masks, retouch, export and inspection.</p>
+      </article>
+      <article class="fcard reveal">
+        <div class="ic">📤</div>
+        <h3>Export &amp; upload</h3>
+        <p>JPEG, AVIF, 16-bit PNG/TIFF in sRGB, Display P3 or Adobe RGB with ICC; Rec.2020 PQ HDR. Upload straight to Immich, Google Photos or cloud.</p>
+      </article>
+    </div>
+  </div>
+</section>
+
+<!-- DEMOS -->
+<section id="demos">
+  <div class="wrap">
+    <p class="eyebrow reveal">Feature demos</p>
+    <h2 class="reveal">Try it right here.</h2>
+    <p class="lead reveal">These are browser re-creations of the app's main interactions, running on a sample photo.</p>
+
+    <!-- Develop -->
+    <div class="demo reveal">
+      <div class="demo-text">
+        <span class="tag">DEVELOP · ADJUST</span>
+        <h3>Sliders, profiles and one-click Auto</h3>
+        <p>Drag the sliders, or apply a profile. <b>✦ Auto</b> measures white balance and tone on the photo, then applies the profile's look. Applying a profile twice changes nothing; your other edits stay.</p>
+        <p>In the app, every change is a history step — <kbd>⌘</kbd><kbd>Z</kbd> to undo, <kbd>\</kbd> for before/after, <kbd>⌘</kbd><kbd>⇧</kbd><kbd>C</kbd> / <kbd>V</kbd> to copy and paste settings.</p>
+      </div>
+      <div class="demo-box">
+        <div class="photo" id="devPhoto">
+          <svg id="devImg"><use href="#scene"/></svg>
+          <div class="layer" id="devTemp"></div>
+          <div class="layer" id="devVig" style="background:radial-gradient(ellipse at center,transparent 45%,#000 100%);opacity:0"></div>
+        </div>
+        <div class="dhist"><svg id="devHist"><use href="#hist"/></svg></div>
+        <div class="controls">
+          <label class="ctl">Exposure<input type="range" id="e" min="-2" max="2" step="0.05" value="0"><output for="e">0.00</output></label>
+          <label class="ctl">Contrast<input type="range" id="c" min="-100" max="100" value="0"><output for="c">0</output></label>
+          <label class="ctl">Temp<input type="range" id="t" min="-100" max="100" value="0"><output for="t">0</output></label>
+          <label class="ctl">Saturation<input type="range" id="s" min="-100" max="100" value="0"><output for="s">0</output></label>
+          <label class="ctl">Vignette<input type="range" id="v" min="0" max="100" value="0"><output for="v">0</output></label>
+        </div>
+        <div class="chips" id="profiles">
+          <button class="chip ai" data-p="auto">✦ Auto</button>
+          <button class="chip" data-p="natural">Natural</button>
+          <button class="chip" data-p="vivid">Vivid</button>
+          <button class="chip" data-p="bw">B&amp;W</button>
+          <button class="chip" data-p="film">Film</button>
+          <button class="chip" data-p="moody">Moody</button>
+          <button class="chip" data-p="reset">Reset</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Before / after -->
+    <div class="demo flip reveal">
+      <div class="demo-text">
+        <span class="tag">BEFORE / AFTER</span>
+        <h3>See exactly what changed</h3>
+        <p>Drag the handle. The same Rust pipeline renders the viewport, the thumbnails, the MCP previews and the export — what you compare is what you ship.</p>
+        <p>Geometry is applied last in one resample, so masks, removals and guides stay pinned to the content.</p>
+      </div>
+      <div class="demo-box">
+        <div class="photo ba" id="ba" tabindex="0" role="slider" aria-label="Before and after split" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50">
+          <svg style="filter:brightness(.82) contrast(.8) saturate(.6)"><use href="#scene"/></svg>
+          <svg class="after" style="filter:brightness(1.08) contrast(1.18) saturate(1.35)"><use href="#scene"/></svg>
+          <div class="bar"></div>
+          <span class="lbl l">Before</span><span class="lbl r">After</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- AI Select -->
+    <div class="demo reveal">
+      <div class="demo-text">
+        <span class="tag">✦ SELECT · S</span>
+        <h3>Click an object, get a mask</h3>
+        <p>Click the <b>castle</b>, the <b>sky</b> or the <b>lake</b>. In the app, the selected AI provider sees the photo with your click marked, traces the object, and the outline is snapped to the photo's edges.</p>
+        <p>Each object becomes its own entry in <b>Selections</b>. While one is selected, every Develop panel tunes only inside it. <kbd>⌥</kbd>-click subtracts; <kbd>Esc</kbd> goes back to the whole photo.</p>
+      </div>
+      <div class="demo-box">
+        <div class="photo sel" id="sel">
+          <svg id="selImg"><use href="#scene"/></svg>
+          <svg class="ov" viewBox="0 0 600 400" preserveAspectRatio="xMidYMid slice" id="selOv"></svg>
+          <span class="hint" id="selHint">Click something in the photo</span>
+        </div>
+        <div class="sellist" id="selList"><div class="empty">Selections (0)</div></div>
+      </div>
+    </div>
+
+    <!-- Culling -->
+    <div class="demo flip reveal">
+      <div class="demo-text">
+        <span class="tag">AUTO · CATALOG &amp; CULLING</span>
+        <h3>Cull a shoot in seconds</h3>
+        <p>Measures sharpness on the main subject, clipping, noise and colour. Groups bursts by time and perceptual hash and picks the best of each, rejects blurred or blown-out frames, rates the rest 1–5 stars and adds keywords.</p>
+        <p>Turn on <i>Auto Catalog &amp; Culling of new photos</i> and it runs in the background whenever a folder, drive or album gets new files.</p>
+      </div>
+      <div class="demo-box">
+        <div class="cgrid" id="cgrid"></div>
+        <div class="cbar">
+          <button class="btn small primary" id="cullBtn">Run Catalog &amp; Culling</button>
+          <div class="prog"><i id="cullProg"></i></div>
+        </div>
+        <p class="csum" id="cullSum" style="margin-top:8px">12 photos selected</p>
+      </div>
+    </div>
+
+    <!-- MCP -->
+    <div class="demo reveal">
+      <div class="demo-text">
+        <span class="tag">MCP · AGENTS</span>
+        <h3>Hand the whole shoot to an agent</h3>
+        <p>Connect Claude Code (or any MCP client) in one command. The agent queries the catalog, culls, develops, masks and exports through the same tools you use — and the open Develop view updates live.</p>
+        <p>Every mutating call is one undoable step, recorded in the photo's <code>ai_provenance_log</code>.</p>
+        <button class="btn small" id="termReplay" style="margin-top:6px">↻ Replay</button>
+      </div>
+      <div class="term">
+        <div class="th"><div class="lights"><i></i><i></i><i></i></div>claude — openlight</div>
+        <pre id="termOut"></pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- USAGE -->
+<section class="usage" id="usage">
+  <div class="wrap">
+    <p class="eyebrow reveal">Detailed usage</p>
+    <h2 class="reveal">From first launch to first export.</h2>
+    <p class="lead reveal">A walkthrough of the everyday workflow. The full reference lives in the README and the <code>guide/</code> folder.</p>
+
+    <div class="steps">
+      <div class="step reveal"><div>
+        <h3>Install &amp; run</h3>
+        <p>Download a release for your platform, or build from source with Node 20+ and stable Rust.</p>
+<pre class="code">npm install
+npm run tauri dev</pre>
+        <p style="margin-top:10px">The catalog lives in <code>~/Library/Application Support/org.openlight.studio/</code>. Set <code>OPENLIGHT_DATA_DIR</code> to use another folder. Release build: <code>npm run tauri build</code>.</p>
+      </div></div>
+
+      <div class="step reveal"><div>
+        <h3>Add your sources</h3>
+        <p>The Library sidebar groups sources under <b>Library</b>, <b>Folders</b> and <b>Cloud &amp; services</b>. Press <b>＋</b> on a group to add one. There is no import step — opening a source picks up new files.</p>
+        <ul>
+          <li><b>Folder:</b> ＋ › Folder… — photos stay where they are.</li>
+          <li><b>Network drive:</b> <code>smb://nas.local/photos</code>, <code>afp://</code>, <code>nfs://</code> or <code>https://</code> (WebDAV). A dot shows if it is connected.</li>
+          <li><b>Cloud storage:</b> WebDAV, S3-compatible, Dropbox or OneDrive in <i>Settings › Locations</i>. Keys go to the OS keychain, never <code>settings.json</code>.</li>
+          <li><b>Immich:</b> server URL + an API key. <b>Google Photos:</b> Pick photos… through the Picker API.</li>
+        </ul>
+<pre class="code">openlight-studio --import ~/Pictures/Iceland   # headless, recursive</pre>
+      </div></div>
+
+      <div class="step reveal"><div>
+        <h3>Cull</h3>
+        <p>Select photos, open <b>Auto › Catalog &amp; Culling</b> on the Library's right bar and press Run. Review the results list, then filter by rating, flag, label or keyword. Use <b>Find blurred subjects</b> and <b>Find duplicates</b> to clean up further. Open a photo full-size in the viewer with <kbd>←</kbd> <kbd>→</kbd> to step through.</p>
+      </div></div>
+
+      <div class="step reveal"><div>
+        <h3>Develop</h3>
+        <p>Open a photo in <b>Develop</b>. The right panel has five tabs:</p>
+        <ul>
+          <li><b>Adjust</b> — Basic, curves, colour mixer, Point Color, grading, detail, effects.</li>
+          <li><b>Selections</b> — your masks. Select one and every panel tunes inside it; <b>Done</b> or <kbd>Esc</kbd> returns.</li>
+          <li><b>Advanced</b> — lens corrections, Transform/Upright, calibration, noise, grain, spot removal (<kbd>Q</kbd>), soft proofing.</li>
+          <li><b>Pro</b> — Levels, Hue/Sat, Selective Color, Channel Mixer, Gradient Map, filters, rotation.</li>
+          <li><b>Auto</b> — ✦ Auto, profiles, one-at-a-time autos, auto rotate, auto select &amp; remove.</li>
+        </ul>
+      </div></div>
+
+      <div class="step reveal"><div>
+        <h3>Ask the AI</h3>
+        <p>Pick a provider in <b>Settings › AI &amp; MCP</b> (API keys go to the keychain, or read from <code>ANTHROPIC_API_KEY</code>, <code>GEMINI_API_KEY</code>, <code>OPENAI_API_KEY</code>, <code>OPENROUTER_API_KEY</code>). Then type in the <b>✦ AI</b> bar:</p>
+<pre class="code">select the castle and warm it up a little
+remove the people on the left
+make it moody, keep the sky detail</pre>
+        <p style="margin-top:10px">Or press <kbd>S</kbd> and click objects. <b>✦ AI fine tune</b> levels a tilted horizon first, then tunes the look.</p>
+      </div></div>
+
+      <div class="step reveal"><div>
+        <h3>Export</h3>
+        <p>Choose JPEG, AVIF, 16-bit PNG/TIFF, colour space (sRGB, Display P3, Adobe RGB) and destination: a folder, <b>Upload to Immich</b>, <b>Upload to Google Photos</b> or a cloud account. Exports carry the capture date, so uploads land on the right day. <b>Save to Immich</b> stacks the edit on the original.</p>
+      </div></div>
+
+      <div class="step reveal"><div>
+        <h3>Connect an agent</h3>
+        <p>The <b>AI &amp; MCP</b> tab shows the bearer token and copy-ready configs. The green <b>MCP</b> dot in the title bar means the server is running.</p>
+<pre class="code">claude mcp add --transport http openlight http://127.0.0.1:41920/mcp \
+  --header "Authorization: Bearer &lt;token&gt;"</pre>
+        <p style="margin-top:10px">Or over stdio — it forwards to the running app, or edits the catalog headless when the app is closed:</p>
+<pre class="code">openlight-studio --mcp-stdio</pre>
+      </div></div>
+    </div>
+
+    <div class="twocol">
+      <div class="box reveal">
+        <h3>Develop shortcuts</h3>
+        <div class="scroll-x"><table>
+          <tr><th>Key</th><th>Action</th></tr>
+          <tr><td><kbd>S</kbd></td><td>✦ Select tool (click to trace an object)</td></tr>
+          <tr><td><kbd>Q</kbd></td><td>Spot removal</td></tr>
+          <tr><td><kbd>R</kbd></td><td>Crop</td></tr>
+          <tr><td><kbd>J</kbd></td><td>Clipping warning</td></tr>
+          <tr><td><kbd>O</kbd></td><td>Mask overlay</td></tr>
+          <tr><td><kbd>\</kbd></td><td>Before / after</td></tr>
+          <tr><td><kbd>[</kbd> <kbd>]</kbd></td><td>Rotate 90°</td></tr>
+          <tr><td><kbd>Z</kbd> / <kbd>F</kbd></td><td>Zoom 2× / fit</td></tr>
+          <tr><td><kbd>+</kbd> <kbd>−</kbd></td><td>Zoom in / out</td></tr>
+          <tr><td><kbd>⌘</kbd><kbd>Z</kbd> · <kbd>⌘</kbd><kbd>⇧</kbd><kbd>Z</kbd></td><td>Undo · redo</td></tr>
+          <tr><td><kbd>⌘</kbd><kbd>⇧</kbd><kbd>C</kbd> / <kbd>V</kbd></td><td>Copy / paste settings</td></tr>
+          <tr><td><kbd>Esc</kbd></td><td>Leave tool or selection</td></tr>
+        </table></div>
+      </div>
+      <div class="box reveal">
+        <h3>MCP tools</h3>
+        <div class="scroll-x"><table>
+          <tr><th>Tool</th><th>Does</th></tr>
+          <tr><td><code>catalog_query</code></td><td>Find photos by folder, rating, flag, keyword</td></tr>
+          <tr><td><code>culling_batch_update</code></td><td>Ratings, flags, labels, keywords</td></tr>
+          <tr><td><code>develop_apply_parameters</code></td><td>Any Develop / Advanced / Pro value</td></tr>
+          <tr><td><code>develop_auto</code></td><td>Auto to a profile</td></tr>
+          <tr><td><code>auto_run</code></td><td>Any of the six Auto functions</td></tr>
+          <tr><td><code>mask_create_and_edit</code></td><td>Create and tune selections</td></tr>
+          <tr><td><code>retouch_remove_objects</code></td><td>Heal outlines away</td></tr>
+          <tr><td><code>ai_reconstruct_and_retouch</code></td><td>Denoise, super resolution</td></tr>
+          <tr><td><code>batch_export</code></td><td>Render and save / upload</td></tr>
+          <tr><td><code>photo_inspect</code></td><td>Preview, histogram, telemetry</td></tr>
+        </table></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- PROMO -->
+<section id="promo">
+  <div class="wrap">
+    <p class="eyebrow reveal">Promo guideline</p>
+    <h2 class="reveal">How to show OpenLight to the world.</h2>
+    <p class="lead reveal">A small press kit: brand, voice, the screens to capture, ready-made formats and copy, and a launch checklist.</p>
+
+    <div class="sub reveal">
+      <h3>1 · Brand</h3>
+      <p>Two interlocking rings — cyan for the light you capture, amber for the light you shape. Keep the icon on dark or neutral backgrounds, with clear space of at least a quarter of its width.</p>
+      <div class="twocol">
+        <div class="box">
+          <h3>Logo</h3>
+          <div class="logo-row">
+            <div class="logo-tile dark"><img src="icon.png" alt="OpenLight icon on dark"></div>
+            <div class="logo-tile light"><img src="icon.png" alt="OpenLight icon on light"></div>
+            <div class="logo-tile brandbg"><img src="icon.png" alt="OpenLight icon on brand gradient"></div>
+          </div>
+          <p style="color:var(--muted);font-size:14px;margin-top:14px"><a href="icon.png" download>Download icon.png</a> (512 × 512). Full set in <code>src-tauri/icons/</code>.</p>
+        </div>
+        <div class="box">
+          <h3>Type &amp; name</h3>
+          <p style="color:var(--muted);font-size:14.5px">Write <b style="color:var(--text)">OpenLight Studio</b> — one word "OpenLight", capital L. Short form: <b style="color:var(--text)">OpenLight</b>. Never "Open Light" or "Openlight".</p>
+          <p style="color:var(--muted);font-size:14.5px;margin-top:10px">Headlines in a system sans (SF Pro, Segoe UI, Inter) at bold weight, tight tracking. Code, tool names and shortcuts in a monospace.</p>
+          <p style="margin-top:14px;font-size:26px;font-weight:800;letter-spacing:-.02em">Aa <span class="grad">OpenLight</span> <span style="font:500 18px var(--mono);color:var(--muted)">auto_run()</span></p>
+        </div>
+      </div>
+      <div class="swatches" id="swatches">
+        <div class="sw" data-hex="#25C6D8"><div style="background:#25c6d8"></div><p><b>Light Cyan</b>#25C6D8</p></div>
+        <div class="sw" data-hex="#F6B930"><div style="background:#f6b930"></div><p><b>Shape Amber</b>#F6B930</p></div>
+        <div class="sw" data-hex="#A78BFA"><div style="background:#a78bfa"></div><p><b>AI Violet</b>#A78BFA</p></div>
+        <div class="sw" data-hex="#161616"><div style="background:#161616"></div><p><b>Studio Dark</b>#161616</p></div>
+        <div class="sw" data-hex="#0EA5E9"><div style="background:#0ea5e9"></div><p><b>UI Accent</b>#0EA5E9</p></div>
+      </div>
+      <p style="color:var(--dim);font-size:13px;margin-top:8px">Click a swatch to copy its hex. Violet is reserved for anything AI (✦).</p>
+    </div>
+
+    <div class="sub reveal">
+      <h3>2 · Voice &amp; taglines</h3>
+      <p>Plain, concrete, confident. Say what the feature does, not how revolutionary it is. Show the agent working rather than claiming "AI-powered".</p>
+      <div class="taglines" id="taglines">
+        <div class="tl"><span>The RAW editor your AI agent can drive.</span><button class="copy">Copy</button></div>
+        <div class="tl"><span>Edit by hand. Ask in plain words. Undo either.</span><button class="copy">Copy</button></div>
+        <div class="tl"><span>Your photos stay where they are. Your originals stay untouched.</span><button class="copy">Copy</button></div>
+        <div class="tl"><span>A full darkroom that speaks MCP.</span><button class="copy">Copy</button></div>
+        <div class="tl"><span>Open source RAW editing, culling and cataloging — local-first, MIT.</span><button class="copy">Copy</button></div>
+      </div>
+    </div>
+
+    <div class="sub reveal">
+      <h3>3 · The six screens to capture</h3>
+      <p>Shoot at 2880 × 1800 (Retina 1440 × 900 window), <b>Studio Dark</b> theme, a real catalog of a few hundred of your own photos, no personal paths or tokens visible. Hide the dock and menu bar extras.</p>
+      <div class="shots">
+        <div class="shotcard">
+          <div class="mini"><span class="num">01</span>
+            <div style="position:absolute;inset:8%;display:grid;grid-template-columns:repeat(5,1fr);gap:4px" class="mini-grid"></div>
+          </div>
+          <div class="txt"><h3>Library grid</h3><p>Sidebar with Folders, a NAS drive (green dot) and Immich connected. Stars, picks and colour labels visible on the grid.</p><small>Hero · App Store · README</small></div>
+        </div>
+        <div class="shotcard">
+          <div class="mini"><span class="num">02</span><div class="photo"><svg><use href="#scene"/></svg></div></div>
+          <div class="txt"><h3>Develop · Adjust</h3><p>A strong landscape mid-edit, histogram and Basic panel visible, before/after split at 50%.</p><small>Feature · social</small></div>
+        </div>
+        <div class="shotcard">
+          <div class="mini"><span class="num">03</span><div class="photo"><svg><use href="#scene"/></svg><svg viewBox="0 0 600 400" preserveAspectRatio="xMidYMid slice" style="position:absolute;inset:0;width:100%;height:100%"><path d="M128 256 V200 L138 186 L148 200 V215 L162 208 L178 215 V195 L188 182 L198 195 V256Z" fill="rgba(167,139,250,.35)" stroke="#fff" stroke-dasharray="5 3"/></svg></div></div>
+          <div class="txt"><h3>✦ AI Select</h3><p>The AI bar with a prompt like "select the castle", the traced outline and the Selections tab listing it.</p><small>The money shot · every channel</small></div>
+        </div>
+        <div class="shotcard">
+          <div class="mini"><span class="num">04</span>
+            <div style="position:absolute;inset:8%;display:grid;grid-template-columns:2fr 1fr;gap:6px"><div class="mini-grid" style="display:grid;grid-template-columns:repeat(3,1fr);gap:4px"></div><div style="background:#1b1b1b;border-radius:4px;padding:6px;display:flex;flex-direction:column;gap:4px"><i style="height:5px;background:#2a2a2a;border-radius:2px"></i><i style="height:5px;width:70%;background:#2a2a2a;border-radius:2px"></i><i style="height:5px;background:linear-gradient(90deg,var(--cyan),var(--amber));border-radius:2px;margin-top:auto"></i></div></div>
+          </div>
+          <div class="txt"><h3>Auto · Culling results</h3><p>Right panel mid-run with the progress bar, results list on the left showing picks and rejects.</p><small>Feature · blog</small></div>
+        </div>
+        <div class="shotcard">
+          <div class="mini"><span class="num">05</span>
+            <div style="position:absolute;inset:10%;background:#07090b;border:1px solid var(--line);border-radius:6px;padding:8px;font:9px/1.6 var(--mono);color:#94a3b8;overflow:hidden">
+              <span style="color:var(--cyan)">›</span> cull the Iceland shoot<br><span style="color:var(--violet)">⏺ auto_run</span>(catalog_culling)<br><span style="color:var(--green)">✓</span> 486 photos · 61 picks<br><span style="color:var(--violet)">⏺ develop_auto</span>(Landscape)<br><span style="color:var(--green)">✓</span> 61 edited
+            </div>
+          </div>
+          <div class="txt"><h3>Agent side-by-side</h3><p>Terminal with Claude Code on the left, the app on the right updating live as tools are called.</p><small>Video · launch post</small></div>
+        </div>
+        <div class="shotcard">
+          <div class="mini"><span class="num">06</span><div class="photo" style="inset:12% 22% 12% 10%"><svg><use href="#scene"/></svg><div style="position:absolute;inset:0;border:2px solid rgba(255,255,255,.55);transform:perspective(200px) rotateY(-8deg)"></div></div>
+            <div style="position:absolute;right:6%;top:12%;bottom:12%;width:12%;background:#1b1b1b;border-radius:4px"></div>
+          </div>
+          <div class="txt"><h3>Advanced · Upright</h3><p>A tilted architecture shot with Guided Upright lines drawn, then the corrected result.</p><small>Pro audience · forums</small></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="sub reveal">
+      <h3>4 · Formats</h3>
+      <p>One idea per image: a single screen, one headline of six words or fewer, the logo. Keep text out of the outer 10% so platforms don't crop it.</p>
+      <div class="formats">
+        <div class="fmt">
+          <div class="card-og"><div class="l"><div class="b"><img src="icon.png" alt="">OpenLight Studio</div><h4>The RAW editor your <span class="grad">AI agent</span> can drive.</h4></div><div class="photo"><svg><use href="#scene"/></svg></div></div>
+          <p>1200 × 630 · Open Graph, X, LinkedIn, HN</p>
+        </div>
+        <div class="fmt">
+          <div class="card-sq"><div class="b"><img src="icon.png" alt="">OpenLight</div><h4>Click the castle. <span class="grad">Get a mask.</span></h4><div class="photo"><svg><use href="#scene"/></svg></div></div>
+          <p>1080 × 1080 · Instagram, Mastodon</p>
+        </div>
+        <div class="fmt">
+          <div class="card-st"><div class="b"><img src="icon.png" alt="">OpenLight</div><h4>Cull 486 photos in <span class="grad">one prompt.</span></h4><div class="photo"><svg><use href="#scene"/></svg></div></div>
+          <p>1080 × 1920 · Stories, Reels, Shorts</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="sub reveal">
+      <h3>5 · Ready-to-post copy</h3>
+      <p>Pair each with screen 03 or a 20–40 s screen recording of the agent demo.</p>
+      <div class="posts">
+        <div class="post"><h4>X / Bluesky / Threads</h4><p>OpenLight Studio is an open-source RAW editor with a built-in MCP server.
+
+Connect Claude, then: "cull the Iceland shoot, grade the picks for landscape, export for Immich." Every step is undoable.
+
+MIT · macOS / Windows / Linux
+github.com/rcwkan/openlight-studio</p><button class="copy">Copy</button></div>
+        <div class="post"><h4>Show HN</h4><p>Show HN: OpenLight Studio – an open-source RAW editor that AI agents can drive over MCP
+
+Tauri + Rust, one linear Rec.2020 pipeline for viewport, previews and export, so the agent sees exactly what you see. Folders, NAS, S3, Immich and Google Photos browsed in place. Non-destructive, local-first, MIT.</p><button class="copy">Copy</button></div>
+        <div class="post"><h4>Reddit · r/photography, r/selfhosted</h4><p>I built a free, open-source Lightroom-style editor that works with Immich in place: ratings sync both ways, edits save as a stack on top of the original, and an Auto function culls a whole album (sharpness on the subject, bursts, exposure). Feedback welcome.</p><button class="copy">Copy</button></div>
+      </div>
+      <p style="color:var(--dim);font-size:13px;margin-top:12px">Hashtags, sparingly: #photography #RAW #opensource #MCP #selfhosted #Immich</p>
+    </div>
+
+    <div class="sub reveal">
+      <h3>6 · Do &amp; don't</h3>
+      <div class="dd">
+        <div class="box do"><h3 style="color:var(--green)">Do</h3><ul>
+          <li>Show real, unretouched app UI and real photos you own.</li>
+          <li>Show the before, the prompt and the after together.</li>
+          <li>Name what is local: the catalog, the MCP server, the keys.</li>
+          <li>Credit the stack: Tauri, Rust, rawler.</li>
+          <li>Link to the repo and the README.</li>
+        </ul></div>
+        <div class="box dont"><h3 style="color:var(--red)">Don't</h3><ul>
+          <li>Mock up features from the README's "Not yet" list (generative fill, face detection, CLIP search).</li>
+          <li>Show tokens, API keys, home paths or someone else's photos.</li>
+          <li>Use other products' logos or call it a Lightroom "replacement".</li>
+          <li>Stretch, recolour or add effects to the icon.</li>
+          <li>Claim speed numbers you haven't measured.</li>
+        </ul></div>
+      </div>
+    </div>
+
+    <div class="sub reveal">
+      <h3>7 · Launch checklist</h3>
+      <div class="check">
+        <label><input type="checkbox"><span>Release builds for macOS, Windows and Linux attached to a GitHub release, with notes.</span></label>
+        <label><input type="checkbox"><span>README hero image = screen 01 or 03; this page linked from the repo About.</span></label>
+        <label><input type="checkbox"><span>Six screens captured, named <code>01-library.png</code> … <code>06-upright.png</code>, checked for private data.</span></label>
+        <label><input type="checkbox"><span>30-second agent demo recorded (terminal + app side by side), captioned, no audio needed.</span></label>
+        <label><input type="checkbox"><span>OG image (1200 × 630) set on the page and repo social preview.</span></label>
+        <label><input type="checkbox"><span>Posts scheduled: Show HN (Tue–Thu morning US time), X/Bluesky, Mastodon, r/selfhosted, Immich discussions.</span></label>
+        <label><input type="checkbox"><span>Someone on hand for the first 4 hours to answer comments and issues.</span></label>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="final">
+  <div class="wrap">
+    <img class="reveal" src="icon.png" alt="">
+    <h2 class="reveal">Bring your photos. <span class="grad">Bring your agent.</span></h2>
+    <p class="lead reveal" style="margin:0 auto 30px">Free and open source under the MIT License.</p>
+    <div class="cta reveal">
+      <a class="btn primary" href="https://github.com/rcwkan/openlight-studio/releases">⬇ Download</a>
+      <a class="btn" href="https://github.com/rcwkan/openlight-studio">★ Star on GitHub</a>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <span>© 2026 OpenLight Studio contributors · MIT License</span>
+    <span><a href="https://github.com/rcwkan/openlight-studio">GitHub</a> · <a href="https://github.com/rcwkan/openlight-studio/blob/main/SECURITY.md">Security</a> · <a href="#top">Back to top ↑</a></span>
+  </div>
+</footer>
+
+<div class="toast" id="toast">Copied</div>
+
+<script>
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+// nav border + active link
+const nav = $("#nav");
+const navLinks = $$(".links a");
+addEventListener("scroll", () => nav.classList.toggle("scrolled", scrollY > 10), { passive: true });
+const secObs = new IntersectionObserver((es) => es.forEach((e) => {
+  if (e.isIntersecting) navLinks.forEach((a) => a.classList.toggle("on", a.getAttribute("href") === "#" + e.target.id));
+}), { rootMargin: "-45% 0px -50% 0px" });
+$$("section[id]").forEach((s) => secObs.observe(s));
+
+// reveal on scroll
+const revObs = new IntersectionObserver((es) => es.forEach((e) => {
+  if (!e.isIntersecting) return;
+  e.target.classList.add("in");
+  revObs.unobserve(e.target);
+  if (e.target.contains($("#termOut"))) runTerm();
+  $$("[data-count]", e.target).forEach(countUp);
+}), { threshold: 0.15 });
+$$(".reveal").forEach((el) => revObs.observe(el));
+
+function countUp(el) {
+  const n = +el.dataset.count;
+  if (reduced) return (el.textContent = n);
+  let i = 0;
+  const t = setInterval(() => { el.textContent = ++i; if (i >= n) clearInterval(t); }, 70);
+}
+
+// toast + copy
+const toast = $("#toast");
+async function copy(text, label = "Copied") {
+  try { await navigator.clipboard.writeText(text); toast.textContent = label; }
+  catch { toast.textContent = "Copy failed — select the text instead"; }
+  toast.classList.add("show");
+  clearTimeout(copy.t);
+  copy.t = setTimeout(() => toast.classList.remove("show"), 1400);
+}
+$$("pre.code").forEach((pre) => {
+  const b = document.createElement("button");
+  b.className = "copy"; b.textContent = "Copy";
+  b.onclick = () => copy(pre.firstChild.textContent.trim());
+  pre.append(b);
+});
+$$(".tl .copy").forEach((b) => (b.onclick = () => copy(b.previousElementSibling.textContent)));
+$$(".post .copy").forEach((b) => (b.onclick = () => copy(b.previousElementSibling.textContent.trim())));
+$$(".sw").forEach((s) => (s.onclick = () => copy(s.dataset.hex, s.dataset.hex + " copied")));
+
+// hero AI bar typing
+const prompts = ["select the castle and warm it up a little", "make it moody, keep the sky detail", "remove the people on the left", "level the horizon, then fine tune"];
+(function typeLoop(p = 0, i = 0) {
+  const el = $("#heroTyped"), s = prompts[p];
+  if (reduced) return (el.textContent = prompts[0]);
+  el.textContent = s.slice(0, i);
+  if (i < s.length) setTimeout(() => typeLoop(p, i + 1), 45);
+  else setTimeout(() => typeLoop((p + 1) % prompts.length, 0), 2200);
+})();
+
+// Develop demo
+const dev = { e: 0, c: 0, t: 0, s: 0, v: 0, bw: false };
+const fmt = { e: (x) => (x > 0 ? "+" : "") + (+x).toFixed(2), c: sign, t: sign, s: sign, v: (x) => String(Math.round(x)) };
+function sign(x) { x = Math.round(x); return (x > 0 ? "+" : "") + x; }
+function renderDev() {
+  $("#devImg").style.filter = `brightness(${1 + dev.e * 0.35}) contrast(${1 + dev.c / 150}) saturate(${dev.bw ? 0 : 1 + dev.s / 100})`;
+  const t = $("#devTemp");
+  t.style.background = dev.t >= 0 ? "#ff9a3c" : "#3c7dff";
+  t.style.mixBlendMode = "soft-light";
+  t.style.opacity = Math.abs(dev.t) / 110;
+  $("#devVig").style.opacity = dev.v / 100;
+  $("#devHist").style.transform = `translateX(${dev.e * 12}%) scaleX(${1 + dev.c / 400})`;
+  for (const k of ["e", "c", "t", "s", "v"]) {
+    $("#" + k).value = dev[k];
+    $(`output[for=${k}]`).textContent = fmt[k](dev[k]);
+  }
+}
+for (const k of ["e", "c", "t", "s", "v"]) $("#" + k).addEventListener("input", (ev) => { dev[k] = +ev.target.value; setChip(null); renderDev(); });
+const PROFILES = {
+  reset: { e: 0, c: 0, t: 0, s: 0, v: 0, bw: false },
+  auto: { e: 0.25, c: 12, t: 6, s: 8, v: 0, bw: false },
+  natural: { e: 0.25, c: 12, t: 6, s: 8, v: 0, bw: false },
+  vivid: { e: 0.3, c: 28, t: 12, s: 45, v: 10, bw: false },
+  bw: { e: 0.15, c: 35, t: 0, s: 0, v: 20, bw: true },
+  film: { e: 0.1, c: -12, t: 28, s: -22, v: 28, bw: false },
+  moody: { e: -0.45, c: 30, t: -35, s: -28, v: 60, bw: false },
+};
+function setChip(btn) { $$("#profiles .chip").forEach((c) => c.classList.toggle("on", c === btn)); }
+function animateTo(target) {
+  const from = { ...dev }, t0 = performance.now(), d = reduced ? 1 : 500;
+  dev.bw = target.bw;
+  (function step(now) {
+    const k = Math.min(1, (now - t0) / d), ease = 1 - Math.pow(1 - k, 3);
+    for (const p of ["e", "c", "t", "s", "v"]) dev[p] = from[p] + (target[p] - from[p]) * ease;
+    renderDev();
+    if (k < 1) requestAnimationFrame(step);
+  })(t0);
+}
+$$("#profiles .chip").forEach((b) => (b.onclick = () => { setChip(b.dataset.p === "reset" ? null : b); animateTo(PROFILES[b.dataset.p]); }));
+renderDev();
+
+// Before / after
+const ba = $("#ba");
+function setSplit(pct) {
+  pct = Math.max(0, Math.min(100, pct));
+  $(".after", ba).style.clipPath = `inset(0 0 0 ${pct}%)`;
+  $(".bar", ba).style.left = pct + "%";
+  ba.setAttribute("aria-valuenow", Math.round(pct));
+}
+function baMove(ev) { const r = ba.getBoundingClientRect(); setSplit(((ev.clientX - r.left) / r.width) * 100); }
+ba.addEventListener("pointerdown", (ev) => { ba.setPointerCapture(ev.pointerId); baMove(ev); });
+ba.addEventListener("pointermove", (ev) => { if (ba.hasPointerCapture(ev.pointerId)) baMove(ev); });
+ba.addEventListener("keydown", (ev) => {
+  const now = +ba.getAttribute("aria-valuenow");
+  if (ev.key === "ArrowLeft") setSplit(now - 5);
+  if (ev.key === "ArrowRight") setSplit(now + 5);
+});
+
+// AI Select demo
+const REGIONS = {
+  castle: { pts: [[128, 256], [128, 200], [138, 186], [148, 200], [148, 209], [180, 209], [178, 195], [188, 182], [198, 195], [198, 256]], hint: "castle" },
+  sky: { pts: [[0, 0], [600, 0], [600, 180], [560, 150], [480, 200], [400, 160], [320, 205], [230, 150], [150, 210], [80, 170], [0, 230]], hint: "sky" },
+  lake: { pts: [[0, 300], [600, 300], [600, 352], [480, 356], [360, 372], [200, 334], [0, 360]], hint: "lake" },
+  mountains: { pts: [[0, 230], [80, 170], [150, 210], [230, 150], [320, 205], [400, 160], [480, 200], [560, 150], [600, 180], [600, 276], [450, 268], [300, 262], [150, 244], [0, 282]], hint: "mountains" },
+};
+function inside([x, y], pts) {
+  let r = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const [xi, yi] = pts[i], [xj, yj] = pts[j];
+    if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) r = !r;
+  }
+  return r;
+}
+const selected = new Set();
+const sel = $("#sel");
+sel.addEventListener("click", (ev) => {
+  const r = sel.getBoundingClientRect();
+  const p = [((ev.clientX - r.left) / r.width) * 600, ((ev.clientY - r.top) / r.height) * 400];
+  const ping = document.createElement("span");
+  ping.className = "ping"; ping.style.left = ev.clientX - r.left + "px"; ping.style.top = ev.clientY - r.top + "px";
+  sel.append(ping); setTimeout(() => ping.remove(), 900);
+  const name = ["castle", "sky", "lake", "mountains"].find((n) => inside(p, REGIONS[n].pts));
+  const hint = $("#selHint");
+  if (!name) return (hint.textContent = "Nothing traced there — try the castle, sky or lake");
+  hint.textContent = "✦ Tracing " + name + "…";
+  setTimeout(() => {
+    if (ev.altKey) selected.delete(name); else selected.add(name);
+    hint.textContent = ev.altKey ? "Removed " + name : "Selected " + name + " · ⌥-click to subtract";
+    drawSel();
+  }, reduced ? 0 : 450);
+});
+function drawSel() {
+  $("#selOv").innerHTML = [...selected].map((n) => `<path d="M${REGIONS[n].pts.map((p) => p.join(" ")).join(" L")}Z"/>`).join("");
+  $("#selList").innerHTML = selected.size
+    ? [...selected].map((n) => `<div class="item"><i></i>${n[0].toUpperCase() + n.slice(1)}<span>AI outline · edge-snapped</span></div>`).join("")
+    : '<div class="empty">Selections (0)</div>';
+}
+
+// Culling demo
+const SHOTS = [
+  { h: 0, r: 4 }, { h: 0, r: 5, pick: 1 }, { h: 0, blur: 3, rej: "BLUR" }, { h: 40, r: 3 },
+  { h: 160, r: 4, pick: 1 }, { h: 160, r: 3 }, { h: -30, b: 1.9, rej: "CLIPPED" }, { h: 200, r: 2 },
+  { h: 280, r: 5, pick: 1 }, { h: 280, blur: 2.5, rej: "BLUR" }, { h: 90, r: 3 }, { h: 320, b: 0.25, rej: "BLACK" },
+];
+const cgrid = $("#cgrid");
+cgrid.innerHTML = SHOTS.map((s) => `<div class="cell"><svg viewBox="0 0 600 400" preserveAspectRatio="xMidYMid slice" style="filter:hue-rotate(${s.h}deg)${s.blur ? ` blur(${s.blur}px)` : ""}${s.b ? ` brightness(${s.b})` : ""}"><use href="#scene"/></svg><span class="badge"></span><span class="stars"></span></div>`).join("");
+let culling = false;
+$("#cullBtn").onclick = async () => {
+  if (culling) return;
+  culling = true;
+  const cells = $$(".cell", cgrid);
+  cells.forEach((c) => { c.className = "cell"; $(".badge", c).textContent = ""; $(".stars", c).textContent = ""; });
+  let picks = 0, rejects = 0;
+  for (let i = 0; i < cells.length; i++) {
+    const c = cells[i], s = SHOTS[i];
+    c.classList.add("scan");
+    await new Promise((r) => setTimeout(r, reduced ? 0 : 260));
+    c.classList.remove("scan");
+    c.classList.add("done");
+    if (s.rej) { c.classList.add("reject"); $(".badge", c).textContent = "✕ " + s.rej; rejects++; }
+    else {
+      $(".stars", c).textContent = "★".repeat(s.r) + "☆".repeat(5 - s.r);
+      if (s.pick) { c.classList.add("pick"); $(".badge", c).textContent = "★ PICK"; picks++; }
+    }
+    $("#cullProg").style.width = ((i + 1) / cells.length) * 100 + "%";
+    $("#cullSum").textContent = `${i + 1} / ${cells.length} measured · ${picks} picks · ${rejects} rejects`;
+  }
+  $("#cullSum").textContent = `Done · ${picks} picks (best of each burst) · ${rejects} rejects · keywords added`;
+  culling = false;
+};
+
+// mini grids in the shot list
+$$(".mini-grid").forEach((g, gi) => {
+  const n = g.style.gridTemplateColumns.includes("5") ? 15 : 9;
+  g.innerHTML = Array.from({ length: n }, (_, i) => `<svg viewBox="0 0 600 400" preserveAspectRatio="xMidYMid slice" style="width:100%;aspect-ratio:3/2;border-radius:2px;filter:hue-rotate(${(i * 47 + gi * 20) % 360}deg)${i % 7 === 3 ? ";opacity:.4" : ""}"><use href="#scene"/></svg>`).join("");
+});
+
+// MCP terminal
+const SCRIPT = [
+  ['<span class="p">›</span> ', "cull the Iceland 2026 shoot, grade the picks for landscape, and export them for Immich", 18],
+  ["\n\n", "", 0],
+  ['<span class="t">⏺ openlight · catalog_query</span>(folder: "Iceland 2026")\n', "", 400],
+  ['  <span class="ok">⎿</span> 486 photos\n\n', "", 300],
+  ['<span class="t">⏺ openlight · auto_run</span>(function: "catalog_culling", reject_blurry: true)\n', "", 500],
+  ['  <span class="ok">⎿</span> 61 picks · 42 rejected (blur, clipping) · 383 rated 1–5★\n\n', "", 900],
+  ['<span class="t">⏺ openlight · develop_auto</span>(profile: "Landscape", filter: { flag: "pick" })\n', "", 500],
+  ['  <span class="ok">⎿</span> 61 photos edited · 61 history steps\n\n', "", 800],
+  ['<span class="t">⏺ openlight · photo_inspect</span>(id: 1287) <span class="c"># check one result</span>\n', "", 500],
+  ['  <span class="ok">⎿</span> highlights clipped 0.1% · horizon level ✓\n\n', "", 500],
+  ['<span class="t">⏺ openlight · batch_export</span>(format: "jpeg", color: "display_p3", to: "immich")\n', "", 500],
+  ['  <span class="ok">⎿</span> uploaded 61 · stacked on originals\n\n', "", 1000],
+  ['<span class="a">Done.</span> 61 graded picks are in Immich. Every edit is undoable in Develop.\n', "", 0],
+];
+let termRun = 0;
+async function runTerm() {
+  const run = ++termRun, out = $("#termOut");
+  out.innerHTML = "";
+  const wait = (ms) => new Promise((r) => setTimeout(r, reduced ? 0 : ms));
+  let html = "";
+  for (const [pre, typed, speed] of SCRIPT) {
+    if (run !== termRun) return;
+    html += pre;
+    if (typed) {
+      for (let i = 1; i <= typed.length; i++) {
+        if (run !== termRun) return;
+        out.innerHTML = html + typed.slice(0, i) + '<span class="cursor"></span>';
+        await wait(speed);
+      }
+      html += typed;
+    } else await wait(speed);
+    out.innerHTML = html + '<span class="cursor"></span>';
+  }
+}
+$("#termReplay").onclick = runTerm;
+</script>
+</body>
+</html>
