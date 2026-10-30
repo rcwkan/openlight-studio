@@ -57,6 +57,27 @@ export function Panel({ title, children, open: initial = true, right }: { title:
   );
 }
 
+/** Colours that tell sections and functions apart, picked to keep 3:1 against both the light and the dark
+ *  backgrounds (icons, swatches, bars); `soft` tints a row behind normal text. Whole class names, for Tailwind. */
+export const HUE = {
+  blue: { text: "text-blue-500", bg: "bg-blue-500", soft: "bg-blue-500/15", border: "border-blue-500" },
+  amber: { text: "text-amber-600", bg: "bg-amber-600", soft: "bg-amber-600/15", border: "border-amber-600" },
+  violet: { text: "text-violet-500", bg: "bg-violet-500", soft: "bg-violet-500/15", border: "border-violet-500" },
+  emerald: { text: "text-emerald-600", bg: "bg-emerald-600", soft: "bg-emerald-600/15", border: "border-emerald-600" },
+  rose: { text: "text-rose-500", bg: "bg-rose-500", soft: "bg-rose-500/15", border: "border-rose-500" },
+  cyan: { text: "text-cyan-600", bg: "bg-cyan-600", soft: "bg-cyan-600/15", border: "border-cyan-600" },
+};
+export type Hue = keyof typeof HUE;
+
+/** An outline icon on a 24-unit grid (`d` is its path), drawn in the text colour. */
+export function Icon({ d, className = "h-3.5 w-3.5" }: { d: string; className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" className={`shrink-0 ${className}`} fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d={d} />
+    </svg>
+  );
+}
+
 export function Btn({ children, onClick, active, disabled, title, className = "" }: { children: ReactNode; onClick?: () => void; active?: boolean; disabled?: boolean; title?: string; className?: string }) {
   return (
     <button

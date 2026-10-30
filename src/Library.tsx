@@ -1,9 +1,9 @@
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import { ReactNode, useEffect, useRef, useState } from "react";
+import { ReactNode, useEffect, useId, useRef, useState } from "react";
 import { api, AutoFunction, CloudAccount, CloudFolder, Culling, Filter, flagName, FolderLoading, FolderProgress, ImmichAlbum, JobProgress, LABEL_COLORS, LABELS, NetworkDrive, Photo, Settings, Source, thumbUrl } from "./api";
 import { AutoView, FUNCS } from "./AutoView";
-import { Btn, Panel, Stars } from "./controls";
+import { Btn, HUE, Hue, Icon, Panel, Stars } from "./controls";
 import { CloudBrowser } from "./Storage";
 
 export type SelectMods = { shift: boolean; toggle: boolean };
@@ -55,30 +55,23 @@ type Props = {
   onSelectAutoFn?: (fn: AutoFunction | null) => void;
   jobs?: Record<string, JobProgress>;
   onAiSettings?: () => void;
+  workingIds?: number[];
+  busyAiIds?: number[];
+  onAddWorking?: (ids: number[]) => void;
 };
 
 const short = (folder: string) => folder.split(/[\\/]/).slice(-2).join("/");
 
 export function Library(p: Props) {
+  // The right panel shows Info (autoFn null) or an auto function; `panel` false folds it away.
   const [internalAutoFn, setInternalAutoFn] = useState<AutoFunction | null>(null);
   const autoFn = p.autoFn !== undefined ? p.autoFn : internalAutoFn;
   const setAutoFn = (fn: AutoFunction | null) => {
     if (p.onSelectAutoFn) p.onSelectAutoFn(fn);
     else setInternalAutoFn(fn);
   };
-  const [showAutoMenu, setShowAutoMenu] = useState(false);
-  const autoMenuRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!showAutoMenu) return;
-    const clickOutside = (e: MouseEvent) => {
-      if (autoMenuRef.current && !autoMenuRef.current.contains(e.target as Node)) {
-        setShowAutoMenu(false);
-      }
-    };
-    document.addEventListener("mousedown", clickOutside);
-    return () => document.removeEventListener("mousedown", clickOutside);
-  }, [showAutoMenu]);
+  const [panel, setPanel] = useState(true);
+  const openPanel = (fn: AutoFunction | null) => (setAutoFn(fn), setPanel(true));
 
   const [size, setSize] = useState(170);
   const [albums, setAlbums] = useState<ImmichAlbum[]>([]);
@@ -109,7 +102,7 @@ export function Library(p: Props) {
   const adobeDir = `${remoteDir}${sep}Adobe Cloud Photos`;
   const under = (folder: string, root: string) => folder === root || folder.startsWith(root.replace(/[\\/]+$/, "") + sep);
   const count = (root: string) => p.folders.filter(([folder]) => under(folder, root)).reduce((n, [, k]) => n + k, 0);
-  // network drives are listed under their own heading
+  // network drives are listed after the local folders
   const local = p.folders.filter(([folder]) => !under(folder, remoteDir) && !drives.some((d) => under(folder, d.path)));
   const show = (patch: Filter) => p.setFilter({ ...f, folder: null, immich_album: null, ids: null, view: null, ...patch });
   const gridRef = useRef<HTMLDivElement>(null);
@@ -124,68 +117,86 @@ export function Library(p: Props) {
     io.observe(endRef.current);
     return () => io.disconnect();
   }, [p.nextPage, p.photos.length]);
-  const selectFolder = <T,>(action: () => T) => {
-    setAutoFn(null);
-    return action();
-  };
-
-  const side = "px-1 text-neutral-500 hover:text-white";
+  const side = "px-1 text-neutral-500 hover:text-neutral-100";
   const manage = (source: Source) => (
     <button title="Connection" className={side} onClick={() => p.onConnect(source)}>
       ⋯
     </button>
   );
+  // Photo services: the connected ones show under Cloud & services, the others are offered by its ＋.
+  // All but Immich are synced into a folder of the catalog: one row each, with its pick or sync.
+  const services: { source: Source; label: string; hint: string; on: boolean; dir?: string; sync?: [string, string, (() => void) | undefined] }[] = [
+    { source: "immich", label: "Immich", hint: "Browse the albums on your Immich server", on: !!immichUrl },
+    { source: "google", label: "Google Photos", hint: "Pick photos to download and edit", on: !!p.settings?.google_client_id, dir: googleDir, sync: ["＋", "Pick photos…", p.onPickGoogle] },
+    { source: "apple", label: "Apple iCloud Photos", hint: "Your Photos library or iCloud folder", on: !!p.settings?.apple_photos_path, dir: appleDir, sync: ["↻", "Sync iCloud Photos", p.onSyncApple] },
+    { source: "amazon", label: "Amazon Photos", hint: "Your Amazon Photos sync folder", on: !!p.settings?.amazon_photos_path, dir: amazonDir, sync: ["↻", "Sync Amazon Photos", p.onSyncAmazon] },
+    { source: "adobe", label: "Adobe Cloud Photos", hint: "Creative Cloud Files or Lightroom", on: !!p.settings?.adobe_cloud_path, dir: adobeDir, sync: ["↻", "Sync Adobe Cloud", p.onSyncAdobe] },
+  ];
+  const running = (fn: AutoFunction) => Object.values(p.jobs ?? {}).some((j) => j.job.startsWith(`${fn}-`) || (fn === "cull" && j.job.startsWith("on-import-")));
+  // A button of the right bar, in its function's colour (Info: the theme's accent); choosing the one that is
+  // open folds the panel away.
+  const rail = (fn: AutoFunction | null, d: string, label: string, title: string, h?: (typeof HUE)[Hue], busy = false) => {
+    const on = panel && autoFn === fn;
+    return (
+      <button
+        key={label}
+        title={title}
+        aria-pressed={on}
+        onClick={() => (on ? setPanel(false) : openPanel(fn))}
+        className={`relative flex w-12 flex-col items-center gap-1 rounded-md py-1.5 text-[9px] transition-colors ${
+          on ? `${h?.soft ?? "bg-[var(--theme-accent-subtle)]"} font-medium text-neutral-100` : "text-neutral-500 hover:bg-neutral-800 hover:text-neutral-200"
+        }`}
+      >
+        {on && <span className={`absolute -left-1 bottom-2 top-2 w-0.5 rounded-full ${h?.bg ?? "bg-[var(--theme-accent)]"}`} />}
+        <span className={h?.text ?? "text-[var(--theme-accent,#0ea5e9)]"}>
+          <Icon d={d} className="h-4 w-4" />
+        </span>
+        {label}
+        {busy && <span className={`absolute right-1.5 top-1.5 h-1.5 w-1.5 animate-pulse rounded-full ${h?.bg ?? "bg-sky-400"}`} />}
+      </button>
+    );
+  };
+  // Photos shown from an auto function's result carry its colour in the toolbar
+  const resultTag = f.view?.startsWith("auto:") ? f.view.slice(5) : "";
+  const resultFn = FUNCS.find((x) => x.id === resultTag || x.title.toLowerCase().includes(resultTag.toLowerCase())) ?? FUNCS[0];
   return (
     <div className="flex min-h-0 flex-1">
       <aside className="flex w-56 shrink-0 flex-col overflow-y-auto border-r border-neutral-800 bg-neutral-900">
-        <Panel title={<span className="flex items-center gap-1.5"><span className="text-sky-400">❖</span> Library</span>}>
+        <Panel title={<Heading label="Library" hue="blue" />}>
           <FolderRow
             label="All Photographs"
-            active={!f.folder && !f.immich_album && !f.ids && !f.in_bin && f.view !== "bin" && !p.loadingFolder && !autoFn}
+            hue="blue"
+            icon={<Icon d={ICONS.photos} />}
+            active={!f.folder && !f.immich_album && !f.ids && !f.in_bin && f.view !== "bin" && !p.loadingFolder}
             loading={p.loadingFolder?.viewId === "all"}
             progress={p.loadingFolder?.viewId === "all" ? p.loadingFolder.progress : undefined}
-            onClick={() => selectFolder(() => (p.onShowAll ? p.onShowAll() : show({})))}
+            onClick={() => (p.onShowAll ? p.onShowAll() : show({}))}
           />
           <FolderRow
             label="Bin"
-            icon={<span className="text-neutral-400 group-hover:text-red-400">🗑️</span>}
-            count={p.binCount}
-            active={(f.view === "bin" || f.in_bin === true) && !autoFn}
+            hue="rose"
+            icon={<Icon d={ICONS.trash} />}
+            count={p.binCount || undefined}
+            active={f.view === "bin" || f.in_bin === true}
             loading={p.loadingFolder?.viewId === "bin"}
-            onClick={() => selectFolder(p.onOpenBin)}
+            onClick={p.onOpenBin}
             title="Recycle bin for deleted photos"
           />
         </Panel>
 
-        <Panel title={<span className="flex items-center gap-1.5"><span className="text-amber-400">⚡</span> Auto Functions</span>}>
-          {FUNCS.map((fnItem) => {
-            const isRunning = Boolean(
-              (p.jobs && Object.values(p.jobs).some((j) => j.job.startsWith(`${fnItem.id}-`))) ||
-              (fnItem.id === "cull" && p.jobs && Object.values(p.jobs).some((j) => j.job.startsWith("on-import-")))
-            );
-            return (
-              <FolderRow
-                key={fnItem.id}
-                label={fnItem.title}
-                icon={<span className="text-amber-300 font-mono text-xs">{fnItem.icon}</span>}
-                active={autoFn === fnItem.id}
-                loading={isRunning}
-                onClick={() => setAutoFn(fnItem.id)}
-                title={fnItem.blurb}
-              />
-            );
-          })}
-        </Panel>
-
         <Panel
-          title={<span className="flex items-center gap-1.5"><span className="text-amber-400">📁</span> Folders</span>}
+          title={<Heading label="Folders" hue="amber" />}
           right={
-            <button title="Add a folder" className={side} onClick={p.onAddFolder}>
-              ＋
-            </button>
+            <AddMenu
+              title="Add a folder or a network drive"
+              items={[
+                ["Folder…", "On this computer or an attached disk", p.onAddFolder],
+                ["Network drive…", "A share on a NAS or another computer", p.onStorage],
+              ]}
+            />
           }
         >
-          {local.length === 0 && <p className="text-[11px] text-neutral-500">Add a folder to browse and edit its photos in place.</p>}
+          {local.length === 0 && drives.length === 0 && <p className="text-[11px] text-neutral-500">Add a folder to browse and edit its photos in place.</p>}
           {local.map(([folder, n]) => {
             const isCurLoading = p.loadingFolder?.viewId === `folder:${folder}`;
             return (
@@ -193,287 +204,151 @@ export function Library(p: Props) {
                 key={folder}
                 label={short(folder)}
                 title={folder}
+                hue="amber"
+                icon={<Icon d={ICONS.folder} />}
                 count={n}
-                active={f.folder === folder && !autoFn}
+                active={f.folder === folder}
                 loading={isCurLoading}
                 progress={isCurLoading ? p.loadingFolder?.progress : undefined}
-                onClick={() => selectFolder(() => p.onOpenFolder(folder))}
+                onClick={() => p.onOpenFolder(folder)}
               />
             );
           })}
-        </Panel>
-        <Panel
-          title={<span className="flex items-center gap-1.5"><span className="text-cyan-400">🖧</span> Network drives</span>}
-          right={
-            <button title="Add a network drive" className={side} onClick={p.onStorage}>
-              ＋
-            </button>
-          }
-        >
-          {drives.length === 0 && <p className="text-[11px] text-neutral-500">Add a share on your NAS or another computer to browse it like a folder.</p>}
           {drives.map((d) => {
             const isCurLoading = p.loadingFolder?.viewId === `drive:${d.id}`;
             return (
               <FolderRow
                 key={d.id}
                 label={d.name}
+                hue="amber"
                 title={`${d.url ? `${d.url} → ` : ""}${d.path}${online[d.id] ? "" : " (not connected: opening it connects it)"}`}
-                icon={<span className={`h-1.5 w-1.5 shrink-0 rounded-full ${online[d.id] ? "bg-emerald-500" : "bg-neutral-600"}`} />}
+                icon={
+                  <span className="relative flex">
+                    <Icon d={ICONS.drive} />
+                    <span className={`absolute -bottom-px -right-px h-1.5 w-1.5 rounded-full ring-1 ring-neutral-900 ${online[d.id] ? "bg-emerald-500" : "bg-neutral-600"}`} />
+                  </span>
+                }
                 count={count(d.path) || undefined}
-                active={f.view === `drive:${d.id}` && !autoFn}
+                active={f.view === `drive:${d.id}`}
                 loading={isCurLoading}
                 progress={isCurLoading ? p.loadingFolder?.progress : undefined}
-                onClick={() => selectFolder(() => p.onOpenDrive(d).then(checkDrives))}
+                onClick={() => p.onOpenDrive(d).then(checkDrives)}
               />
             );
           })}
         </Panel>
+
         <Panel
-          title={<span className="flex items-center gap-1.5"><span className="text-indigo-400">⚡</span> Cloud storage</span>}
+          title={<Heading label="Cloud & services" hue="violet" />}
           right={
-            <button title="Connect cloud storage" className={side} onClick={p.onStorage}>
-              ＋
-            </button>
+            <AddMenu
+              title="Connect cloud storage or a photo service"
+              items={[
+                ["Cloud storage…", "Dropbox, OneDrive, S3, WebDAV or Nextcloud", p.onStorage],
+                ...services.filter((s) => !s.on).map((s): MenuItem => [`${s.label}…`, s.hint, () => p.onConnect(s.source)]),
+              ]}
+            />
           }
         >
-          {clouds.length === 0 && <p className="text-[11px] text-neutral-500">Connect Nextcloud, Dropbox, OneDrive, S3 or WebDAV storage to bring in its photos.</p>}
+          {!clouds.length && !services.some((s) => s.on) && <p className="text-[11px] text-neutral-500">Use ＋ to connect Immich, Google Photos, iCloud, Dropbox and more.</p>}
+          {services
+            .filter((s) => s.on && s.dir)
+            .map((s) => {
+              const dir = s.dir!;
+              const [glyph, what, sync] = s.sync!;
+              const isCurLoading = p.loadingFolder?.viewId === s.source || p.loadingFolder?.viewId === `folder:${dir}`;
+              return (
+                <FolderRow
+                  key={s.source}
+                  label={s.label}
+                  hue="violet"
+                  icon={<Icon d={ICONS.cloud} />}
+                  count={p.folders.find(([d]) => d === dir)?.[1] ?? 0}
+                  active={f.folder === dir}
+                  loading={isCurLoading}
+                  progress={isCurLoading ? p.loadingFolder?.progress : undefined}
+                  onClick={() => p.onOpenFolder(dir)}
+                  actions={
+                    <>
+                      <button title={what} className={side} onClick={sync}>
+                        {glyph}
+                      </button>
+                      {manage(s.source)}
+                    </>
+                  }
+                />
+              );
+            })}
+          {immichUrl && (
+            <>
+              <SubHead label="Immich">{manage("immich")}</SubHead>
+              <FolderRow
+                indent
+                label="Favorites"
+                hue="violet"
+                icon={<Icon d={ICONS.star} />}
+                active={f.view === "immich:"}
+                loading={p.loadingFolder?.viewId === "immich:"}
+                progress={p.loadingFolder?.viewId === "immich:" ? p.loadingFolder.progress : undefined}
+                onClick={() => p.onImmich(null, "Favorites")}
+              />
+              {albums.map((a) => {
+                const isCurLoading = p.loadingFolder?.viewId === `immich:${a.id}`;
+                return (
+                  <FolderRow
+                    indent
+                    key={a.id}
+                    label={a.name}
+                    hue="violet"
+                    icon={<Icon d={ICONS.album} />}
+                    count={a.count}
+                    active={f.view === `immich:${a.id}`}
+                    loading={isCurLoading}
+                    progress={isCurLoading ? p.loadingFolder?.progress : undefined}
+                    onClick={() => p.onImmich(a.id, a.name)}
+                  />
+                );
+              })}
+            </>
+          )}
           {clouds.map((a) => (
-            <div key={a.id} className="mb-1">
-              <div className="flex items-center justify-between pl-2 text-[10px] uppercase tracking-wider text-neutral-500">
-                <span className="truncate">{a.name}</span>
+            <div key={a.id}>
+              <SubHead label={a.name}>
                 <button title={`Download a folder of ${a.name}`} className={side} onClick={() => setBrowse(a)}>
                   ＋
                 </button>
-              </div>
+              </SubHead>
               {cloudDirs
                 .filter((c) => c.id === a.id)
                 .map((c) => {
                   const isCurLoading = p.loadingFolder?.viewId === `cloud:${a.id}:${c.path}`;
                   return (
                     <FolderRow
+                      indent
                       key={c.path}
                       label={c.path || "All files"}
+                      hue="violet"
                       title={`${a.name} › ${c.path}`}
+                      icon={<Icon d={ICONS.folder} />}
                       count={count(c.local)}
-                      active={f.view === `cloud:${a.id}:${c.path}` && !autoFn}
+                      active={f.view === `cloud:${a.id}:${c.path}`}
                       loading={isCurLoading}
                       progress={isCurLoading ? p.loadingFolder?.progress : undefined}
-                      onClick={() => selectFolder(() => p.onOpenCloud(c, a.name))}
+                      onClick={() => p.onOpenCloud(c, a.name)}
                     />
                   );
                 })}
               {!a.folders.length && (
-                <button className="px-2 text-[11px] text-sky-400 hover:text-sky-300" onClick={() => setBrowse(a)}>
+                <button className="pl-4 text-[11px] text-sky-400 hover:text-sky-300" onClick={() => setBrowse(a)}>
                   Choose a folder…
                 </button>
               )}
             </div>
           ))}
         </Panel>
-        <Panel title={<span className="flex items-center gap-1.5"><span className="text-purple-400">🔮</span> Immich</span>} right={immichUrl && manage("immich")}>
-          {immichUrl ? (
-            <>
-              <FolderRow
-                label="★ Favorites"
-                active={f.view === "immich:" && !autoFn}
-                loading={p.loadingFolder?.viewId === "immich:"}
-                progress={p.loadingFolder?.viewId === "immich:" ? p.loadingFolder.progress : undefined}
-                onClick={() => selectFolder(() => p.onImmich(null, "Favorites"))}
-              />
-              {albums.map((a) => {
-                const isCurLoading = p.loadingFolder?.viewId === `immich:${a.id}`;
-                return (
-                  <FolderRow
-                    key={a.id}
-                    label={a.name}
-                    count={a.count}
-                    active={f.view === `immich:${a.id}` && !autoFn}
-                    loading={isCurLoading}
-                    progress={isCurLoading ? p.loadingFolder?.progress : undefined}
-                    onClick={() => selectFolder(() => p.onImmich(a.id, a.name))}
-                  />
-                );
-              })}
-            </>
-          ) : (
-            <Btn className="w-full" onClick={() => p.onConnect("immich")}>
-              Connect Immich…
-            </Btn>
-          )}
-        </Panel>
-        <Panel title={<span className="flex items-center gap-1.5"><span className="text-blue-400">🌐</span> Google Photos</span>} right={p.settings?.google_client_id && manage("google")}>
-          {p.settings?.google_client_id ? (
-            <>
-              <Btn className="mb-2 w-full" onClick={p.onPickGoogle}>
-                Pick photos…
-              </Btn>
-              <FolderRow
-                label="Picked photos"
-                count={p.folders.find(([d]) => d === googleDir)?.[1] ?? 0}
-                active={f.folder === googleDir && !autoFn}
-                loading={p.loadingFolder?.viewId === "google" || p.loadingFolder?.viewId === `folder:${googleDir}`}
-                progress={
-                  p.loadingFolder?.viewId === "google" || p.loadingFolder?.viewId === `folder:${googleDir}`
-                    ? p.loadingFolder.progress
-                    : undefined
-                }
-                onClick={() => selectFolder(() => (p.onOpenFolder ? p.onOpenFolder(googleDir) : show({ folder: googleDir })))}
-              />
-            </>
-          ) : (
-            <Btn className="w-full" onClick={() => p.onConnect("google")}>
-              Connect Google Photos…
-            </Btn>
-          )}
-        </Panel>
-        <Panel title={<span className="flex items-center gap-1.5"><span className="text-sky-300">☁️</span> Apple iCloud Photos</span>} right={p.settings?.apple_photos_path && manage("apple")}>
-          {p.settings?.apple_photos_path ? (
-            <>
-              <Btn className="mb-2 w-full" onClick={p.onSyncApple}>
-                Sync iCloud Photos…
-              </Btn>
-              <FolderRow
-                label="iCloud Photos"
-                count={p.folders.find(([d]) => d === appleDir)?.[1] ?? 0}
-                active={f.folder === appleDir && !autoFn}
-                loading={p.loadingFolder?.viewId === "apple" || p.loadingFolder?.viewId === `folder:${appleDir}`}
-                progress={
-                  p.loadingFolder?.viewId === "apple" || p.loadingFolder?.viewId === `folder:${appleDir}`
-                    ? p.loadingFolder.progress
-                    : undefined
-                }
-                onClick={() => selectFolder(() => (p.onOpenFolder ? p.onOpenFolder(appleDir) : show({ folder: appleDir })))}
-              />
-            </>
-          ) : (
-            <Btn className="w-full" onClick={() => p.onConnect("apple")}>
-              Connect Apple Photos…
-            </Btn>
-          )}
-        </Panel>
-        <Panel title={<span className="flex items-center gap-1.5"><span className="text-amber-500">📦</span> Amazon Photos</span>} right={p.settings?.amazon_photos_path && manage("amazon")}>
-          {p.settings?.amazon_photos_path ? (
-            <>
-              <Btn className="mb-2 w-full" onClick={p.onSyncAmazon}>
-                Sync Amazon Photos…
-              </Btn>
-              <FolderRow
-                label="Amazon Photos"
-                count={p.folders.find(([d]) => d === amazonDir)?.[1] ?? 0}
-                active={f.folder === amazonDir && !autoFn}
-                loading={p.loadingFolder?.viewId === "amazon" || p.loadingFolder?.viewId === `folder:${amazonDir}`}
-                progress={
-                  p.loadingFolder?.viewId === "amazon" || p.loadingFolder?.viewId === `folder:${amazonDir}`
-                    ? p.loadingFolder.progress
-                    : undefined
-                }
-                onClick={() => selectFolder(() => (p.onOpenFolder ? p.onOpenFolder(amazonDir) : show({ folder: amazonDir })))}
-              />
-            </>
-          ) : (
-            <Btn className="w-full" onClick={() => p.onConnect("amazon")}>
-              Connect Amazon Photos…
-            </Btn>
-          )}
-        </Panel>
-        <Panel title={<span className="flex items-center gap-1.5"><span className="text-rose-400">🎨</span> Adobe Cloud Photos</span>} right={p.settings?.adobe_cloud_path && manage("adobe")}>
-          {p.settings?.adobe_cloud_path ? (
-            <>
-              <Btn className="mb-2 w-full" onClick={p.onSyncAdobe}>
-                Sync Adobe Cloud…
-              </Btn>
-              <FolderRow
-                label="Adobe Cloud Photos"
-                count={p.folders.find(([d]) => d === adobeDir)?.[1] ?? 0}
-                active={f.folder === adobeDir && !autoFn}
-                loading={p.loadingFolder?.viewId === "adobe" || p.loadingFolder?.viewId === `folder:${adobeDir}`}
-                progress={
-                  p.loadingFolder?.viewId === "adobe" || p.loadingFolder?.viewId === `folder:${adobeDir}`
-                    ? p.loadingFolder.progress
-                    : undefined
-                }
-                onClick={() => selectFolder(() => (p.onOpenFolder ? p.onOpenFolder(adobeDir) : show({ folder: adobeDir })))}
-              />
-            </>
-          ) : (
-            <Btn className="w-full" onClick={() => p.onConnect("adobe")}>
-              Connect Adobe Cloud…
-            </Btn>
-          )}
-        </Panel>
       </aside>
 
       <main className="flex min-w-0 flex-1 flex-col">
-        {/* Auto Sub-function View */}
-        <div className={autoFn ? "flex min-h-0 flex-1 flex-col bg-neutral-950" : "hidden"}>
-          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-neutral-800 bg-neutral-900 px-4 py-2 text-[11px]">
-            <div className="flex items-center gap-2 overflow-x-auto">
-              <button
-                onClick={() => setAutoFn(null)}
-                className="flex items-center gap-1.5 rounded bg-neutral-800 px-2.5 py-1 text-[11px] font-medium text-neutral-200 hover:bg-neutral-700 hover:text-white transition-colors cursor-pointer"
-                title="Return to the photo grid"
-              >
-                <span>←</span>
-                <span>Photos Grid</span>
-              </button>
-              <div className="h-4 w-px bg-neutral-800" />
-              <span className="text-[10px] font-semibold uppercase tracking-wider text-neutral-500 mr-1">
-                Auto Functions:
-              </span>
-              {FUNCS.map((f) => {
-                const isRunning = Boolean(
-                  (p.jobs && Object.values(p.jobs).some((j) => j.job.startsWith(`${f.id}-`))) ||
-                  (f.id === "cull" && p.jobs && Object.values(p.jobs).some((j) => j.job.startsWith("on-import-")))
-                );
-                return (
-                  <button
-                    key={f.id}
-                    onClick={() => setAutoFn(f.id)}
-                    className={`flex items-center gap-1.5 rounded px-2.5 py-1 text-[11px] font-medium transition-colors cursor-pointer ${
-                      autoFn === f.id
-                        ? "bg-sky-600 text-white shadow-xs font-semibold"
-                        : "text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200"
-                    }`}
-                  >
-                    <span className={autoFn === f.id ? "text-white" : "text-amber-300"}>{f.icon}</span>
-                    <span>{f.title}</span>
-                    {isRunning && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-sky-300" />}
-                  </button>
-                );
-              })}
-            </div>
-            <button
-              onClick={p.onStorage}
-              className="text-[10px] text-neutral-400 hover:text-neutral-200 cursor-pointer"
-            >
-              <span className={p.settings?.auto.on_import.enabled ? "text-emerald-400" : "text-neutral-500"}>●</span> Auto Catalog & Culling on new photos:{" "}
-              {p.settings?.auto.on_import.enabled ? "on" : "off"}
-            </button>
-          </div>
-
-          {p.settings && (
-            <AutoView
-              settings={p.settings}
-              setSettings={p.setSettings ?? (() => {})}
-              selected={p.selected}
-              view={p.photos}
-              jobs={p.jobs ?? {}}
-              onShow={(ids, label) => {
-                p.setFilter({ ...p.filter, ids, view: `auto:${label}`, folder: null, immich_album: null });
-                setAutoFn(null);
-              }}
-              onAiSettings={p.onAiSettings ?? (() => {})}
-              onStorage={p.onStorage}
-              fn={autoFn ?? "cull"}
-              onFnChange={setAutoFn}
-              hideSidebar
-              onBackToGrid={() => setAutoFn(null)}
-            />
-          )}
-        </div>
-
-        {/* Normal Grid & Filters View */}
-        <div className={!autoFn ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
           <div className="flex flex-wrap items-center gap-2 border-b border-neutral-800 bg-neutral-900 px-3 py-2 text-[11px]">
           <input
             className="w-56 rounded bg-neutral-800 px-2 py-1 outline-none placeholder:text-neutral-500 focus:ring-1 focus:ring-sky-600"
@@ -506,44 +381,20 @@ export function Library(p: Props) {
               </option>
             ))}
           </select>
-          <select
-            className="rounded bg-neutral-800 px-1 py-1"
-            value={f.copy_type || (f.edited == null ? "" : f.edited ? "edited" : "unedited_original")}
-            onChange={(e) => {
-              const val = e.target.value;
-              if (!val) {
-                p.setFilter({ ...f, copy_type: null, edited: null });
-              } else if (val === "edited") {
-                p.setFilter({ ...f, copy_type: "edited", edited: null });
-              } else if (val === "original") {
-                p.setFilter({ ...f, copy_type: "original", edited: null });
-              } else if (val === "copy") {
-                p.setFilter({ ...f, copy_type: "copy", edited: null });
-              } else if (val === "unedited_original") {
-                p.setFilter({ ...f, copy_type: "unedited_original", edited: null });
-              }
-            }}
-          >
-            <option value="">All photos</option>
-            <option value="edited">Edited photos</option>
-            <option value="original">Original photos</option>
-            <option value="copy">Save new edited photos</option>
-            <option value="unedited_original">Untouched originals</option>
-          </select>
 
           <button
             onClick={() => setShowAdvFilter(!showAdvFilter)}
             className={`flex items-center gap-1.5 rounded px-2 py-1 text-[11px] font-medium transition-colors ${
               showAdvFilter || hasAdvFilters
-                ? "bg-sky-600/30 text-sky-200 border border-sky-500/50 hover:bg-sky-600/40"
+                ? "bg-[var(--theme-accent-subtle)] text-[var(--theme-accent)] border border-[var(--theme-accent)]"
                 : "bg-neutral-800 text-neutral-300 border border-neutral-700/60 hover:bg-neutral-700 hover:text-white"
             }`}
-            title="Toggle advanced filter drawer"
+            title="More filters: photo type and orientation"
           >
             <svg className="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor">
               <path fillRule="evenodd" d="M2.628 1.601C5.028 1.206 7.49 1 10 1s4.972.206 7.372.601a.75.75 0 01.628.74v2.288a2.25 2.25 0 01-.659 1.59l-4.682 4.683a2.25 2.25 0 00-.659 1.59v3.037c0 .684-.31 1.33-.844 1.757l-1.937 1.55A.75.75 0 018 18.25v-5.757a2.25 2.25 0 00-.659-1.591L2.659 6.22A2.25 2.25 0 012 4.629V2.34a.75.75 0 01.628-.74z" clipRule="evenodd" />
             </svg>
-            <span>Adv Filter</span>
+            <span>Filters</span>
             {hasAdvFilters && (
               <span className="flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-sky-500 px-1 text-[9px] font-bold text-black">
                 {advFilterCount}
@@ -555,67 +406,27 @@ export function Library(p: Props) {
           {p.selected.length >= 2 && p.onOpenCompare && (
             <button
               onClick={p.onOpenCompare}
-              className="flex items-center gap-1.5 rounded bg-sky-600/30 px-2.5 py-1 text-[11px] font-semibold text-sky-200 border border-sky-500/50 hover:bg-sky-600/40 hover:text-white shadow-xs transition-colors cursor-pointer"
+              className="flex items-center gap-1.5 rounded bg-[var(--theme-accent)] px-2.5 py-1 text-[11px] font-semibold text-[var(--theme-accent-contrast)] hover:bg-[var(--theme-accent-hover)] shadow-xs transition-colors cursor-pointer"
               title="Compare selected photos side-by-side (Shortcut: C)"
             >
               <span>⧉</span> Compare ({p.selected.length})
             </button>
           )}
 
-          <div className="relative" ref={autoMenuRef}>
-            <button
-              onClick={() => setShowAutoMenu((v) => !v)}
-              className={`flex items-center gap-1.5 rounded px-2.5 py-1 text-[11px] font-medium transition-colors cursor-pointer ${
-                showAutoMenu || autoFn
-                  ? "bg-amber-600/30 text-amber-200 border border-amber-500/50 hover:bg-amber-600/40"
-                  : "bg-neutral-800 text-neutral-300 border border-neutral-700/60 hover:bg-neutral-700 hover:text-white"
-              }`}
-              title="Auto functions: culling, batch editing, AI masking, enhance, blur, duplicates"
-            >
-              <span className="text-amber-400">⚡</span>
-              <span>Auto</span>
-              <span className="text-[9px] text-neutral-400">▾</span>
-            </button>
-            {showAutoMenu && (
-              <div className="absolute left-0 top-full z-40 mt-1 w-72 rounded-lg border border-neutral-700 bg-neutral-900 p-1.5 shadow-2xl text-[11px]">
-                <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-neutral-400 border-b border-neutral-800/80 mb-1">
-                  Auto Sub-functions
-                </div>
-                {FUNCS.map((f) => (
-                  <button
-                    key={f.id}
-                    onClick={() => {
-                      setShowAutoMenu(false);
-                      setAutoFn(f.id);
-                    }}
-                    className="flex w-full items-start gap-2.5 rounded-md px-2 py-1.5 text-left text-neutral-200 hover:bg-neutral-800 transition-colors cursor-pointer"
-                  >
-                    <span className="mt-0.5 text-amber-300 text-xs font-mono">{f.icon}</span>
-                    <div className="min-w-0 flex-1">
-                      <div className="font-medium text-neutral-100">{f.title}</div>
-                      <div className="line-clamp-1 text-[10px] text-neutral-400">{f.blurb}</div>
-                    </div>
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-
           {f.ids ? (
-            <span className="ml-auto flex items-center gap-1.5 rounded bg-sky-900/60 px-2 py-0.5 text-sky-100" title="Photos chosen by an auto function">
-              {p.photos.length} from {f.view?.startsWith("auto:") ? f.view.slice(5) : "a result"}
+            <span className={`ml-auto flex items-center gap-1.5 rounded px-2 py-0.5 text-neutral-100 ${HUE[resultFn.hue].soft}`} title="Photos chosen by an auto function">
+              <span className={HUE[resultFn.hue].text}>
+                <Icon d={resultFn.icon} className="h-3 w-3" />
+              </span>
+              {p.photos.length} from {resultTag || "a result"}
               <button
-                title="View in Auto sub-function"
-                className="ml-1 text-[10px] text-sky-300 underline hover:text-white cursor-pointer"
-                onClick={() => {
-                  const tag = f.view?.startsWith("auto:") ? f.view.slice(5) : "";
-                  const match = FUNCS.find((x) => x.id === tag || x.title.toLowerCase().includes(tag.toLowerCase()));
-                  setAutoFn(match ? match.id : "cull");
-                }}
+                title="Open the auto function in the right panel"
+                className="ml-1 text-[10px] text-neutral-400 underline hover:text-neutral-100 cursor-pointer"
+                onClick={() => openPanel(resultFn.id)}
               >
                 view in auto
               </button>
-              <button title="Show all photos again" className="text-sky-300 hover:text-white cursor-pointer" onClick={() => show({})}>
+              <button title="Show all photos again" className="text-neutral-400 hover:text-neutral-100 cursor-pointer" onClick={() => show({})}>
                 ✕
               </button>
             </span>
@@ -634,7 +445,7 @@ export function Library(p: Props) {
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex flex-wrap items-center gap-1.5">
                 <span className="text-[10px] font-semibold uppercase tracking-wider text-neutral-400 mr-1">
-                  Adv Filter:
+                  Type:
                 </span>
                 {[
                   { id: "all", label: "All Photos", desc: "Show all photos in view" },
@@ -846,7 +657,17 @@ export function Library(p: Props) {
             )}
             <div ref={gridRef} className="grid flex-1 content-start gap-2 overflow-y-auto p-3" style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${size}px, 1fr))` }}>
               {p.photos.map((ph) => (
-                <Cell key={ph.id} photo={ph} size={size} selected={p.selected.includes(ph.id)} active={p.active?.id === ph.id} onClick={(m) => p.select(ph.id, m)} onOpen={() => p.openDevelop(ph.id)} />
+                <Cell
+                  key={ph.id}
+                  photo={ph}
+                  size={size}
+                  selected={p.selected.includes(ph.id)}
+                  active={p.active?.id === ph.id}
+                  inWorking={p.workingIds?.includes(ph.id)}
+                  aiBusy={p.busyAiIds?.includes(ph.id)}
+                  onClick={(m) => p.select(ph.id, m)}
+                  onOpen={() => p.openDevelop(ph.id)}
+                />
               ))}
               {p.nextPage && (
                 <div ref={endRef} className="col-span-full py-4 text-center text-[11px] text-neutral-400 flex items-center justify-center gap-2">
@@ -860,14 +681,33 @@ export function Library(p: Props) {
             </div>
           </div>
         )}
-        </div>
       </main>
 
-      {!autoFn && (
-        <aside className="w-72 shrink-0 overflow-y-auto border-l border-neutral-800 bg-neutral-900">
-          {p.active ? <Metadata {...p} photo={p.active} /> : <p className="p-4 text-[11px] text-neutral-500">Select a photo.</p>}
-        </aside>
-      )}
+      <aside className={panel ? "w-72 shrink-0 overflow-y-auto border-l border-neutral-800 bg-neutral-900" : "hidden"}>
+        <div className={autoFn ? "hidden" : ""}>
+          {p.active ? <Metadata {...p} photo={p.active} /> : <p className="p-4 text-[11px] text-neutral-500">Select a photo to rate it, see its details and act on it.</p>}
+        </div>
+        {p.settings && (
+          <div className={autoFn ? "" : "hidden"}>
+            <AutoView
+              settings={p.settings}
+              setSettings={p.setSettings ?? (() => {})}
+              selected={p.selected}
+              view={p.photos}
+              jobs={p.jobs ?? {}}
+              onShow={(ids, label) => p.setFilter({ ...p.filter, ids, view: `auto:${label}`, folder: null, immich_album: null })}
+              onAiSettings={p.onAiSettings ?? (() => {})}
+              onStorage={p.onStorage}
+              fn={autoFn ?? "cull"}
+            />
+          </div>
+        )}
+      </aside>
+      <nav aria-label="Panels" className="flex w-14 shrink-0 flex-col items-center gap-1 overflow-y-auto border-l border-neutral-800 bg-neutral-950 py-2">
+        {rail(null, ICONS.info, "Info", "Rating, details and actions of the photo")}
+        <div className="mt-2 text-[8px] font-semibold uppercase tracking-wider text-neutral-500">Auto</div>
+        {FUNCS.map((x) => rail(x.id, x.icon, x.short, `${x.title}: ${x.blurb}`, HUE[x.hue], running(x.id)))}
+      </nav>
       {browse && (
         <CloudBrowser
           account={browse}
@@ -941,6 +781,9 @@ function FolderRow({
   onClick,
   title,
   icon,
+  actions,
+  indent,
+  hue,
 }: {
   label: string;
   count?: number;
@@ -950,52 +793,166 @@ function FolderRow({
   onClick: () => void;
   title?: string;
   icon?: ReactNode;
+  /** small buttons shown in place of the count on hover or focus */
+  actions?: ReactNode;
+  /** under a sub-heading (an account, Immich) */
+  indent?: boolean;
+  /** its group's colour */
+  hue: Hue;
 }) {
+  const h = HUE[hue];
   return (
     <div
+      role="button"
+      tabIndex={0}
       title={title}
       onClick={onClick}
-      className={`group flex cursor-pointer items-center justify-between gap-1.5 rounded px-2 py-1 text-[11px] transition-all duration-150 ${
-        active
-          ? "bg-neutral-800 text-white font-medium border-l-2 border-[var(--theme-accent,#0ea5e9)] pl-1.5 shadow-xs"
-          : loading
-          ? "bg-neutral-800/80 text-white"
-          : "text-neutral-300 hover:bg-neutral-800/60"
+      onKeyDown={(e) => e.target === e.currentTarget && (e.key === "Enter" || e.key === " ") && (e.preventDefault(), onClick())}
+      className={`group flex cursor-pointer items-center gap-1.5 rounded py-1 pr-1.5 text-[11px] outline-none transition-colors duration-150 focus-visible:ring-1 focus-visible:ring-[var(--theme-accent,#0ea5e9)] ${indent ? "pl-4" : "pl-2"} ${
+        active ? `${h.soft} font-medium text-neutral-100` : loading ? "bg-neutral-800/80 text-neutral-100" : "text-neutral-300 hover:bg-neutral-800/60"
       }`}
     >
       {loading ? (
-        <svg className="h-3 w-3 shrink-0 animate-spin text-[var(--theme-accent,#0ea5e9)]" viewBox="0 0 24 24" fill="none">
+        <svg className={`h-3.5 w-3.5 shrink-0 animate-spin ${h.text}`} viewBox="0 0 24 24" fill="none">
           <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" />
           <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
         </svg>
       ) : (
-        icon
+        <span className={`flex shrink-0 ${h.text}`}>{icon}</span>
       )}
       <span className="flex-1 truncate">{label}</span>
       {loading ? (
-        <span className="flex items-center gap-1 font-mono text-[10px] text-[var(--theme-accent,#0ea5e9)] tabular-nums">
+        <span className={`flex items-center gap-1 font-mono text-[10px] tabular-nums ${h.text}`}>
           {progress && progress.total > 0 ? `${progress.done}/${progress.total}` : count != null ? count : "…"}
         </span>
-      ) : count != null ? (
-        <span className={`tabular-nums ${active ? "text-neutral-300 font-medium" : "text-neutral-500"}`}>{count}</span>
-      ) : null}
+      ) : (
+        <>
+          {count != null && <span className={`tabular-nums ${actions ? "group-focus-within:hidden group-hover:hidden" : ""} ${active ? "text-neutral-300" : "text-neutral-500"}`}>{count}</span>}
+          {actions && (
+            <span className="hidden items-center group-focus-within:flex group-hover:flex" onClick={(e) => e.stopPropagation()}>
+              {actions}
+            </span>
+          )}
+        </>
+      )}
     </div>
   );
 }
 
-export function Cell({ photo, size, selected, active, onClick, onOpen }: { photo: Photo; size: number; selected: boolean; active: boolean; onClick: (m: SelectMods) => void; onOpen: () => void }) {
+/** A panel's heading in its colour: a swatch for a sidebar group, the section's icon given `d`. */
+function Heading({ label, hue, d }: { label: string; hue: Hue; d?: string }) {
+  return (
+    <span className="flex items-center gap-1.5">
+      {d ? <Icon d={d} className={`h-3.5 w-3.5 ${HUE[hue].text}`} /> : <span className={`h-2 w-2 shrink-0 rounded-[3px] ${HUE[hue].bg}`} />}
+      {label}
+    </span>
+  );
+}
+
+/** An account or service inside a sidebar group, with its own small buttons. */
+function SubHead({ label, children }: { label: string; children?: ReactNode }) {
+  return (
+    <div className="mt-2 flex items-center justify-between pl-2 text-[10px] uppercase tracking-wider text-neutral-500">
+      <span className="truncate">{label}</span>
+      {children}
+    </div>
+  );
+}
+
+type MenuItem = [label: string, hint: string, run: () => void];
+
+/** ＋ on a sidebar heading: what can be added there, in a popover that a click outside or Esc closes. */
+function AddMenu({ title, items }: { title: string; items: MenuItem[] }) {
+  const id = useId();
+  const menu = useRef<HTMLDivElement>(null);
+  return (
+    <>
+      <button
+        title={title}
+        popoverTarget={id}
+        className="px-1 text-neutral-500 hover:text-neutral-100"
+        // runs before the popover opens: under the button, kept inside the window
+        onClick={(e) => {
+          const r = e.currentTarget.getBoundingClientRect();
+          Object.assign(menu.current!.style, { top: `${r.bottom + 4}px`, left: `${Math.max(8, r.right - 240)}px` });
+        }}
+      >
+        ＋
+      </button>
+      <div id={id} ref={menu} popover="auto" className="inset-auto m-0 w-60 rounded-lg border border-neutral-700 bg-neutral-900 p-1 text-[11px] font-normal normal-case tracking-normal text-neutral-200 shadow-2xl">
+        {items.map(([label, hint, run]) => (
+          <button key={label} className="flex w-full flex-col items-start rounded-md px-2 py-1.5 text-left hover:bg-neutral-800" onClick={() => (menu.current!.hidePopover(), run())}>
+            <span className="font-medium text-neutral-100">{label}</span>
+            <span className="text-[10px] text-neutral-500">{hint}</span>
+          </button>
+        ))}
+      </div>
+    </>
+  );
+}
+
+/** Sidebar and right bar icons (see Icon) */
+const ICONS = {
+  photos: "M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z M3 16l5-5 4 4 3-3 6 6 M16 7.5a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3z",
+  trash: "M4 7h16 M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2 M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12 M10 11v6 M14 11v6",
+  folder: "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z",
+  drive: "M3 13l3-8h12l3 8 M3 13h18v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z M7 16.5h2",
+  cloud: "M7 18a4 4 0 0 1-.6-7.95A6 6 0 0 1 18 9.5a4.25 4.25 0 0 1-.5 8.5z",
+  star: "M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z",
+  album: "M7 4h10 M5 7h14 M4 10h16v10H4z",
+  info: "M12 3a9 9 0 1 1 0 18 9 9 0 0 1 0-18z M12 11v5 M12 7.5v.5",
+  bolt: "M13 3L5 13.5h6L10 21l8-10.5h-6z",
+};
+
+export function Cell({
+  photo,
+  size,
+  selected,
+  active,
+  inWorking,
+  aiBusy,
+  onClick,
+  onOpen,
+}: {
+  photo: Photo;
+  size: number;
+  selected: boolean;
+  active: boolean;
+  inWorking?: boolean;
+  aiBusy?: boolean;
+  onClick: (m: SelectMods) => void;
+  onOpen: () => void;
+}) {
   return (
     <div
       onClick={(e) => onClick({ shift: e.shiftKey, toggle: e.metaKey || e.ctrlKey })}
       onDoubleClick={onOpen}
-      className={`group relative flex cursor-pointer flex-col rounded-md p-1.5 ${active ? "bg-neutral-600" : selected ? "bg-neutral-700" : "bg-neutral-800 hover:bg-neutral-700/60"} ${photo.flag === -1 ? "opacity-40" : ""}`}
+      className={`group relative flex cursor-pointer flex-col rounded-md p-1.5 ${
+        active ? "bg-neutral-600" : selected ? "bg-neutral-700" : "bg-neutral-800 hover:bg-neutral-700/60"
+      } ${aiBusy ? "ring-1 ring-violet-500/80" : ""} ${photo.flag === -1 ? "opacity-40" : ""}`}
     >
-      <div className="flex items-center justify-center" style={{ height: size * 0.72 }}>
+      <div className="relative flex items-center justify-center" style={{ height: size * 0.72 }}>
         <img src={thumbUrl(photo)} loading="lazy" draggable={false} className="max-h-full max-w-full object-contain shadow-md" alt="" />
+        {aiBusy ? (
+          <span
+            className="pointer-events-none absolute top-1 right-1 flex items-center gap-1 rounded-full bg-violet-950/95 px-2 py-0.5 text-[9px] font-semibold text-violet-200 border border-violet-600/80 shadow-md"
+            title="AI fine tune / edit is working on this photo in Develop"
+          >
+            <span className="h-1.5 w-1.5 animate-ping rounded-full bg-violet-300" />
+            ✦ AI working…
+          </span>
+        ) : inWorking ? (
+          <span
+            className="pointer-events-none absolute top-1 right-1 rounded bg-sky-950/90 px-1.5 py-0.5 text-[9px] font-medium text-sky-300 border border-sky-800/70 shadow-sm"
+            title="Open in Develop working images"
+          >
+            Develop
+          </span>
+        ) : null}
       </div>
       <div className="mt-1 flex items-center gap-1 text-[10px] text-neutral-400">
         <Stars value={photo.rating} />
-        {photo.flag === 1 && <span className="text-white" title="Pick">⚑</span>}
+        {photo.flag === 1 && <span className="text-neutral-100" title="Pick">⚑</span>}
         {photo.flag === -1 && <span className="text-red-400" title="Reject">✕</span>}
         {photo.color_label && <span className="h-2 w-2 rounded-full" style={{ background: LABEL_COLORS[photo.color_label] }} />}
         <span className="ml-auto flex gap-1 items-center">
@@ -1040,7 +997,7 @@ function Metadata(p: Props & { photo: Photo }) {
   ];
   return (
     <>
-      <Panel title="Quick culling">
+      <Panel title={<Heading label="Quick culling" hue="amber" d={ICONS.star} />}>
         <div className="space-y-2 text-[11px]">
           <div className="flex items-center justify-between">
             <span className="text-neutral-400">Rating</span>
@@ -1083,7 +1040,7 @@ function Metadata(p: Props & { photo: Photo }) {
           <p className="text-[10px] text-neutral-500">Keys: 0–5 rating · P/X/U flag · 6–9 label · D develop · ←/→ navigate</p>
         </div>
       </Panel>
-      <Panel title="Metadata">
+      <Panel title={<Heading label="Metadata" hue="blue" d={ICONS.info} />}>
         <dl className="grid grid-cols-[80px_1fr] gap-x-2 gap-y-1 text-[11px]">
           {rows
             .filter(([, v]) => v != null && v !== "")
@@ -1095,7 +1052,7 @@ function Metadata(p: Props & { photo: Photo }) {
             ))}
         </dl>
       </Panel>
-      <Panel title="Actions">
+      <Panel title={<Heading label="Actions" hue="emerald" d={ICONS.bolt} />}>
         <div className="flex flex-wrap gap-1">
           {p.filter.view === "bin" ? (
             <>
@@ -1108,20 +1065,37 @@ function Metadata(p: Props & { photo: Photo }) {
             </>
           ) : (
             <>
-              <Btn onClick={() => p.openDevelop(ph.id)}>Develop</Btn>
+              <Btn onClick={() => p.openDevelop(ph.id)} title={p.selected.length > 1 ? `Open all ${p.selected.length} selected photos as working images in Develop` : "Open photo in Develop (D)"}>
+                Develop{p.selected.length > 1 ? ` (${p.selected.length})` : ""}
+              </Btn>
+              {p.onAddWorking && (() => {
+                const targets = p.selected.length ? p.selected : [ph.id];
+                const newIds = targets.filter((id) => !p.workingIds?.includes(id));
+                return newIds.length > 0 ? (
+                  <Btn
+                    onClick={() => p.onAddWorking?.(newIds)}
+                    title="Add selected photo(s) to Develop working images while staying in Library"
+                  >
+                    ＋ Add to Develop{newIds.length > 1 ? ` (${newIds.length})` : ""}
+                  </Btn>
+                ) : null;
+              })()}
               <Btn onClick={p.onExport}>
                 {ph.path.startsWith("immich://") ? "Save to Immich" : "Export"} {p.selected.length > 1 ? `${p.selected.length}` : ""}…
               </Btn>
               <Btn onClick={p.onVirtualCopy}>Virtual copy</Btn>
-              <Btn onClick={p.onMoveToBin} title="Move photo to Bin (can be restored later)" className="text-amber-400 hover:text-amber-300">
-                🗑️ Move to Bin
-              </Btn>
-              <Btn onClick={p.onPermanentDelete} title="Permanently delete photo file from disk" className="text-red-400 hover:text-red-300">
-                Permanent delete
-              </Btn>
-              <Btn onClick={p.onRemove} title="Removes from the catalog only; files stay on disk">
-                Remove from catalog
-              </Btn>
+              {/* the ones that take photos away, on their own line under the everyday ones */}
+              <div className="mt-1 flex w-full flex-wrap gap-1 border-t border-neutral-800 pt-2">
+                <Btn onClick={p.onMoveToBin} title="Move photo to Bin (can be restored later)" className="text-amber-400 hover:text-amber-300">
+                  Move to Bin
+                </Btn>
+                <Btn onClick={p.onRemove} title="Removes from the catalog only; files stay on disk">
+                  Remove from catalog
+                </Btn>
+                <Btn onClick={p.onPermanentDelete} title="Permanently delete photo file from disk" className="text-red-400 hover:text-red-300">
+                  Delete permanently
+                </Btn>
+              </div>
             </>
           )}
         </div>
