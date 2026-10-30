@@ -8,6 +8,7 @@
     "app": "./scripts/dev.sh",
     "build": "tsc && vite build",
     "build:app": "./scripts/build.sh",
+    "build:linux": "./scripts/build-linux.sh",
     "preview": "vite preview",
     "tauri": "tauri",
     "test:rs": "cargo test --manifest-path src-tauri/Cargo.toml",

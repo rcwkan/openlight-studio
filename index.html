@@ -3,6 +3,20 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <link rel="icon" type="image/png" href="/icon.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <script>
+      try {
+        const saved = localStorage.getItem("openlight-theme") || "system";
+        document.documentElement.setAttribute("data-theme", saved);
+        const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+        const meta = document.querySelector('meta[name="color-scheme"]');
+        if (meta) {
+          meta.content = saved === "system" ? "light dark" : saved === "light" ? "light" : "dark";
+        }
+      } catch (_) {}
+    </script>
     <title>OpenLight Studio</title>
   </head>
 

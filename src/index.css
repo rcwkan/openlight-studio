@@ -1,22 +1,345 @@
 @import "tailwindcss";
 
 :root {
-  color-scheme: dark;
+  color-scheme: light dark;
+  --bg-app: #161616;
+  --text-app: #d4d4d4;
+  --theme-accent: #0ea5e9;
+  --theme-accent-hover: #0284c7;
+  --theme-accent-glow: rgba(14, 165, 233, 0.35);
+  --theme-accent-subtle: rgba(14, 165, 233, 0.12);
+  --theme-accent-contrast: #ffffff;
+  --track: #3f3f46;
+  --slider-thumb-border: #18181b;
+  --slider-thumb-bg: #d4d4d8;
 }
+
+/* Studio Dark Theme (Default) */
+:root[data-theme="dark"],
+[data-theme="dark"] {
+  color-scheme: dark;
+  --bg-app: #161616;
+  --text-app: #d4d4d4;
+  --theme-accent: #0ea5e9;
+  --theme-accent-hover: #0284c7;
+  --theme-accent-glow: rgba(14, 165, 233, 0.35);
+  --theme-accent-subtle: rgba(14, 165, 233, 0.12);
+  --theme-accent-contrast: #ffffff;
+  --color-sky-600: var(--theme-accent);
+  --color-sky-500: var(--theme-accent);
+  --color-sky-400: #38bdf8;
+  --color-neutral-950: #0a0a0a;
+  --color-neutral-900: #171717;
+  --color-neutral-800: #262626;
+  --color-neutral-700: #3f3f46;
+  --color-neutral-600: #52525b;
+  --color-neutral-500: #737373;
+  --color-neutral-400: #a3a3a3;
+  --color-neutral-300: #d4d4d4;
+  --color-neutral-200: #e5e5e5;
+  --color-neutral-100: #f5f5f5;
+  --color-neutral-50: #ffffff;
+  --track: #3f3f46;
+  --slider-thumb-border: #18181b;
+  --slider-thumb-bg: #d4d4d8;
+}
+
+/* Studio Light Theme */
+:root[data-theme="light"],
+[data-theme="light"] {
+  color-scheme: light;
+  --bg-app: #f4f5f8;
+  --text-app: #0f172a;
+  --theme-accent: #2563eb;
+  --theme-accent-hover: #1d4ed8;
+  --theme-accent-glow: rgba(37, 99, 235, 0.25);
+  --theme-accent-subtle: rgba(37, 99, 235, 0.1);
+  --theme-accent-contrast: #ffffff;
+  --color-sky-600: var(--theme-accent);
+  --color-sky-500: var(--theme-accent);
+  --color-sky-400: #0284c7;
+  --color-neutral-950: #ffffff;
+  --color-neutral-900: #f8fafc;
+  --color-neutral-800: #eef2f6;
+  --color-neutral-700: #d0d7de;
+  --color-neutral-600: #94a3b8;
+  --color-neutral-500: #64748b;
+  --color-neutral-400: #334155;
+  --color-neutral-300: #1e293b;
+  --color-neutral-200: #0f172a;
+  --color-neutral-100: #090d16;
+  --color-neutral-50: #000000;
+  --track: #cbd5e1;
+  --slider-thumb-border: #94a3b8;
+  --slider-thumb-bg: #1e293b;
+}
+
+/* Cool Slate Theme */
+:root[data-theme="slate"],
+[data-theme="slate"] {
+  color-scheme: dark;
+  --bg-app: #0b1329;
+  --text-app: #e2e8f0;
+  --theme-accent: #38bdf8;
+  --theme-accent-hover: #0ea5e9;
+  --theme-accent-glow: rgba(56, 189, 248, 0.35);
+  --theme-accent-subtle: rgba(56, 189, 248, 0.12);
+  --theme-accent-contrast: #0b1329;
+  --color-sky-600: var(--theme-accent);
+  --color-sky-500: var(--theme-accent);
+  --color-sky-400: #7dd3fc;
+  --color-neutral-950: #070d1d;
+  --color-neutral-900: #0f172a;
+  --color-neutral-800: #1e293b;
+  --color-neutral-700: #334155;
+  --color-neutral-600: #475569;
+  --color-neutral-500: #64748b;
+  --color-neutral-400: #94a3b8;
+  --color-neutral-300: #cbd5e1;
+  --color-neutral-200: #e2e8f0;
+  --color-neutral-100: #f1f5f9;
+  --color-neutral-50: #ffffff;
+  --track: #334155;
+  --slider-thumb-border: #0f172a;
+  --slider-thumb-bg: #38bdf8;
+}
+
+/* OLED Obsidian Theme */
+:root[data-theme="oled"],
+[data-theme="oled"] {
+  color-scheme: dark;
+  --bg-app: #000000;
+  --text-app: #f4f4f5;
+  --theme-accent: #6366f1;
+  --theme-accent-hover: #4f46e5;
+  --theme-accent-glow: rgba(99, 102, 241, 0.4);
+  --theme-accent-subtle: rgba(99, 102, 241, 0.15);
+  --theme-accent-contrast: #ffffff;
+  --color-sky-600: var(--theme-accent);
+  --color-sky-500: var(--theme-accent);
+  --color-sky-400: #818cf8;
+  --color-neutral-950: #000000;
+  --color-neutral-900: #09090b;
+  --color-neutral-800: #18181b;
+  --color-neutral-700: #27272a;
+  --color-neutral-600: #3f3f46;
+  --color-neutral-500: #71717a;
+  --color-neutral-400: #a1a1aa;
+  --color-neutral-300: #d4d4d8;
+  --color-neutral-200: #e4e4e7;
+  --color-neutral-100: #fafafa;
+  --color-neutral-50: #ffffff;
+  --track: #27272a;
+  --slider-thumb-border: #000000;
+  --slider-thumb-bg: #6366f1;
+}
+
+/* Warm Darkroom Theme */
+:root[data-theme="warm"],
+[data-theme="warm"] {
+  color-scheme: dark;
+  --bg-app: #181412;
+  --text-app: #e7e5e4;
+  --theme-accent: #f59e0b;
+  --theme-accent-hover: #d97706;
+  --theme-accent-glow: rgba(245, 158, 11, 0.35);
+  --theme-accent-subtle: rgba(245, 158, 11, 0.14);
+  --theme-accent-contrast: #181412;
+  --color-sky-600: var(--theme-accent);
+  --color-sky-500: var(--theme-accent);
+  --color-sky-400: #fbbf24;
+  --color-neutral-950: #120e0d;
+  --color-neutral-900: #1c1815;
+  --color-neutral-800: #29231f;
+  --color-neutral-700: #443a34;
+  --color-neutral-600: #574c45;
+  --color-neutral-500: #786a60;
+  --color-neutral-400: #a89a90;
+  --color-neutral-300: #d6ceca;
+  --color-neutral-200: #e7e2df;
+  --color-neutral-100: #f5f2f0;
+  --color-neutral-50: #fafaf9;
+  --track: #443a34;
+  --slider-thumb-border: #1c1815;
+  --slider-thumb-bg: #f59e0b;
+}
+
+/* Nordic Frost Theme */
+:root[data-theme="nordic"],
+[data-theme="nordic"] {
+  color-scheme: dark;
+  --bg-app: #07131b;
+  --text-app: #e0f2fe;
+  --theme-accent: #06b6d4;
+  --theme-accent-hover: #0891b2;
+  --theme-accent-glow: rgba(6, 182, 212, 0.35);
+  --theme-accent-subtle: rgba(6, 182, 212, 0.14);
+  --theme-accent-contrast: #07131b;
+  --color-sky-600: var(--theme-accent);
+  --color-sky-500: var(--theme-accent);
+  --color-sky-400: #22d3ee;
+  --color-neutral-950: #040b10;
+  --color-neutral-900: #091a24;
+  --color-neutral-800: #10293a;
+  --color-neutral-700: #1b3d54;
+  --color-neutral-600: #2a5674;
+  --color-neutral-500: #4a7a9c;
+  --color-neutral-400: #7ba3bf;
+  --color-neutral-300: #b5d1e4;
+  --color-neutral-200: #e0f2fe;
+  --color-neutral-100: #f0f9ff;
+  --color-neutral-50: #ffffff;
+  --track: #1b3d54;
+  --slider-thumb-border: #091a24;
+  --slider-thumb-bg: #06b6d4;
+}
+
+/* Midnight Violet / Cyber Theme */
+:root[data-theme="cyber"],
+[data-theme="cyber"] {
+  color-scheme: dark;
+  --bg-app: #0e091b;
+  --text-app: #f3e8ff;
+  --theme-accent: #a855f7;
+  --theme-accent-hover: #9333ea;
+  --theme-accent-glow: rgba(168, 85, 247, 0.35);
+  --theme-accent-subtle: rgba(168, 85, 247, 0.15);
+  --theme-accent-contrast: #ffffff;
+  --color-sky-600: var(--theme-accent);
+  --color-sky-500: var(--theme-accent);
+  --color-sky-400: #c084fc;
+  --color-neutral-950: #080411;
+  --color-neutral-900: #130d24;
+  --color-neutral-800: #20163b;
+  --color-neutral-700: #33235d;
+  --color-neutral-600: #4c3585;
+  --color-neutral-500: #7155b3;
+  --color-neutral-400: #9e82dc;
+  --color-neutral-300: #cbbaef;
+  --color-neutral-200: #f3e8ff;
+  --color-neutral-100: #faf5ff;
+  --color-neutral-50: #ffffff;
+  --track: #33235d;
+  --slider-thumb-border: #130d24;
+  --slider-thumb-bg: #a855f7;
+}
+
+/* Forest Sage / Emerald Theme */
+:root[data-theme="emerald"],
+[data-theme="emerald"] {
+  color-scheme: dark;
+  --bg-app: #08140f;
+  --text-app: #ecfdf5;
+  --theme-accent: #10b981;
+  --theme-accent-hover: #059669;
+  --theme-accent-glow: rgba(16, 185, 129, 0.35);
+  --theme-accent-subtle: rgba(16, 185, 129, 0.14);
+  --theme-accent-contrast: #08140f;
+  --color-sky-600: var(--theme-accent);
+  --color-sky-500: var(--theme-accent);
+  --color-sky-400: #34d399;
+  --color-neutral-950: #040c08;
+  --color-neutral-900: #0d1e16;
+  --color-neutral-800: #162f23;
+  --color-neutral-700: #224736;
+  --color-neutral-600: #31644d;
+  --color-neutral-500: #4c8a6d;
+  --color-neutral-400: #73b392;
+  --color-neutral-300: #a7d9be;
+  --color-neutral-200: #d1fae5;
+  --color-neutral-100: #ecfdf5;
+  --color-neutral-50: #ffffff;
+  --track: #224736;
+  --slider-thumb-border: #0d1e16;
+  --slider-thumb-bg: #10b981;
+}
+
+/* System theme: sync with OS light mode */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]):not([data-theme="slate"]):not([data-theme="oled"]):not([data-theme="warm"]):not([data-theme="nordic"]):not([data-theme="cyber"]):not([data-theme="emerald"]),
+  :root[data-theme="system"] {
+    color-scheme: light;
+    --bg-app: #f4f5f8;
+    --text-app: #0f172a;
+    --theme-accent: #2563eb;
+    --theme-accent-hover: #1d4ed8;
+    --theme-accent-glow: rgba(37, 99, 235, 0.25);
+    --theme-accent-subtle: rgba(37, 99, 235, 0.1);
+    --theme-accent-contrast: #ffffff;
+    --color-sky-600: var(--theme-accent);
+    --color-sky-500: var(--theme-accent);
+    --color-sky-400: #0284c7;
+    --color-neutral-950: #ffffff;
+    --color-neutral-900: #f8fafc;
+    --color-neutral-800: #eef2f6;
+    --color-neutral-700: #d0d7de;
+    --color-neutral-600: #94a3b8;
+    --color-neutral-500: #64748b;
+    --color-neutral-400: #334155;
+    --color-neutral-300: #1e293b;
+    --color-neutral-200: #0f172a;
+    --color-neutral-100: #090d16;
+    --color-neutral-50: #000000;
+    --track: #cbd5e1;
+    --slider-thumb-border: #94a3b8;
+    --slider-thumb-bg: #1e293b;
+  }
+}
+
+/* Light mode high-contrast active tabs & buttons */
+[data-theme="light"] .bg-neutral-800.text-white,
+[data-theme="light"] .bg-neutral-700.text-white {
+  background-color: #24292f;
+  color: #ffffff;
+}
+
+@media (prefers-color-scheme: light) {
+  :root[data-theme="system"] .bg-neutral-800.text-white,
+  :root[data-theme="system"] .bg-neutral-700.text-white {
+    background-color: #24292f;
+    color: #ffffff;
+  }
+}
+
+[data-theme="light"] .hover\:text-white:hover {
+  color: #0f1419;
+}
+
+@media (prefers-color-scheme: light) {
+  :root[data-theme="system"] .hover\:text-white:hover {
+    color: #0f1419;
+  }
+}
+
+[data-theme="light"] .checker {
+  background-color: #f6f8fa;
+  background-image: conic-gradient(#eaeef2 25%, #ffffff 0 50%, #eaeef2 0 75%, #ffffff 0);
+}
+
+@media (prefers-color-scheme: light) {
+  :root[data-theme="system"] .checker {
+    background-color: #f6f8fa;
+    background-image: conic-gradient(#eaeef2 25%, #ffffff 0 50%, #eaeef2 0 75%, #ffffff 0);
+  }
+}
+
 html,
 body,
 #root {
   height: 100%;
 }
+
 body {
   margin: 0;
   overflow: hidden;
-  background: #161616;
-  color: #d4d4d4;
+  background: var(--bg-app);
+  color: var(--text-app);
   font: 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
   -webkit-user-select: none;
   user-select: none;
+  transition: background-color 0.2s ease, color 0.2s ease;
 }
+
 input,
 textarea,
 .select-text {
@@ -30,49 +353,61 @@ input[type="range"].ol-range {
   height: 14px;
   background: transparent;
 }
+
 input[type="range"].ol-range::-webkit-slider-runnable-track {
   height: 3px;
   border-radius: 2px;
   background: var(--track, #3f3f46);
 }
+
 input[type="range"].ol-range::-webkit-slider-thumb {
   -webkit-appearance: none;
   width: 11px;
   height: 11px;
   margin-top: -4px;
   border-radius: 50%;
-  border: 1px solid #18181b;
-  background: #d4d4d8;
+  border: 1px solid var(--slider-thumb-border, #18181b);
+  background: var(--slider-thumb-bg, #d4d4d8);
 }
+
 .track-temp {
   --track: linear-gradient(90deg, #4a7bd1, #d9d9d9, #e0a34a);
 }
+
 .track-tint {
   --track: linear-gradient(90deg, #3fae4a, #d9d9d9, #c04bc9);
 }
+
 /* defringe hue ranges (low to high) and calibration primaries (- to +) */
 .track-fringe-purple {
   --track: linear-gradient(90deg, #4f5fe0, #9b4ade, #e04aa6);
 }
+
 .track-fringe-green {
   --track: linear-gradient(90deg, #d8c84a, #46a758, #12a594);
 }
+
 .track-red-hue {
   --track: linear-gradient(90deg, #d6409f, #e5484d, #f76808);
 }
+
 .track-green-hue {
   --track: linear-gradient(90deg, #a3c43a, #46a758, #12a594);
 }
+
 .track-blue-hue {
   --track: linear-gradient(90deg, #12a5c4, #3e63dd, #8e4ec6);
 }
+
 /* Pro hue: colorize 0-360, and a shift of -180..180 seen from red */
 .track-hue {
   --track: linear-gradient(90deg, #f00, #ff0, #0f0, #0ff, #00f, #f0f, #f00);
 }
+
 .track-hue-shift {
   --track: linear-gradient(90deg, #0ff, #00f, #f0f, #f00, #ff0, #0f0, #0ff);
 }
+
 .checker {
   background-color: #111;
   background-image: conic-gradient(#141414 25%, #101010 0 50%, #141414 0 75%, #101010 0);
@@ -93,4 +428,24 @@ input[type="range"].ol-range::-webkit-slider-thumb {
 
 .animate-indeterminate {
   animation: indeterminate 1.8s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+/* Custom theme utility classes */
+.theme-glow {
+  box-shadow: 0 0 20px -2px var(--theme-accent-glow);
+}
+.theme-glow-sm {
+  box-shadow: 0 0 10px -1px var(--theme-accent-glow);
+}
+.theme-accent-bg {
+  background-color: var(--theme-accent);
+}
+.theme-accent-text {
+  color: var(--theme-accent);
+}
+.theme-accent-border {
+  border-color: var(--theme-accent);
+}
+.theme-accent-subtle {
+  background-color: var(--theme-accent-subtle);
 }

@@ -1,6 +1,7 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { ReactNode, useEffect, useRef, useState } from "react";
 import { api, AutoFunction, AutoResult, AutoSettings, JobProgress, LABEL_COLORS, Photo, Settings, thumbUrl } from "./api";
+import { CompareGroup, CompareModal } from "./CompareModal";
 import { Btn, Seg, Stars } from "./controls";
 
 type Rec = Record<string, unknown>;
@@ -38,7 +39,7 @@ const on = (k: string) => (s: Rec) => !!s[k];
 
 /** The auto functions: what each does, its settings (basic ones show first, the rest under Advanced) and
  *  whether it asks the AI provider. */
-const FUNCS: { id: AutoFunction; title: string; icon: string; verb: string; blurb: string; fields: Field[]; ai?: When }[] = [
+export const FUNCS: { id: AutoFunction; title: string; icon: string; verb: string; blurb: string; fields: Field[]; ai?: When }[] = [
   {
     id: "cull",
     title: "Catalog & Culling",
@@ -390,9 +391,7 @@ function resultIds(r: AutoResult): number[] {
   }
 }
 
-/** The auto functions, each with its advanced settings, run on the selected photos, the photos in view or
- *  the whole catalog. */
-export function AutoView(p: {
+export type AutoViewProps = {
   settings: Settings | null;
   setSettings: (s: Settings) => void;
   selected: number[];
@@ -401,9 +400,31 @@ export function AutoView(p: {
   onShow: (ids: number[], label: string) => void;
   onAiSettings: () => void;
   onStorage: () => void;
-}) {
-  const [fn, setFn] = useState<AutoFunction>("cull");
+  fn?: AutoFunction;
+  onFnChange?: (fn: AutoFunction) => void;
+  hideSidebar?: boolean;
+  onBackToGrid?: () => void;
+};
+
+/** The auto functions, each with its advanced settings, run on the selected photos, the photos in view or
+ *  the whole catalog. */
+export function AutoView(p: AutoViewProps) {
+  const [internalFn, setInternalFn] = useState<AutoFunction>(p.fn ?? "cull");
+  const fn = p.fn ?? internalFn;
+  const setFn = (next: AutoFunction) => {
+    if (p.onFnChange) p.onFnChange(next);
+    else setInternalFn(next);
+  };
+  useEffect(() => {
+    if (p.fn) setInternalFn(p.fn);
+  }, [p.fn]);
+
   const [scope, setScope] = useState<"selected" | "view" | "all">(p.selected.length ? "selected" : "view");
+  useEffect(() => {
+    if (scope === "selected" && p.selected.length === 0) {
+      setScope("view");
+    }
+  }, [p.selected.length, scope]);
   const [total, setTotal] = useState<number | null>(null);
   const [running, setRunning] = useState<Partial<Record<AutoFunction, string>>>({});
   const [results, setResults] = useState<Partial<Record<AutoFunction, AutoResult>>>({});
@@ -467,30 +488,39 @@ export function AutoView(p: {
 
   return (
     <div className="flex min-h-0 flex-1 text-[12px]">
-      <aside className="flex w-64 shrink-0 flex-col gap-1 overflow-y-auto border-r border-neutral-800 bg-neutral-900 p-2">
-        {FUNCS.map((f) => (
-          <button key={f.id} onClick={() => setFn(f.id)} className={`rounded px-3 py-2 text-left ${f.id === fn ? "bg-neutral-700" : "hover:bg-neutral-800"}`}>
-            <div className="flex items-center gap-2">
-              <span className="w-4 text-center text-amber-300">{f.icon}</span>
-              <span className="flex-1 font-medium text-neutral-100">{f.title}</span>
-              {running[f.id] && <span className="h-2 w-2 animate-pulse rounded-full bg-sky-400" />}
-            </div>
-            <div className="mt-0.5 line-clamp-2 pl-6 text-[10px] text-neutral-500">{results[f.id] ? summary(results[f.id]!) : f.blurb}</div>
+      {!p.hideSidebar && (
+        <aside className="flex w-64 shrink-0 flex-col gap-1 overflow-y-auto border-r border-neutral-800 bg-neutral-900 p-2">
+          {FUNCS.map((f) => (
+            <button key={f.id} onClick={() => setFn(f.id)} className={`rounded px-3 py-2 text-left ${f.id === fn ? "bg-neutral-700" : "hover:bg-neutral-800"}`}>
+              <div className="flex items-center gap-2">
+                <span className="w-4 text-center text-amber-300">{f.icon}</span>
+                <span className="flex-1 font-medium text-neutral-100">{f.title}</span>
+                {running[f.id] && <span className="h-2 w-2 animate-pulse rounded-full bg-sky-400" />}
+              </div>
+              <div className="mt-0.5 line-clamp-2 pl-6 text-[10px] text-neutral-500">{results[f.id] ? summary(results[f.id]!) : f.blurb}</div>
+            </button>
+          ))}
+          <button onClick={p.onStorage} className="mt-auto rounded border border-neutral-800 px-3 py-2 text-left text-[10px] text-neutral-400 hover:bg-neutral-800">
+            <span className={p.settings.auto.on_import.enabled ? "text-emerald-400" : "text-neutral-500"}>●</span> Catalog & Culling on new photos:{" "}
+            {p.settings.auto.on_import.enabled ? "on" : "off"} — Settings › Storage
           </button>
-        ))}
-        <button onClick={p.onStorage} className="mt-auto rounded border border-neutral-800 px-3 py-2 text-left text-[10px] text-neutral-400 hover:bg-neutral-800">
-          <span className={p.settings.auto.on_import.enabled ? "text-emerald-400" : "text-neutral-500"}>●</span> Catalog & Culling on new photos:{" "}
-          {p.settings.auto.on_import.enabled ? "on" : "off"} — Settings › Storage
-        </button>
-      </aside>
+        </aside>
+      )}
 
       <main className="flex min-w-0 flex-1 flex-col gap-4 overflow-y-auto p-4">
-        <header>
-          <h2 className="text-sm font-semibold text-neutral-100">
-            <span className="mr-2 text-amber-300">{def.icon}</span>
-            {def.title}
-          </h2>
-          <p className="mt-1 max-w-3xl text-neutral-400">{def.blurb}</p>
+        <header className="flex items-start justify-between gap-4">
+          <div>
+            <h2 className="text-sm font-semibold text-neutral-100">
+              <span className="mr-2 text-amber-300">{def.icon}</span>
+              {def.title}
+            </h2>
+            <p className="mt-1 max-w-3xl text-neutral-400">{def.blurb}</p>
+          </div>
+          {p.onBackToGrid && (
+            <Btn onClick={p.onBackToGrid} className="shrink-0 flex items-center gap-1.5 text-[11px]">
+              ← Back to Photos Grid
+            </Btn>
+          )}
         </header>
 
         <section className={`${card} max-w-3xl`}>
@@ -580,6 +610,19 @@ function Results({ r, photos, filter, setFilter, onShow, title }: { r: AutoResul
   const ids = resultIds(r);
   const extra = extraIds(r);
   const [acted, setActed] = useState("");
+  const [compareGroupIdx, setCompareGroupIdx] = useState<number | null>(null);
+
+  const duplicateGroups: CompareGroup[] =
+    r.function === "duplicates"
+      ? rows.map((g, idx) => ({
+          id: idx,
+          title: g.kind === "exact" ? "Exact Duplicate" : "Look-alike Group",
+          kind: g.kind as "exact" | "similar",
+          photos: (g.ids as number[]).map((id) => photos[id]).filter(Boolean),
+          keepId: g.keep as number,
+        }))
+      : [];
+
   const act = async (label: string, u: Parameters<typeof api.update>[1]) => {
     try {
       await api.update(extra, u);
@@ -617,6 +660,15 @@ function Results({ r, photos, filter, setFilter, onShow, title }: { r: AutoResul
         </span>
         <span className="ml-auto flex items-center gap-1">
           {acted && <span className="mr-1 text-emerald-400">{acted}</span>}
+          {r.function === "duplicates" && rows.length > 0 && (
+            <Btn
+              onClick={() => setCompareGroupIdx(0)}
+              className="bg-sky-600 text-white font-medium shadow-xs hover:bg-sky-500"
+              title="Open full-screen side-by-side comparison to inspect and decide"
+            >
+              ⧉ Side-by-Side Compare ({rows.length} groups)
+            </Btn>
+          )}
           {(r.function === "blur" || r.function === "duplicates") && extra.length > 0 && (
             <>
               <Btn onClick={() => act("Rejected", { flag: "reject" })} title={r.function === "duplicates" ? "Flag the extra copies as rejects; the ones kept stay as they are" : "Flag them as rejects"}>
@@ -637,13 +689,32 @@ function Results({ r, photos, filter, setFilter, onShow, title }: { r: AutoResul
       <div className="flex max-h-[28rem] flex-col gap-1 overflow-y-auto">
         {r.function === "duplicates"
           ? rows.map((g, i) => (
-              <div key={i} className="flex items-center gap-2 rounded bg-neutral-950 p-2">
-                <span className={`w-20 shrink-0 text-[10px] uppercase ${g.kind === "exact" ? "text-amber-300" : "text-sky-300"}`}>{g.kind === "exact" ? "exact copies" : "look alike"}</span>
+              <div key={i} className="flex items-center gap-2 rounded bg-neutral-950 p-2 hover:bg-neutral-900/60 transition-colors">
+                <div className="flex flex-col w-24 shrink-0">
+                  <span className={`text-[10px] uppercase font-bold ${g.kind === "exact" ? "text-amber-300" : "text-sky-300"}`}>
+                    {g.kind === "exact" ? "exact copies" : "look alike"}
+                  </span>
+                  <button
+                    onClick={() => setCompareGroupIdx(i)}
+                    className="mt-1 flex items-center gap-1 rounded bg-neutral-800 hover:bg-sky-600 hover:text-white px-2 py-0.5 text-[10px] text-sky-300 border border-neutral-700/80 transition-colors w-fit cursor-pointer"
+                    title="Open side by side comparison for this group"
+                  >
+                    <span>⧉</span>
+                    <span>Compare</span>
+                  </button>
+                </div>
                 <div className="flex min-w-0 flex-1 gap-2 overflow-x-auto">
                   {(g.ids as number[]).map((id, k) => (
-                    <div key={id} className="flex w-24 shrink-0 flex-col items-center gap-0.5" title={(g.files as string[])[k]}>
-                      <Thumb photo={photos[id]} ring={id === g.keep ? "ring-2 ring-emerald-500" : ""} />
-                      <span className="w-full truncate text-center text-[10px] text-neutral-400">{id === g.keep ? "keep" : (g.files as string[])[k]}</span>
+                    <div
+                      key={id}
+                      onClick={() => setCompareGroupIdx(i)}
+                      className="flex w-24 shrink-0 flex-col items-center gap-0.5 cursor-pointer group"
+                      title={`Click to compare: ${(g.files as string[])[k]}`}
+                    >
+                      <Thumb photo={photos[id]} ring={id === g.keep ? "ring-2 ring-emerald-500 shadow-xs" : "group-hover:ring-1 group-hover:ring-neutral-500"} />
+                      <span className={`w-full truncate text-center text-[10px] ${id === g.keep ? "text-emerald-400 font-semibold" : "text-neutral-400"}`}>
+                        {id === g.keep ? "✓ keep" : (g.files as string[])[k]}
+                      </span>
                     </div>
                   ))}
                 </div>
@@ -662,6 +733,37 @@ function Results({ r, photos, filter, setFilter, onShow, title }: { r: AutoResul
         {r.function !== "duplicates" && !shown.length && <p className="text-neutral-500">Nothing to show.</p>}
         {r.function === "duplicates" && !rows.length && <p className="text-neutral-500">No duplicates found.</p>}
       </div>
+
+      {compareGroupIdx !== null && duplicateGroups.length > 0 && (
+        <CompareModal
+          groups={duplicateGroups}
+          initialIndex={compareGroupIdx}
+          onClose={() => setCompareGroupIdx(null)}
+          onSetKeep={(gIdx, photoId) => {
+            if (rows[gIdx]) {
+              rows[gIdx].keep = photoId;
+              setActed(`Group ${gIdx + 1}: selected photo ${photoId} to keep`);
+            }
+          }}
+          onCull={async (photoId, culling) => {
+            try {
+              await api.update([photoId], culling);
+              if (photos[photoId]) {
+                Object.assign(photos[photoId], culling);
+              }
+            } catch (err) {
+              console.error(err);
+            }
+          }}
+          onMoveToBin={async (photoId) => {
+            try {
+              await api.moveToBin([photoId]);
+            } catch (err) {
+              console.error(err);
+            }
+          }}
+        />
+      )}
     </section>
   );
 }

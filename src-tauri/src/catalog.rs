@@ -46,7 +46,8 @@ CREATE TABLE IF NOT EXISTS photos (
   history_pos INTEGER,
   thumb_v INTEGER NOT NULL DEFAULT 0,
   imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  edited_at TEXT
+  edited_at TEXT,
+  deleted_at TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS photos_path ON photos(path) WHERE master_id IS NULL;
 CREATE INDEX IF NOT EXISTS photos_folder ON photos(folder);
@@ -73,6 +74,8 @@ CREATE TABLE IF NOT EXISTS analysis (
 pub fn open(path: &Path) -> Result<Connection, String> {
     let c = Connection::open(path).map_err(es)?;
     c.execute_batch(SCHEMA).map_err(es)?;
+    let _ = c.execute("ALTER TABLE photos ADD COLUMN deleted_at TEXT", []);
+    let _ = c.execute("CREATE INDEX IF NOT EXISTS photos_deleted ON photos(deleted_at)", []);
     let ids: Vec<i64> = c
         .prepare("SELECT id FROM photos WHERE json_array_length(json_extract(develop_json, '$.masks')) > 0")
         .and_then(|mut st| st.query_map([], |r| r.get(0)).map(|rows| rows.flatten().collect()))
@@ -107,10 +110,11 @@ pub struct Photo {
     pub keywords: String,
     pub edited: bool,
     pub thumb_v: i64,
+    pub deleted_at: Option<String>,
 }
 
 const COLS: &str = "id, path, folder, filename, master_id, copy_name, width, height, captured_at, camera, lens, \
-                    iso, aperture, shutter, focal_length, rating, flag, color_label, keywords, edited_at IS NOT NULL, thumb_v";
+                    iso, aperture, shutter, focal_length, rating, flag, color_label, keywords, edited_at IS NOT NULL, thumb_v, deleted_at";
 
 fn row(r: &rusqlite::Row) -> rusqlite::Result<Photo> {
     Ok(Photo {
@@ -135,6 +139,7 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<Photo> {
         keywords: r.get(18)?,
         edited: r.get(19)?,
         thumb_v: r.get(20)?,
+        deleted_at: r.get(21)?,
     })
 }
 
@@ -152,10 +157,16 @@ pub struct Filter {
     pub flag: Option<String>,
     pub color_label: Option<String>,
     pub edited: Option<bool>,
+    /// original | copy | edited | unedited_original | edited_original
+    pub copy_type: Option<String>,
+    /// landscape | portrait | square
+    pub aspect: Option<String>,
     pub ids: Option<Vec<i64>>,
     /// Pages of an Immich album loaded so far (album id, or "favorites").
     pub immich_album: Option<String>,
     pub limit: Option<i64>,
+    /// Query items in the bin (true) or normal items (false / None).
+    pub in_bin: Option<bool>,
 }
 
 const TEXT_COLS: &str = "(filename LIKE ? OR camera LIKE ? OR lens LIKE ? OR keywords LIKE ?)";
@@ -212,6 +223,24 @@ pub fn query(c: &Connection, f: &Filter) -> Result<Vec<Photo>, String> {
         sql += " AND (edited_at IS NOT NULL) = ?";
         args.push(e.into());
     }
+    if let Some(ct) = f.copy_type.as_deref().filter(|s| !s.is_empty() && *s != "all") {
+        match ct {
+            "original" => sql += " AND master_id IS NULL",
+            "copy" | "saved_copy" | "saved_new" => sql += " AND master_id IS NOT NULL",
+            "edited" => sql += " AND (edited_at IS NOT NULL)",
+            "unedited_original" => sql += " AND master_id IS NULL AND edited_at IS NULL",
+            "edited_original" => sql += " AND master_id IS NULL AND edited_at IS NOT NULL",
+            _ => {}
+        }
+    }
+    if let Some(aspect) = f.aspect.as_deref().filter(|s| !s.is_empty() && *s != "all") {
+        match aspect {
+            "landscape" => sql += " AND width > height AND height > 0",
+            "portrait" => sql += " AND height > width AND width > 0",
+            "square" => sql += " AND width = height AND width > 0",
+            _ => {}
+        }
+    }
     if let Some(album) = &f.immich_album {
         sql += " AND path IN (SELECT path FROM immich_albums WHERE album = ?)";
         args.push(album.clone().into());
@@ -222,6 +251,15 @@ pub fn query(c: &Connection, f: &Filter) -> Result<Vec<Photo>, String> {
         }
         // inline: a whole catalog's results can pass SQLite's limit of 32766 parameters
         sql += &format!(" AND id IN ({})", ids.iter().map(i64::to_string).collect::<Vec<_>>().join(","));
+    }
+    match f.in_bin {
+        Some(true) => sql += " AND deleted_at IS NOT NULL",
+        Some(false) => sql += " AND deleted_at IS NULL",
+        None => {
+            if f.ids.is_none() {
+                sql += " AND deleted_at IS NULL";
+            }
+        }
     }
     sql += " ORDER BY COALESCE(captured_at, ''), filename, id LIMIT ?";
     args.push(f.limit.unwrap_or(1_000_000).into());
@@ -242,7 +280,7 @@ pub fn photos(c: &Connection, ids: &[i64]) -> Result<Vec<Photo>, String> {
 /// Local folders only; Immich rows are browsed through their albums.
 pub fn folders(c: &Connection) -> Result<Vec<(String, i64)>, String> {
     let mut st = c
-        .prepare("SELECT folder, COUNT(*) FROM photos WHERE path NOT LIKE 'immich://%' GROUP BY folder ORDER BY folder")
+        .prepare("SELECT folder, COUNT(*) FROM photos WHERE path NOT LIKE 'immich://%' AND deleted_at IS NULL GROUP BY folder ORDER BY folder")
         .map_err(es)?;
     let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).map_err(es)?;
     rows.collect::<Result<_, _>>().map_err(es)
@@ -316,6 +354,45 @@ pub fn remove(c: &Connection, ids: &[i64]) -> Result<Vec<i64>, String> {
         gone.extend(rows.collect::<Result<Vec<i64>, _>>().map_err(es)?);
     }
     Ok(gone)
+}
+
+/// Returns the count of photos currently in the bin.
+pub fn bin_count(c: &Connection) -> Result<i64, String> {
+    c.query_row("SELECT COUNT(*) FROM photos WHERE deleted_at IS NOT NULL", [], |r| r.get(0)).map_err(es)
+}
+
+/// Moves photos and their virtual copies to the bin (soft delete); returns affected ids.
+pub fn move_to_bin(c: &Connection, ids: &[i64]) -> Result<Vec<i64>, String> {
+    let mut affected = vec![];
+    for chunk in ids.chunks(10_000) {
+        let list = vec!["?"; chunk.len()].join(",");
+        let args: Vec<Sql> = chunk.iter().chain(chunk).map(|i| Sql::from(*i)).collect();
+        let mut st = c
+            .prepare(&format!(
+                "UPDATE photos SET deleted_at = CURRENT_TIMESTAMP WHERE (id IN ({list}) OR master_id IN ({list})) AND deleted_at IS NULL RETURNING id"
+            ))
+            .map_err(es)?;
+        let rows = st.query_map(params_from_iter(args), |r| r.get(0)).map_err(es)?;
+        affected.extend(rows.collect::<Result<Vec<i64>, _>>().map_err(es)?);
+    }
+    Ok(affected)
+}
+
+/// Restores photos and their virtual copies from the bin; returns restored ids.
+pub fn restore_from_bin(c: &Connection, ids: &[i64]) -> Result<Vec<i64>, String> {
+    let mut affected = vec![];
+    for chunk in ids.chunks(10_000) {
+        let list = vec!["?"; chunk.len()].join(",");
+        let args: Vec<Sql> = chunk.iter().chain(chunk).map(|i| Sql::from(*i)).collect();
+        let mut st = c
+            .prepare(&format!(
+                "UPDATE photos SET deleted_at = NULL WHERE (id IN ({list}) OR master_id IN ({list})) AND deleted_at IS NOT NULL RETURNING id"
+            ))
+            .map_err(es)?;
+        let rows = st.query_map(params_from_iter(args), |r| r.get(0)).map_err(es)?;
+        affected.extend(rows.collect::<Result<Vec<i64>, _>>().map_err(es)?);
+    }
+    Ok(affected)
 }
 
 // ---------------------------------------------------------------------------
@@ -453,6 +530,34 @@ pub fn virtual_copy(c: &Connection, id: i64) -> Result<i64, String> {
     let new = c.last_insert_rowid();
     let d = get_develop(c, new)?;
     save_develop(c, new, &d, "Virtual copy")?;
+    Ok(new)
+}
+
+pub fn save_as_new_photo(c: &Connection, id: i64, develop: Option<&Develop>, copy_name: Option<&str>) -> Result<i64, String> {
+    let master: i64 =
+        c.query_row("SELECT COALESCE(master_id, id) FROM photos WHERE id = ?", [id], |r| r.get(0)).map_err(es)?;
+    let n: i64 =
+        c.query_row("SELECT COUNT(*) FROM photos WHERE master_id = ?", [master], |r| r.get(0)).map_err(es)?;
+    let name = match copy_name.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(s) => s.to_string(),
+        None => format!("Copy {}", n + 1),
+    };
+    c.execute(
+        "INSERT INTO photos (path, folder, filename, master_id, copy_name, width, height, captured_at, camera, lens, iso,
+           aperture, shutter, focal_length, rating, flag, color_label, keywords, develop_json, edited_at)
+         SELECT path, folder, filename, ?, ?, width, height, captured_at, camera, lens, iso,
+           aperture, shutter, focal_length, rating, flag, color_label, keywords, develop_json, CURRENT_TIMESTAMP
+         FROM photos WHERE id = ?",
+        params![master, name, id],
+    )
+    .map_err(es)?;
+    let new = c.last_insert_rowid();
+    if let Some(d) = develop {
+        save_develop(c, new, d, "Save as new photo")?;
+    } else {
+        let d = get_develop(c, new)?;
+        save_develop(c, new, &d, "Save as new photo")?;
+    }
     Ok(new)
 }
 
@@ -708,4 +813,163 @@ pub fn import_files(core: &Core, mut files: Vec<PathBuf>, progress: &(dyn Fn(usi
         c.execute("UPDATE photos SET width = ?, height = ? WHERE id = ?", params![w, h, id]).map_err(es)?;
     }
     Ok(added.into_iter().map(|a| a.0).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_filter_and_save_as_new_photo() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(SCHEMA).unwrap();
+
+        // Insert original unedited photo
+        c.execute(
+            "INSERT INTO photos (id, path, folder, filename, width, height) VALUES (1, '/photos/a.jpg', '/photos', 'a.jpg', 6000, 4000)",
+            [],
+        )
+        .unwrap();
+
+        // Insert original edited photo
+        c.execute(
+            "INSERT INTO photos (id, path, folder, filename, width, height, edited_at) VALUES (2, '/photos/b.jpg', '/photos', 'b.jpg', 4000, 6000, CURRENT_TIMESTAMP)",
+            [],
+        )
+        .unwrap();
+
+        // 1. Check all photos
+        let all = query(&c, &Filter::default()).unwrap();
+        assert_eq!(all.len(), 2);
+
+        // 2. Filter original photos
+        let orig = query(&c, &Filter { copy_type: Some("original".into()), ..Default::default() }).unwrap();
+        assert_eq!(orig.len(), 2);
+
+        // 3. Filter edited photos
+        let edited = query(&c, &Filter { copy_type: Some("edited".into()), ..Default::default() }).unwrap();
+        assert_eq!(edited.len(), 1);
+        assert_eq!(edited[0].id, 2);
+
+        // 4. Filter unedited original photos
+        let unedited = query(&c, &Filter { copy_type: Some("unedited_original".into()), ..Default::default() }).unwrap();
+        assert_eq!(unedited.len(), 1);
+        assert_eq!(unedited[0].id, 1);
+
+        // 5. Save as new photo from photo 1 with custom develop and custom name
+        let mut d = Develop::default();
+        d.basic_tone.exposure = 1.5;
+        let new_id = save_as_new_photo(&c, 1, Some(&d), Some("B&W High Contrast")).unwrap();
+        assert_eq!(new_id, 3);
+
+        // Verify the saved new edited photo
+        let p3 = query(&c, &Filter { ids: Some(vec![3]), ..Default::default() }).unwrap();
+        assert_eq!(p3.len(), 1);
+        assert_eq!(p3[0].master_id, Some(1));
+        assert_eq!(p3[0].copy_name.as_deref(), Some("B&W High Contrast"));
+        assert!(p3[0].edited);
+
+        // 6. Filter saved new edited photos (copy)
+        let copies = query(&c, &Filter { copy_type: Some("copy".into()), ..Default::default() }).unwrap();
+        assert_eq!(copies.len(), 1);
+        assert_eq!(copies[0].id, 3);
+
+        // 7. Check aspect filter
+        let landscape = query(&c, &Filter { aspect: Some("landscape".into()), ..Default::default() }).unwrap();
+        assert_eq!(landscape.len(), 2); // id 1 (6000x4000) and id 3 (copied from 1)
+        let portrait = query(&c, &Filter { aspect: Some("portrait".into()), ..Default::default() }).unwrap();
+        assert_eq!(portrait.len(), 1); // id 2 (4000x6000)
+
+        // 8. Test bin functions: move to bin, bin_count, query in_bin, restore_from_bin
+        assert_eq!(bin_count(&c).unwrap(), 0);
+        let moved = move_to_bin(&c, &[1]).unwrap();
+        // Photo 1 and its virtual copy Photo 3 should both be moved to bin
+        assert!(moved.contains(&1));
+        assert!(moved.contains(&3));
+        assert_eq!(bin_count(&c).unwrap(), 2);
+
+        // Regular query now only returns photo 2
+        let regular = query(&c, &Filter::default()).unwrap();
+        assert_eq!(regular.len(), 1);
+        assert_eq!(regular[0].id, 2);
+
+        // Query bin explicitly
+        let in_bin = query(&c, &Filter { in_bin: Some(true), ..Default::default() }).unwrap();
+        assert_eq!(in_bin.len(), 2);
+
+        // Restore photo 1 from bin
+        let restored = restore_from_bin(&c, &[1]).unwrap();
+        assert!(restored.contains(&1));
+        assert!(restored.contains(&3));
+        assert_eq!(bin_count(&c).unwrap(), 0);
+
+        let regular_after = query(&c, &Filter::default()).unwrap();
+        assert_eq!(regular_after.len(), 3);
+    }
+
+    #[test]
+    fn test_migration_from_legacy_catalog_without_deleted_at() {
+        let dir = std::env::temp_dir().join(format!("ols-migration-test-{}", crate::new_token()));
+        fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("legacy.olcat");
+
+        // Create a database with the old schema (without deleted_at column and without photos_deleted index)
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE photos (
+                  id INTEGER PRIMARY KEY,
+                  path TEXT NOT NULL,
+                  folder TEXT NOT NULL,
+                  filename TEXT NOT NULL,
+                  master_id INTEGER,
+                  copy_name TEXT,
+                  width INTEGER NOT NULL DEFAULT 0,
+                  height INTEGER NOT NULL DEFAULT 0,
+                  captured_at TEXT,
+                  camera TEXT,
+                  lens TEXT,
+                  iso INTEGER,
+                  aperture REAL,
+                  shutter TEXT,
+                  focal_length REAL,
+                  rating INTEGER NOT NULL DEFAULT 0,
+                  flag INTEGER NOT NULL DEFAULT 0,
+                  color_label TEXT NOT NULL DEFAULT '',
+                  keywords TEXT NOT NULL DEFAULT '',
+                  develop_json TEXT NOT NULL DEFAULT '{}',
+                  history_pos INTEGER,
+                  thumb_v INTEGER NOT NULL DEFAULT 0,
+                  imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                  edited_at TEXT
+                );
+                CREATE UNIQUE INDEX photos_path ON photos(path) WHERE master_id IS NULL;
+                CREATE INDEX photos_folder ON photos(folder);
+                INSERT INTO photos (path, folder, filename) VALUES ('/tmp/photo1.jpg', '/tmp', 'photo1.jpg');",
+            )
+            .unwrap();
+        }
+
+        // Now open the legacy database with catalog::open - this should successfully migrate it!
+        let c = open(&db_path).expect("open should succeed and migrate the legacy database");
+
+        // Verify that deleted_at column is now usable
+        assert_eq!(bin_count(&c).unwrap(), 0);
+        let list = query(&c, &Filter::default()).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, 1);
+        assert_eq!(list[0].deleted_at, None);
+
+        // Verify that moving to bin works on the migrated catalog
+        let moved = move_to_bin(&c, &[1]).unwrap();
+        assert_eq!(moved, vec![1]);
+        assert_eq!(bin_count(&c).unwrap(), 1);
+
+        // Verify that restore works
+        let restored = restore_from_bin(&c, &[1]).unwrap();
+        assert_eq!(restored, vec![1]);
+        assert_eq!(bin_count(&c).unwrap(), 0);
+        drop(c);
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

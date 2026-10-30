@@ -22,7 +22,11 @@ export type Photo = {
   keywords: string;
   edited: boolean;
   thumb_v: number;
+  deleted_at: string | null;
 };
+
+export type CopyType = "all" | "original" | "copy" | "edited" | "unedited_original" | "edited_original";
+export type AspectFilter = "all" | "landscape" | "portrait" | "square";
 
 export type Filter = {
   folder?: string | null;
@@ -31,12 +35,30 @@ export type Filter = {
   flag?: string | null;
   color_label?: string | null;
   edited?: boolean | null;
+  /** original (master) | copy (saved new edited photo) | edited | unedited_original */
+  copy_type?: CopyType | null;
+  /** landscape | portrait | square */
+  aspect?: AspectFilter | null;
   /** Loaded pages of an Immich album (album id, or "favorites") */
   immich_album?: string | null;
   /** Only these photos (e.g. the results of an auto function) */
   ids?: number[] | null;
   /** Sidebar row being shown; UI only, the backend ignores it */
   view?: string | null;
+  /** Query items in the bin (trash) */
+  in_bin?: boolean | null;
+};
+
+export type FolderProgress = {
+  label?: string;
+  done: number;
+  total: number;
+};
+
+export type FolderLoading = {
+  viewId: string;
+  name: string;
+  progress?: FolderProgress;
 };
 
 export type Culling = { rating?: number; flag?: string; color_label?: string; keywords?: string };
@@ -151,7 +173,10 @@ export type Provider = {
   timeout_s: number;
   max_passes: number;
 };
+export type Theme = "system" | "dark" | "light" | "slate" | "warm" | "nordic" | "cyber" | "emerald" | "oled";
+
 export type Settings = {
+  theme?: Theme;
   mcp_enabled: boolean;
   mcp_port: number;
   mcp_token: string;
@@ -159,6 +184,9 @@ export type Settings = {
   active_provider: string;
   immich_url: string;
   google_client_id: string;
+  apple_photos_path?: string;
+  amazon_photos_path?: string;
+  adobe_cloud_path?: string;
   auto: AutoSettings;
   network_drives: NetworkDrive[];
   clouds: CloudAccount[];
@@ -267,7 +295,7 @@ export type DuplicateResult = {
   culled: { picks: number; rejects: number; rated: number } | null;
   cancelled: boolean;
 };
-export type Source = "immich" | "google";
+export type Source = "immich" | "google" | "apple" | "amazon" | "adobe";
 export type ImmichAlbum = { id: string; name: string; count: number };
 export type RemoteImport = { folder: string; imported: number; skipped: number; failed: number; error: string | null };
 export type AppInfo = { data_dir: string; thumbs_dir: string; exe: string | null; mcp_url: string; mcp_status: string };
@@ -322,7 +350,15 @@ export const api = {
   setSelection: (ids: number[]) => invoke("set_selection", { ids }),
   update: (ids: number[], update: Culling) => invoke<number>("update_photos", { ids, update }),
   virtualCopy: (id: number) => invoke<number>("virtual_copy", { id }),
+  /** Save current edit settings as a new photo entry (virtual copy) in catalog */
+  saveAsNewPhoto: (id: number, develop?: Develop, name?: string) =>
+    invoke<Photo>("save_as_new_photo", { id, develop, name: name?.trim() || null }),
   remove: (ids: number[]) => invoke("remove_photos", { ids }),
+  binCount: () => invoke<number>("bin_count"),
+  moveToBin: (ids: number[]) => invoke<number>("move_to_bin", { ids }),
+  restoreFromBin: (ids: number[]) => invoke<number>("restore_from_bin", { ids }),
+  permanentDelete: (ids: number[]) => invoke<number>("permanent_delete", { ids }),
+  emptyBin: () => invoke<number>("empty_bin"),
   getDevelop: (id: number) => invoke<Develop>("get_develop", { id }),
   defaultDevelop: () => invoke<Develop>("default_develop"),
   /** fullFrame: no crop or straighten, so view coordinates are mask coordinates */
@@ -360,6 +396,15 @@ export const api = {
   immichOpen: (album: string | null, page: number) => invoke<{ next: number | null }>("immich_open", { album, page }),
   googleConnect: (clientId: string, clientSecret: string) => invoke<Settings>("google_connect", { clientId, clientSecret }),
   googleImport: () => invoke<RemoteImport>("google_import"),
+  appleDetect: () => invoke<{ found: boolean; default_path: string }>("apple_detect"),
+  appleConnect: (path: string) => invoke<Settings>("apple_connect", { path }),
+  appleImport: () => invoke<RemoteImport>("apple_import"),
+  amazonDetect: () => invoke<{ found: boolean; default_path: string }>("amazon_detect"),
+  amazonConnect: (path: string, accountName?: string) => invoke<Settings>("amazon_connect", { path, accountName: accountName ?? "" }),
+  amazonImport: () => invoke<RemoteImport>("amazon_import"),
+  adobeDetect: () => invoke<{ found: boolean; default_path: string }>("adobe_detect"),
+  adobeConnect: (path: string, accountName?: string) => invoke<Settings>("adobe_connect", { path, accountName: accountName ?? "" }),
+  adobeImport: () => invoke<RemoteImport>("adobe_import"),
   remoteDisconnect: (source: Source) => invoke<Settings>("remote_disconnect", { source }),
   storage: () => invoke<StorageReport>("storage_report"),
   /** Returns how many files, photos or history steps went */

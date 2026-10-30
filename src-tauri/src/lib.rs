@@ -27,6 +27,7 @@ pub const PROXY_EDGE: u32 = 1600;
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(default)]
 pub struct Settings {
+    pub theme: String,
     pub mcp_enabled: bool,
     pub mcp_port: u16,
     pub mcp_token: String,
@@ -36,6 +37,12 @@ pub struct Settings {
     pub immich_url: String,
     /// OAuth client of the signed-in Google account; secret and refresh token are in the keychain.
     pub google_client_id: String,
+    /// Apple Photos Library or iCloud Photos sync path.
+    pub apple_photos_path: String,
+    /// Amazon Photos sync folder path or endpoint.
+    pub amazon_photos_path: String,
+    /// Adobe Creative Cloud / Lightroom Photos sync path.
+    pub adobe_cloud_path: String,
     /// Advanced settings of the auto functions, and what runs on new photos.
     pub auto: auto::AutoSettings,
     /// Shares on a NAS or server, browsed in place like folders.
@@ -47,6 +54,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            theme: "system".into(),
             mcp_enabled: true,
             mcp_port: 41920,
             mcp_token: new_token(),
@@ -54,6 +62,9 @@ impl Default for Settings {
             active_provider: "cli:claude".into(),
             immich_url: String::new(),
             google_client_id: String::new(),
+            apple_photos_path: String::new(),
+            amazon_photos_path: String::new(),
+            adobe_cloud_path: String::new(),
             auto: Default::default(),
             network_drives: vec![],
             clouds: vec![],
@@ -248,6 +259,16 @@ impl Core {
         Ok(new)
     }
 
+    pub fn save_as_new_photo(self: &Arc<Self>, id: i64, develop: Option<Develop>, name: Option<String>) -> Result<catalog::Photo, String> {
+        let mut d = develop.unwrap_or_else(|| self.develop(id).unwrap_or_default());
+        d.clamp();
+        let new_id = catalog::save_as_new_photo(&self.db(), id, Some(&d), name.as_deref())?;
+        let _ = fs::copy(self.thumb_path(id), self.thumb_path(new_id));
+        self.refresh(new_id, &d)?;
+        self.emit("catalog-changed", json!({"id": new_id}));
+        self.photo(new_id)
+    }
+
     /// Removes photos and their virtual copies from the catalog; files on disk stay.
     pub fn remove(&self, ids: &[i64]) -> Result<usize, String> {
         let gone = catalog::remove(&self.db(), ids)?;
@@ -256,6 +277,66 @@ impl Core {
         }
         self.emit("catalog-changed", json!({}));
         Ok(gone.len())
+    }
+
+    /// Moves photos and their virtual copies to the bin (soft delete).
+    pub fn move_to_bin(&self, ids: &[i64]) -> Result<usize, String> {
+        let moved = catalog::move_to_bin(&self.db(), ids)?;
+        self.emit("catalog-changed", json!({}));
+        Ok(moved.len())
+    }
+
+    /// Restores photos and their virtual copies from the bin back to the library.
+    pub fn restore_from_bin(&self, ids: &[i64]) -> Result<usize, String> {
+        let restored = catalog::restore_from_bin(&self.db(), ids)?;
+        self.emit("catalog-changed", json!({}));
+        Ok(restored.len())
+    }
+
+    /// Permanently deletes photos from the bin, including actual files on disk for originals.
+    pub fn permanent_delete(&self, ids: &[i64]) -> Result<usize, String> {
+        // Look up photos to identify original files on disk
+        let photos = catalog::photos(&self.db(), ids)?;
+        for p in &photos {
+            // Delete file from disk only if it is an original (not a virtual copy)
+            if p.master_id.is_none() && !p.path.starts_with("immich://") {
+                let path = Path::new(&p.path);
+                if path.exists() {
+                    let _ = fs::remove_file(path);
+                }
+                // Also remove possible sidecar .xmp files
+                let xmp1 = path.with_extension("xmp");
+                if xmp1 != path && xmp1.exists() {
+                    let _ = fs::remove_file(xmp1);
+                }
+                let xmp2 = PathBuf::from(format!("{}.xmp", p.path));
+                if xmp2 != path && xmp2.exists() {
+                    let _ = fs::remove_file(xmp2);
+                }
+            }
+        }
+        let gone = catalog::remove(&self.db(), ids)?;
+        for &id in &gone {
+            let _ = fs::remove_file(self.thumb_path(id));
+        }
+        self.emit("catalog-changed", json!({}));
+        Ok(gone.len())
+    }
+
+    /// Empties the bin by permanently deleting all trashed photos and their files on disk.
+    pub fn empty_bin(&self) -> Result<usize, String> {
+        let c = self.db();
+        let mut st = c.prepare("SELECT id FROM photos WHERE deleted_at IS NOT NULL").map_err(es)?;
+        let ids: Vec<i64> = st.query_map([], |r| r.get(0)).map_err(es)?.flatten().collect();
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        self.permanent_delete(&ids)
+    }
+
+    /// Count of photos currently in the bin.
+    pub fn bin_count(&self) -> Result<i64, String> {
+        catalog::bin_count(&self.db())
     }
 
     /// Full-resolution export of the current edits. Never overwrites existing files.
@@ -323,7 +404,7 @@ fn list_folders(core: St) -> Result<Vec<(String, i64)>, String> {
 fn import_folder(core: St, path: String) -> Result<usize, String> {
     let c = core.inner().clone();
     let ids = catalog::import(&core, Path::new(&path), &|done, total| {
-        c.emit("import-progress", json!({"done": done, "total": total}))
+        c.emit("import-progress", json!({"label": "Reading folder", "done": done, "total": total}))
     })?;
     core.emit("catalog-changed", json!({}));
     let n = ids.len();
@@ -347,8 +428,38 @@ fn virtual_copy(core: St, id: i64) -> Result<i64, String> {
 }
 
 #[tauri::command(async)]
+fn save_as_new_photo(core: St, id: i64, develop: Option<Develop>, name: Option<String>) -> Result<catalog::Photo, String> {
+    core.save_as_new_photo(id, develop, name)
+}
+
+#[tauri::command(async)]
 fn remove_photos(core: St, ids: Vec<i64>) -> Result<usize, String> {
     core.remove(&ids)
+}
+
+#[tauri::command(async)]
+fn bin_count(core: St) -> Result<i64, String> {
+    core.bin_count()
+}
+
+#[tauri::command(async)]
+fn move_to_bin(core: St, ids: Vec<i64>) -> Result<usize, String> {
+    core.move_to_bin(&ids)
+}
+
+#[tauri::command(async)]
+fn restore_from_bin(core: St, ids: Vec<i64>) -> Result<usize, String> {
+    core.restore_from_bin(&ids)
+}
+
+#[tauri::command(async)]
+fn permanent_delete(core: St, ids: Vec<i64>) -> Result<usize, String> {
+    core.permanent_delete(&ids)
+}
+
+#[tauri::command(async)]
+fn empty_bin(core: St) -> Result<usize, String> {
+    core.empty_bin()
 }
 
 #[tauri::command(async)]
@@ -611,6 +722,51 @@ fn google_import(core: St) -> Result<Value, String> {
 }
 
 #[tauri::command]
+fn apple_detect() -> Value {
+    remote::apple_detect()
+}
+
+#[tauri::command(async)]
+fn apple_connect(core: St, path: String) -> Result<Settings, String> {
+    remote::apple_connect(&core, &path)
+}
+
+#[tauri::command(async)]
+fn apple_import(core: St) -> Result<Value, String> {
+    remote::apple_import(core.inner())
+}
+
+#[tauri::command]
+fn amazon_detect() -> Value {
+    remote::amazon_detect()
+}
+
+#[tauri::command(async)]
+fn amazon_connect(core: St, path: String, account_name: Option<String>) -> Result<Settings, String> {
+    remote::amazon_connect(&core, &path, account_name.as_deref().unwrap_or(""))
+}
+
+#[tauri::command(async)]
+fn amazon_import(core: St) -> Result<Value, String> {
+    remote::amazon_import(core.inner())
+}
+
+#[tauri::command]
+fn adobe_detect() -> Value {
+    remote::adobe_detect()
+}
+
+#[tauri::command(async)]
+fn adobe_connect(core: St, path: String, account_name: Option<String>) -> Result<Settings, String> {
+    remote::adobe_connect(&core, &path, account_name.as_deref().unwrap_or(""))
+}
+
+#[tauri::command(async)]
+fn adobe_import(core: St) -> Result<Value, String> {
+    remote::adobe_import(core.inner())
+}
+
+#[tauri::command]
 fn remote_disconnect(core: St, source: String) -> Result<Settings, String> {
     remote::disconnect(&core, &source)
 }
@@ -751,7 +907,13 @@ pub fn run() {
             set_selection,
             update_photos,
             virtual_copy,
+            save_as_new_photo,
             remove_photos,
+            bin_count,
+            move_to_bin,
+            restore_from_bin,
+            permanent_delete,
+            empty_bin,
             get_develop,
             default_develop,
             render_preview,
@@ -778,6 +940,15 @@ pub fn run() {
             immich_open,
             google_connect,
             google_import,
+            apple_detect,
+            apple_connect,
+            apple_import,
+            amazon_detect,
+            amazon_connect,
+            amazon_import,
+            adobe_detect,
+            adobe_connect,
+            adobe_import,
             remote_disconnect,
             storage_report,
             clean_up,

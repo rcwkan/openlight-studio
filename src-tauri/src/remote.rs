@@ -31,6 +31,10 @@ const GOOGLE_KEY: &str = "remote:google-photos";
 const GOOGLE_TOKEN: &str = "https://oauth2.googleapis.com/token";
 const PICKER: &str = "https://photospicker.googleapis.com/v1";
 
+const APPLE_KEY: &str = "remote:apple-photos";
+const AMAZON_KEY: &str = "remote:amazon-photos";
+const ADOBE_KEY: &str = "remote:adobe-photos";
+
 type Reply = Result<ureq::http::Response<ureq::Body>, ureq::Error>;
 
 /// No overall deadline (originals can be large); a stalled read gives up after a minute.
@@ -75,6 +79,18 @@ pub fn disconnect(core: &Core, source: &str) -> Result<Settings, String> {
         "google" => {
             ai::set_key(GOOGLE_KEY, "")?;
             update_settings(core, |s| s.google_client_id.clear())
+        }
+        "apple" => {
+            ai::set_key(APPLE_KEY, "")?;
+            update_settings(core, |s| s.apple_photos_path.clear())
+        }
+        "amazon" => {
+            ai::set_key(AMAZON_KEY, "")?;
+            update_settings(core, |s| s.amazon_photos_path.clear())
+        }
+        "adobe" => {
+            ai::set_key(ADOBE_KEY, "")?;
+            update_settings(core, |s| s.adobe_cloud_path.clear())
         }
         _ => Err(format!("unknown source '{source}'")),
     }
@@ -496,10 +512,261 @@ pub fn google_import(core: &Arc<Core>) -> Result<Value, String> {
 }
 
 // ---------------------------------------------------------------------------
+// Apple iCloud Photos, Amazon Photos, Adobe Cloud Photos
+// ---------------------------------------------------------------------------
+
+fn copy_to_service_export(base_path: &Path, default_dest: &Path, file: &str) -> Result<String, String> {
+    let source_path = Path::new(file);
+    let name = file_name(file);
+    let export_dir = if base_path.as_os_str().is_empty() {
+        default_dest.to_path_buf()
+    } else if base_path.is_dir() {
+        base_path.join("OpenLight Exports")
+    } else {
+        base_path.parent().map(|p| p.join("OpenLight Exports")).unwrap_or_else(|| default_dest.to_path_buf())
+    };
+    fs::create_dir_all(&export_dir).map_err(es)?;
+    let dest_file = export_dir.join(&name);
+    fs::copy(source_path, &dest_file).map_err(es)?;
+    Ok(name)
+}
+
+fn scan_supported_photos(dir: &Path, max_depth: usize) -> Vec<PathBuf> {
+    let mut results = Vec::new();
+    scan_supported_photos_inner(dir, 0, max_depth, &mut results);
+    results
+}
+
+fn scan_supported_photos_inner(dir: &Path, depth: usize, max_depth: usize, out: &mut Vec<PathBuf>) {
+    if depth > max_depth {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if !name.starts_with('.') && name != "derivatives" && name != "resources" {
+                scan_supported_photos_inner(&path, depth + 1, max_depth, out);
+            }
+        } else if develop::is_supported(&path) {
+            out.push(path);
+        }
+    }
+}
+
+fn sync_local_photos_into(
+    core: &Arc<Core>,
+    service_label: &str,
+    src_dir: &Path,
+    dest_subfolder: &str,
+) -> Result<Value, String> {
+    let dest = core.dir.join("remote").join(dest_subfolder);
+    fs::create_dir_all(&dest).map_err(es)?;
+
+    let scan_root = if src_dir.join("originals").is_dir() {
+        src_dir.join("originals")
+    } else if src_dir.join("Masters").is_dir() {
+        src_dir.join("Masters")
+    } else {
+        src_dir.to_path_buf()
+    };
+
+    let files = scan_supported_photos(&scan_root, 6);
+    let total = files.len();
+    let mut skipped_count = 0;
+    let mut failed_count = 0;
+
+    let have: HashSet<String> = fs::read_dir(&dest)
+        .map_err(es)?
+        .flatten()
+        .filter_map(|e| e.path().file_name().map(|s| s.to_string_lossy().into_owned()))
+        .collect();
+
+    for (i, file) in files.iter().enumerate() {
+        let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        if name.is_empty() {
+            skipped_count += 1;
+            continue;
+        }
+
+        if i % 10 == 0 || i + 1 == total {
+            core.emit("import-progress", json!({
+                "label": format!("Syncing {service_label}"),
+                "done": i + 1,
+                "total": total
+            }));
+        }
+
+        let mut target_file = dest.join(&name);
+        if have.contains(&name) || target_file.exists() {
+            if fs::canonicalize(&target_file).ok() == fs::canonicalize(file).ok() {
+                skipped_count += 1;
+                continue;
+            }
+            let stem = file.file_stem().and_then(|s| s.to_str()).unwrap_or("photo");
+            let ext_str = file.extension().and_then(|e| e.to_str()).unwrap_or("jpg");
+            let hash = crate::new_token();
+            let short_hash = &hash[..8];
+            target_file = dest.join(format!("{stem}_{short_hash}.{ext_str}"));
+            if target_file.exists() {
+                skipped_count += 1;
+                continue;
+            }
+        }
+
+        #[cfg(unix)]
+        let link_res = std::os::unix::fs::symlink(file, &target_file);
+        #[cfg(windows)]
+        let link_res = std::os::windows::fs::symlink_file(file, &target_file);
+
+        if link_res.is_err() {
+            if let Err(e) = fs::copy(file, &target_file) {
+                eprintln!("{service_label} copy error {}: {e}", file.display());
+                failed_count += 1;
+                continue;
+            }
+        }
+    }
+
+    let ids = catalog::import(core, &dest, &|done, tot| {
+        core.emit("import-progress", json!({"done": done, "total": tot}));
+    })?;
+
+    core.emit("catalog-changed", json!({}));
+    crate::auto::after_import(core, ids.clone(), "cloud");
+
+    Ok(json!({
+        "folder": dest,
+        "imported": ids.len(),
+        "skipped": skipped_count,
+        "failed": failed_count,
+        "error": Value::Null,
+    }))
+}
+
+pub fn apple_detect() -> Value {
+    let mut candidates = Vec::new();
+    if let Some(pic) = dirs::picture_dir() {
+        candidates.push(pic.join("Photos Library.photoslibrary"));
+        candidates.push(pic.join("iCloud Photos"));
+        candidates.push(pic.join("iCloud Photos/Photos"));
+    }
+    if let Some(home) = dirs::home_dir() {
+        candidates.push(home.join("Pictures/Photos Library.photoslibrary"));
+        candidates.push(home.join("Library/Mobile Documents/com~apple~CloudDocs/Photos"));
+        candidates.push(home.join("Pictures/iCloud Photos"));
+    }
+    for c in &candidates {
+        if c.exists() {
+            return json!({ "found": true, "default_path": c.to_string_lossy() });
+        }
+    }
+    let fallback = dirs::picture_dir()
+        .map(|p| p.join("Photos Library.photoslibrary"))
+        .unwrap_or_default();
+    json!({ "found": false, "default_path": fallback.to_string_lossy() })
+}
+
+pub fn apple_connect(core: &Core, path: &str) -> Result<Settings, String> {
+    let p = Path::new(path.trim());
+    if !path.trim().is_empty() && !p.exists() {
+        return Err(format!("Path does not exist: {}", path));
+    }
+    ai::set_key(APPLE_KEY, path.trim())?;
+    update_settings(core, |s| s.apple_photos_path = path.trim().into())
+}
+
+pub fn apple_import(core: &Arc<Core>) -> Result<Value, String> {
+    let path = core.settings.lock().unwrap().apple_photos_path.clone();
+    if path.is_empty() {
+        return Err("Apple iCloud Photos is not connected".into());
+    }
+    sync_local_photos_into(core, "Apple iCloud Photos", Path::new(&path), "Apple iCloud Photos")
+}
+
+pub fn amazon_detect() -> Value {
+    let mut candidates = Vec::new();
+    if let Some(pic) = dirs::picture_dir() {
+        candidates.push(pic.join("Amazon Photos"));
+        candidates.push(pic.join("Amazon Drive/Pictures"));
+        candidates.push(pic.join("Amazon Drive"));
+    }
+    if let Some(home) = dirs::home_dir() {
+        candidates.push(home.join("Amazon Photos"));
+        candidates.push(home.join("Pictures/Amazon Photos"));
+        candidates.push(home.join("Amazon Drive/Pictures"));
+    }
+    for c in &candidates {
+        if c.exists() {
+            return json!({ "found": true, "default_path": c.to_string_lossy() });
+        }
+    }
+    let fallback = dirs::picture_dir()
+        .map(|p| p.join("Amazon Photos"))
+        .unwrap_or_default();
+    json!({ "found": false, "default_path": fallback.to_string_lossy() })
+}
+
+pub fn amazon_connect(core: &Core, path: &str, account: &str) -> Result<Settings, String> {
+    let p = Path::new(path.trim());
+    if !path.trim().is_empty() && !p.exists() {
+        return Err(format!("Path does not exist: {}", path));
+    }
+    let info = json!({ "path": path.trim(), "account": account.trim() }).to_string();
+    ai::set_key(AMAZON_KEY, &info)?;
+    update_settings(core, |s| s.amazon_photos_path = path.trim().into())
+}
+
+pub fn amazon_import(core: &Arc<Core>) -> Result<Value, String> {
+    let path = core.settings.lock().unwrap().amazon_photos_path.clone();
+    if path.is_empty() {
+        return Err("Amazon Photos is not connected".into());
+    }
+    sync_local_photos_into(core, "Amazon Photos", Path::new(&path), "Amazon Photos")
+}
+
+pub fn adobe_detect() -> Value {
+    let mut candidates = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        candidates.push(home.join("Creative Cloud Files"));
+        candidates.push(home.join("Creative Cloud Files (Personal)"));
+        candidates.push(home.join("Creative Cloud Files (Team)"));
+    }
+    for c in &candidates {
+        if c.exists() {
+            return json!({ "found": true, "default_path": c.to_string_lossy() });
+        }
+    }
+    let fallback = dirs::home_dir()
+        .map(|p| p.join("Creative Cloud Files"))
+        .unwrap_or_default();
+    json!({ "found": false, "default_path": fallback.to_string_lossy() })
+}
+
+pub fn adobe_connect(core: &Core, path: &str, account: &str) -> Result<Settings, String> {
+    let p = Path::new(path.trim());
+    if !path.trim().is_empty() && !p.exists() {
+        return Err(format!("Path does not exist: {}", path));
+    }
+    let info = json!({ "path": path.trim(), "account": account.trim() }).to_string();
+    ai::set_key(ADOBE_KEY, &info)?;
+    update_settings(core, |s| s.adobe_cloud_path = path.trim().into())
+}
+
+pub fn adobe_import(core: &Arc<Core>) -> Result<Value, String> {
+    let path = core.settings.lock().unwrap().adobe_cloud_path.clone();
+    if path.is_empty() {
+        return Err("Adobe Cloud Photos is not connected".into());
+    }
+    sync_local_photos_into(core, "Adobe Cloud Photos", Path::new(&path), "Adobe Cloud Photos")
+}
+
+// ---------------------------------------------------------------------------
 // Upload
 // ---------------------------------------------------------------------------
 
-/// Upload rendered exports (`files[i]` shows photo `ids[i]`) to `immich` or `google`.
+/// Upload rendered exports (`files[i]` shows photo `ids[i]`) to `immich`, `google`, `apple`, `amazon`, or `adobe`.
 /// Returns the uploaded file names.
 pub fn upload(core: &Core, dest: &str, ids: &[i64], files: &[String]) -> Result<Vec<String>, String> {
     let agent = agent();
@@ -511,6 +778,21 @@ pub fn upload(core: &Core, dest: &str, ids: &[i64], files: &[String]) -> Result<
         "google" => {
             let bearer = format!("Bearer {}", google_access_token(core)?);
             Box::new(move |_: i64, file: &str| google_upload(&agent, &bearer, file))
+        }
+        "apple" => {
+            let path = core.settings.lock().unwrap().apple_photos_path.clone();
+            let default_dest = core.dir.join("remote").join("Apple iCloud Photos").join("Exports");
+            Box::new(move |_: i64, file: &str| copy_to_service_export(Path::new(&path), &default_dest, file))
+        }
+        "amazon" => {
+            let path = core.settings.lock().unwrap().amazon_photos_path.clone();
+            let default_dest = core.dir.join("remote").join("Amazon Photos").join("Exports");
+            Box::new(move |_: i64, file: &str| copy_to_service_export(Path::new(&path), &default_dest, file))
+        }
+        "adobe" => {
+            let path = core.settings.lock().unwrap().adobe_cloud_path.clone();
+            let default_dest = core.dir.join("remote").join("Adobe Cloud Photos").join("Exports");
+            Box::new(move |_: i64, file: &str| copy_to_service_export(Path::new(&path), &default_dest, file))
         }
         _ => return Err(format!("unknown upload destination '{dest}'")),
     };
