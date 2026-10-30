@@ -1,4 +1,5 @@
 import { ask } from "@tauri-apps/plugin-dialog";
+import { getVersion } from "@tauri-apps/api/app";
 import { useEffect, useState } from "react";
 import { Agent, Log } from "./Agent";
 import { api, AppInfo, CleanUp, JobProgress, Settings, size, Source, StorageReport } from "./api";
@@ -13,13 +14,14 @@ const num = (n: number) => n.toLocaleString();
 const plural = (n: number, word: string) => `${num(n)} ${word}${n === 1 ? "" : "s"}`;
 const short = (folder: string) => folder.split(/[\\/]/).slice(-2).join("/");
 
-export type SettingsTab = "appearance" | "locations" | "duplicate" | "usage" | "agent";
+export type SettingsTab = "appearance" | "locations" | "duplicate" | "usage" | "agent" | "about";
 const TABS: [SettingsTab, string][] = [
   ["appearance", "Appearance"],
   ["locations", "Locations"],
   ["duplicate", "Duplicate"],
   ["usage", "Usage & clean up"],
   ["agent", "AI & MCP"],
+  ["about", "About"],
 ];
 
 /** Settings: Appearance & theme selection, storage locations, duplicate detection, library clean-up, and AI & MCP configuration. */
@@ -60,6 +62,7 @@ export function SettingsView(p: {
           clearLogs={p.clearLogs ?? (() => { })}
         />
       )}
+      {p.tab === "about" && <About />}
     </div>
   );
 }
@@ -680,6 +683,37 @@ function Usage({ onSettingsChanged }: { onSettingsChanged: () => void }) {
           </div>
         </div>
       </section>
+    </div>
+  );
+}
+
+/** About: app name and version, disclaimer, and developer contact. */
+function About() {
+  const [version, setVersion] = useState("");
+  useEffect(() => void getVersion().then(setVersion, () => {}), []);
+  return (
+    <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-4 text-[12px]">
+      <div className="flex w-[520px] flex-col gap-4">
+        <section className={card}>
+          <h3 className={heading}>App info</h3>
+          <p className="text-[15px] font-semibold text-neutral-100">OpenLight Studio</p>
+          <p className="text-neutral-400">Version {version || "—"}</p>
+          <p className="mt-2 text-neutral-300">Non-destructive RAW processor and photo catalog with a built-in MCP server and a pluggable AI/agent router.</p>
+        </section>
+        <section className={card}>
+          <h3 className={heading}>Disclaimer</h3>
+          <p className="text-neutral-300">
+            OpenLight Studio is provided "as is", without warranty of any kind, express or implied. The developer is not liable for any loss of or damage to
+            photos, data or equipment arising from its use. Edits are non-destructive, but always keep backups of your originals. AI-assisted edits and
+            third-party services (Immich, Google Photos, cloud storage, AI providers) are used at your own discretion and subject to their own terms.
+          </p>
+        </section>
+        <section className={card}>
+          <h3 className={heading}>Developer</h3>
+          <p className="select-text text-neutral-200">Ross Kan</p>
+          <p className="select-text text-neutral-400">ross.kan@gmail.com</p>
+        </section>
+      </div>
     </div>
   );
 }

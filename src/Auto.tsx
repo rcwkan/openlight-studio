@@ -29,6 +29,8 @@ export function AutoTab(p: {
   /** heal away the objects of selection `mask` */
   remove: (mask: number) => Promise<void>;
   ask: (prompt: string) => void;
+  aiBusy?: boolean;
+  aiPrompt?: string;
 }) {
   const [busy, setBusy] = useState<string | null>(null);
   const run = (key: string, label: ReactNode, f: () => Promise<void>, title: string, className = "") => (
@@ -50,11 +52,20 @@ export function AutoTab(p: {
       {busy === key ? "Working…" : label}
     </Btn>
   );
-  const ai = (label: string, prompt: string, title: string) => (
-    <Btn key={label} title={`${title} — asks the AI provider; follow it in the AI bar`} onClick={() => p.ask(prompt)}>
-      ✦ {label}
-    </Btn>
-  );
+  const ai = (label: string, prompt: string, title: string) => {
+    const isRunningThis = !!p.aiBusy && p.aiPrompt === prompt;
+    return (
+      <Btn
+        key={label}
+        disabled={!!p.aiBusy}
+        active={isRunningThis}
+        title={`${title} — asks the AI provider; follow it in the AI bar`}
+        onClick={() => p.ask(prompt)}
+      >
+        {isRunningThis ? `✦ ${label}…` : `✦ ${label}`}
+      </Btn>
+    );
+  };
   const objects = p.dev.masks.flatMap((m, i) => (m.components.some((c) => c.type === "polygon" && c.op === "add") ? [{ m, i }] : []));
 
   return (

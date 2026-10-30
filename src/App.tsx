@@ -3,7 +3,7 @@ import { ask, open } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Log } from "./Agent";
 import { api, AppInfo, AutoFunction, CloudFolder, Culling, Develop as Dev, Filter, FolderLoading, JobProgress, LABELS, NetworkDrive, Photo, setThumbsDir, Settings, Source } from "./api";
-import { Develop } from "./Develop";
+import { AiTaskState, Develop } from "./Develop";
 import { ExportDialog, Library, RemoteDialog, SelectMods } from "./Library";
 import { CompareModal } from "./CompareModal";
 import { SettingsTab, SettingsView } from "./Settings";
@@ -39,6 +39,10 @@ export default function App() {
   const [binCount, setBinCount] = useState<number>(0);
   const [compareOpen, setCompareOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<{ ids: number[] } | null>(null);
+  const [workingIds, setWorkingIds] = useState<number[]>([]);
+  const [developId, setDevelopId] = useState<number | null>(null);
+  const [workingPhotosMap, setWorkingPhotosMap] = useState<Record<number, Photo>>({});
+  const [aiTasks, setAiTasks] = useState<Record<number, AiTaskState>>({});
 
   const reload = useCallback(async () => {
     const [ps, fs, bc] = await Promise.all([
@@ -55,6 +59,29 @@ export default function App() {
   useEffect(() => void reload(), [reload]);
 
   useEffect(() => {
+    if (!photos.length) return;
+    setWorkingPhotosMap((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const p of photos) {
+        if (next[p.id] !== p) {
+          next[p.id] = p;
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [photos]);
+
+  const refreshPhoto = useCallback(async (id: number) => {
+    const ph = await api.photo(id).catch(() => null);
+    if (ph) {
+      setPhotos((ps) => ps.map((p) => (p.id === ph.id ? ph : p)));
+      setWorkingPhotosMap((prev) => ({ ...prev, [ph.id]: ph }));
+    }
+  }, []);
+
+  useEffect(() => {
     api.appInfo().then((i) => (setThumbsDir(i.thumbs_dir), setInfo(i)));
     api.settings().then((s) => {
       setSettings(s);
@@ -69,7 +96,10 @@ export default function App() {
       listen("catalog-changed", () => reloadRef.current()),
       listen<{ id: number }>("thumb-changed", async (e) => {
         const ph = await api.photo(e.payload.id);
-        if (ph) setPhotos((ps) => ps.map((p) => (p.id === ph.id ? ph : p)));
+        if (ph) {
+          setPhotos((ps) => ps.map((p) => (p.id === ph.id ? ph : p)));
+          setWorkingPhotosMap((prev) => ({ ...prev, [ph.id]: ph }));
+        }
       }),
       listen<{ label?: string; done: number; total: number }>("import-progress", (e) => {
         setStatus(`${e.payload.label ?? "Adding photos"} ${e.payload.done} / ${e.payload.total}`);
@@ -102,10 +132,92 @@ export default function App() {
   }, [settings?.theme]);
 
   const active = photos.find((p) => p.id === activeId) ?? null;
+  const workingPhotos = workingIds
+    .map((id) => photos.find((p) => p.id === id) ?? workingPhotosMap[id])
+    .filter((p): p is Photo => Boolean(p));
+  const developActive =
+    (developId != null ? workingPhotos.find((p) => p.id === developId) ?? photos.find((p) => p.id === developId) ?? workingPhotosMap[developId] : null) ??
+    workingPhotos[0] ??
+    active;
+  const busyAiIds = Object.entries(aiTasks)
+    .filter(([, t]) => t.busy)
+    .map(([id]) => Number(id));
   // Auto Catalog & Culling of new photos runs in the background
   const culling = Object.values(jobs).find((j) => j.job.startsWith("on-import-"));
   const background = culling ? `Culling new photos${culling.total ? ` ${culling.done} / ${culling.total}` : "…"}` : "";
   const targets = () => (selected.length ? selected : activeId != null ? [activeId] : []);
+
+  const addWorkingImages = useCallback(
+    (ids: number[], focusTarget?: number) => {
+      const valid = ids.filter((id) => id != null);
+      if (!valid.length) return;
+      setWorkingIds((prev) => {
+        const next = [...prev];
+        for (const id of valid) {
+          if (!next.includes(id)) next.push(id);
+        }
+        return next;
+      });
+      for (const id of valid) {
+        const found = photos.find((p) => p.id === id);
+        if (found) {
+          setWorkingPhotosMap((prev) => ({ ...prev, [id]: found }));
+        } else {
+          void api.photo(id).then((ph) => {
+            if (ph) setWorkingPhotosMap((prev) => ({ ...prev, [id]: ph }));
+          });
+        }
+      }
+      if (focusTarget != null) {
+        setDevelopId(focusTarget);
+        setActiveId(focusTarget);
+      }
+    },
+    [photos],
+  );
+
+  const openInDevelop = (targetId?: number) => {
+    const toAdd =
+      targetId != null
+        ? selected.length > 1 && selected.includes(targetId)
+          ? selected
+          : [targetId]
+        : selected.length > 0
+          ? selected
+          : activeId != null
+            ? [activeId]
+            : [];
+    const primary = targetId ?? activeId ?? toAdd[0] ?? developId;
+    if (toAdd.length) {
+      addWorkingImages(toAdd, primary ?? undefined);
+    } else if (primary != null) {
+      setDevelopId(primary);
+    }
+    setModule("develop");
+  };
+
+  const closeWorkingImage = (id: number) => {
+    setWorkingIds((prev) => {
+      const idx = prev.indexOf(id);
+      if (idx === -1) return prev;
+      const next = prev.filter((x) => x !== id);
+      if (developId === id) {
+        const fallback = next[Math.min(idx, next.length - 1)] ?? null;
+        setDevelopId(fallback);
+        if (fallback != null) setActiveId(fallback);
+      }
+      if (next.length === 0) {
+        setModule("library");
+      }
+      return next;
+    });
+  };
+
+  const closeOtherWorkingImages = (keepId: number) => {
+    setWorkingIds([keepId]);
+    setDevelopId(keepId);
+    setActiveId(keepId);
+  };
 
   const select = (id: number, m: SelectMods) => {
     setSelected((sel) => {
@@ -119,6 +231,10 @@ export default function App() {
     if (!m.shift) setActiveId(id);
   };
   const focus = (id: number) => (setActiveId(id), setSelected([id]));
+  const focusDevelop = (id: number) => {
+    addWorkingImages([id], id);
+    setSelected([id]);
+  };
 
   const cull = async (u: Culling, idsOverride?: number[]) => {
     const ids = idsOverride || targets();
@@ -364,7 +480,9 @@ export default function App() {
     focus(n);
   };
   const handleSaveAsNewPhoto = async (newPhoto: Photo) => {
+    setWorkingPhotosMap((prev) => ({ ...prev, [newPhoto.id]: newPhoto }));
     await reload();
+    addWorkingImages([newPhoto.id], newPhoto.id);
     focus(newPhoto.id);
     const label = newPhoto.copy_name ? `${newPhoto.filename} (${newPhoto.copy_name})` : newPhoto.filename;
     setStatus(`Saved edit as new photo: ${label}`);
@@ -383,6 +501,8 @@ export default function App() {
       const n = await api.moveToBin(ids);
       setStatus(`Moved ${n} photo(s) to Bin`);
       setSelected((prev) => prev.filter((id) => !ids.includes(id)));
+      setWorkingIds((prev) => prev.filter((id) => !ids.includes(id)));
+      if (developId && ids.includes(developId)) setDevelopId(null);
       if (activeId && ids.includes(activeId)) setActiveId(null);
       await reload();
       setTimeout(() => setStatus(""), 4000);
@@ -420,6 +540,8 @@ export default function App() {
       const n = await api.permanentDelete(ids);
       setStatus(`Permanently deleted ${n} photo(s)`);
       setSelected([]);
+      setWorkingIds((prev) => prev.filter((id) => !ids.includes(id)));
+      if (developId && ids.includes(developId)) setDevelopId(null);
       setActiveId(null);
       await reload();
       setTimeout(() => setStatus(""), 4000);
@@ -453,8 +575,12 @@ export default function App() {
     if (!ids.length || !(await ask(`Remove ${ids.length} photo(s) from the catalog? Files on disk are not touched.`, { title: "Remove from catalog", kind: "warning" }))) return;
     await api.remove(ids);
     setSelected([]);
+    setWorkingIds((prev) => prev.filter((id) => !ids.includes(id)));
+    if (developId && ids.includes(developId)) setDevelopId(null);
     setActiveId(null);
   };
+
+  const canDevelop = Boolean(active || workingPhotos.length > 0 || developActive);
 
   const keys = useRef<(e: KeyboardEvent) => void>(() => { });
   keys.current = (e) => {
@@ -464,18 +590,29 @@ export default function App() {
       e.preventDefault();
       setCompareOpen((prev) => !prev);
     } else if (k === "g") setModule("library");
-    else if (k === "d" && active) setModule("develop");
-    else if (/^[0-5]$/.test(k)) cull({ rating: +k });
-    else if (k === "p") cull({ flag: "pick" });
-    else if (k === "x") cull({ flag: "reject" });
-    else if (k === "u") cull({ flag: "unflagged" });
+    else if (k === "d" && canDevelop) openInDevelop();
+    else if (/^[0-5]$/.test(k)) cull({ rating: +k }, module === "develop" && developActive ? [developActive.id] : undefined);
+    else if (k === "p") cull({ flag: "pick" }, module === "develop" && developActive ? [developActive.id] : undefined);
+    else if (k === "x") cull({ flag: "reject" }, module === "develop" && developActive ? [developActive.id] : undefined);
+    else if (k === "u") cull({ flag: "unflagged" }, module === "develop" && developActive ? [developActive.id] : undefined);
     else if (/^[6-9]$/.test(k)) {
       const label = LABELS[+k - 6];
-      cull({ color_label: active?.color_label === label ? "none" : label });
+      const curTarget = module === "develop" ? developActive : active;
+      cull({ color_label: curTarget?.color_label === label ? "none" : label }, curTarget ? [curTarget.id] : undefined);
     } else if (k === "arrowright" || k === "arrowleft") {
       e.preventDefault();
-      const i = photos.findIndex((p) => p.id === activeId) + (k === "arrowright" ? 1 : -1);
-      if (photos[i]) focus(photos[i].id);
+      if (module === "develop" && workingPhotos.length > 1) {
+        const curIdx = workingPhotos.findIndex((p) => p.id === developActive?.id);
+        const nextPhoto = workingPhotos[curIdx + (k === "arrowright" ? 1 : -1)];
+        if (nextPhoto) focusDevelop(nextPhoto.id);
+      } else {
+        const curId = module === "develop" ? developActive?.id ?? activeId : activeId;
+        const i = photos.findIndex((p) => p.id === curId) + (k === "arrowright" ? 1 : -1);
+        if (photos[i]) {
+          if (module === "develop") focusDevelop(photos[i].id);
+          else focus(photos[i].id);
+        }
+      }
     } else if (e.key === "Backspace" || e.key === "Delete") {
       e.preventDefault();
       if (filter.view === "bin" || e.shiftKey) {
@@ -513,8 +650,14 @@ export default function App() {
             return (
               <button
                 key={m}
-                onClick={() => setModule(m)}
-                disabled={m === "develop" && !active}
+                onClick={() => {
+                  if (m === "develop") {
+                    openInDevelop();
+                  } else {
+                    setModule(m);
+                  }
+                }}
+                disabled={m === "develop" && !canDevelop}
                 style={
                   isCur
                     ? {
@@ -524,14 +667,47 @@ export default function App() {
                     }
                     : undefined
                 }
-                className={`rounded-md px-3 py-1 text-[12px] transition-all duration-150 disabled:opacity-40 ${isCur ? "font-semibold shadow-xs" : "text-neutral-400 hover:text-neutral-200 hover:bg-neutral-900"
+                className={`flex items-center gap-1.5 rounded-md px-3 py-1 text-[12px] transition-all duration-150 disabled:opacity-40 ${isCur ? "font-semibold shadow-xs" : "text-neutral-400 hover:text-neutral-200 hover:bg-neutral-900"
                   }`}
               >
-                {label}
+                <span>{label}</span>
+                {m === "develop" && workingPhotos.length > 0 && (
+                  <span
+                    className={`rounded-full px-1.5 py-0.2 text-[10px] font-semibold leading-tight ${
+                      isCur ? "bg-black/25 text-white" : "bg-neutral-800 text-neutral-300"
+                    }`}
+                    title={`${workingPhotos.length} working image(s) open in Develop`}
+                  >
+                    {workingPhotos.length}
+                  </span>
+                )}
+                {m === "develop" && busyAiIds.length > 0 && (
+                  <span
+                    className={`flex items-center gap-1 rounded-full px-1.5 py-0.2 text-[10px] font-semibold animate-pulse ${
+                      isCur ? "bg-white/25 text-white" : "bg-violet-600/30 text-violet-300 border border-violet-500/40"
+                    }`}
+                    title={`AI fine tune / edit running on ${busyAiIds.length} image(s)`}
+                  >
+                    ✦ {busyAiIds.length > 1 ? busyAiIds.length : ""}
+                  </span>
+                )}
               </button>
             );
           })}
         </nav>
+        {busyAiIds.length > 0 && module !== "develop" && (
+          <button
+            type="button"
+            onClick={() => {
+              setDevelopId(busyAiIds[0]);
+              setModule("develop");
+            }}
+            className="flex items-center gap-1.5 rounded-full border border-violet-500/40 bg-violet-950/60 px-2.5 py-0.5 text-[11px] font-medium text-violet-200 hover:bg-violet-900/70 transition-colors cursor-pointer animate-pulse"
+            title="Click to view AI progress in Develop"
+          >
+            <span>✦ AI working on {busyAiIds.length} {busyAiIds.length === 1 ? "photo" : "photos"} in Develop…</span>
+          </button>
+        )}
         <span className="ml-auto truncate text-[11px] text-neutral-400" title={status}>
           {status || background}
         </span>
@@ -565,7 +741,14 @@ export default function App() {
           selected={selected}
           active={active}
           select={select}
-          openDevelop={(id) => (focus(id), setModule("develop"))}
+          openDevelop={(id) => openInDevelop(id)}
+          workingIds={workingIds}
+          busyAiIds={busyAiIds}
+          onAddWorking={(ids) => {
+            addWorkingImages(ids, developId ?? ids[0]);
+            setStatus(`Added ${ids.length} photo(s) to Develop working images`);
+            setTimeout(() => setStatus(""), 3500);
+          }}
           cull={cull}
           settings={settings}
           setSettings={setSettings}
@@ -605,20 +788,30 @@ export default function App() {
           }}
         />
       )}
-      {module === "develop" && defaults && (
-        <Develop
-          photos={photos}
-          active={active}
-          selected={selected}
-          setActive={focus}
-          defaults={defaults}
-          settings={settings}
-          setSettings={setSettings}
-          onExport={() => setExportIds(targets())}
-          onSaveAsNewPhoto={handleSaveAsNewPhoto}
-          logs={logs}
-          clearLogs={() => setLogs([])}
-        />
+      {defaults && (
+        <div className={module === "develop" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
+          <Develop
+            visible={module === "develop"}
+            photos={photos}
+            workingPhotos={workingPhotos}
+            active={developActive}
+            selected={selected}
+            setActive={focusDevelop}
+            onCloseWorking={closeWorkingImage}
+            onCloseOtherWorking={closeOtherWorkingImages}
+            onAddWorking={(ids) => addWorkingImages(ids, ids[0])}
+            aiTasks={aiTasks}
+            setAiTasks={setAiTasks}
+            onPhotoUpdated={refreshPhoto}
+            defaults={defaults}
+            settings={settings}
+            setSettings={setSettings}
+            onExport={() => setExportIds(developActive ? [developActive.id] : targets())}
+            onSaveAsNewPhoto={handleSaveAsNewPhoto}
+            logs={logs}
+            clearLogs={() => setLogs([])}
+          />
+        </div>
       )}
       {module === "settings" && (
         <SettingsView

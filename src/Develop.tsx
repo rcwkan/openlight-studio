@@ -7,11 +7,46 @@ import { ProTab } from "./Pro";
 import { api, Develop as Dev, getPath, HistoryEntry, Mask, MaskComponent, Photo, Proof, Rendered, setPath, Settings, srgbToOklch, thumbUrl } from "./api";
 import { Btn, ColorWheel, CurveEditor, Histogram, Panel, Seg, Slider } from "./controls";
 
+export interface AiTaskState {
+  prompt: string;
+  busy: boolean;
+  provider: string;
+  startTime: number | null;
+  elapsed: number;
+  result: { ok: boolean; text: string } | null;
+  runStartIdx: number | null;
+  showDetails: boolean;
+  userClosedDetails?: boolean;
+}
+
+type RTab = "adjust" | "selections" | "advanced" | "pro" | "auto";
+
+interface PhotoSessionCache {
+  dev: Dev;
+  history: HistoryEntry[];
+  maskSel: number | null;
+  compSel: number;
+  swatchSel: number | null;
+  zoom: number;
+  pan: { x: number; y: number };
+  rtab: RTab;
+  before: boolean;
+  overlay: boolean;
+}
+
 type Props = {
+  visible?: boolean;
   photos: Photo[];
+  workingPhotos: Photo[];
   active: Photo | null;
   selected: number[];
   setActive: (id: number) => void;
+  onCloseWorking?: (id: number) => void;
+  onCloseOtherWorking?: (keepId: number) => void;
+  onAddWorking?: (ids: number[]) => void;
+  aiTasks: Record<number, AiTaskState>;
+  setAiTasks: React.Dispatch<React.SetStateAction<Record<number, AiTaskState>>>;
+  onPhotoUpdated?: (id: number) => void;
   defaults: Dev;
   settings: Settings | null;
   setSettings: (s: Settings) => void;
@@ -109,6 +144,7 @@ function splitAiObjects(d: Dev): Dev | null {
 }
 
 export function Develop(p: Props) {
+  const isVisible = p.visible !== false;
   const id = p.active?.id ?? null;
   const [dev, setDev] = useState<Dev | null>(null);
   const [hist, setHist] = useState<Uint32Array[] | null>(null);
@@ -120,9 +156,7 @@ export function Develop(p: Props) {
   const [compSel, setCompSel] = useState(0);
   const [swatchSel, setSwatchSel] = useState<number | null>(null);
   const [overlay, setOverlay] = useState(false);
-  const [rtab, setRtab] = useState<"adjust" | "selections" | "advanced" | "pro" | "auto">("adjust");
-  /** a prompt for the AI bar to run (the Auto tab's ✦ buttons) */
-  const [ask, setAsk] = useState<{ text: string; n: number } | null>(null);
+  const [rtab, setRtab] = useState<RTab>("adjust");
   /** AI Select / spot heal: where the click being worked on was (normalised) */
   const [picking, setPicking] = useState<{ x: number; y: number } | null>(null);
   const [proof, setProof] = useState<Proof>({ gamut: null, clipping: false, spots: null });
@@ -148,6 +182,11 @@ export function Develop(p: Props) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const wrap = useRef<HTMLDivElement>(null);
   const boxRef = useRef<HTMLDivElement>(null);
+  const sessionCache = useRef<Record<number, PhotoSessionCache>>({});
+  const logsRef = useRef(p.logs);
+  logsRef.current = p.logs;
+  const aiTasksRef = useRef(p.aiTasks);
+  aiTasksRef.current = p.aiTasks;
 
   // --- edit state, debounced commits (one history step per gesture) ---------------------
   const devRef = useRef(dev);
@@ -156,15 +195,42 @@ export function Develop(p: Props) {
   idRef.current = id;
   const pending = useRef<{ id: number; d: Dev; label: string; timer: number } | null>(null);
 
-  const refreshHistory = useCallback(async (pid: number) => setHistory(await api.history(pid)), []);
+  // Keep per-photo session cache synchronized for instant switching between working images
+  useEffect(() => {
+    if (id != null && dev != null) {
+      sessionCache.current[id] = {
+        dev,
+        history,
+        maskSel,
+        compSel,
+        swatchSel,
+        zoom,
+        pan,
+        rtab,
+        before,
+        overlay,
+      };
+    }
+  }, [id, dev, history, maskSel, compSel, swatchSel, zoom, pan, rtab, before, overlay]);
+
+  const refreshHistory = useCallback(async (pid: number) => {
+    const h = await api.history(pid);
+    if (sessionCache.current[pid]) {
+      sessionCache.current[pid].history = h;
+    }
+    if (idRef.current === pid) {
+      setHistory(h);
+    }
+  }, []);
   const flush = useCallback(async () => {
     const pd = pending.current;
     if (!pd) return;
     clearTimeout(pd.timer);
     pending.current = null;
     await api.save(pd.id, pd.d, pd.label);
+    p.onPhotoUpdated?.(pd.id);
     if (pd.id === idRef.current) refreshHistory(pd.id);
-  }, [refreshHistory]);
+  }, [refreshHistory, p.onPhotoUpdated]);
   const change = useCallback(
     (d: Dev, label: string) => {
       if (idRef.current == null) return;
@@ -178,20 +244,62 @@ export function Develop(p: Props) {
   useEffect(() => {
     if (id == null) return;
     let live = true;
-    setDev(null);
-    setLoading(true);
-    setMaskSel(null);
-    setSwatchSel(null);
-    setTool("none");
-    setZoom(1);
-    setPan({ x: 0, y: 0 });
-    flush().then(() => api.getDevelop(id).then((d) => live && setDev(d)));
+    const cached = sessionCache.current[id];
+    setError(null);
+    if (cached) {
+      setDev(cached.dev);
+      setHistory(cached.history);
+      setMaskSel(cached.maskSel);
+      setCompSel(cached.compSel);
+      setSwatchSel(cached.swatchSel);
+      setZoom(cached.zoom);
+      setPan(cached.pan);
+      setRtab(cached.rtab);
+      setBefore(cached.before);
+      setOverlay(cached.overlay);
+      setTool("none");
+      setLoading(false);
+    } else {
+      setDev(null);
+      setLoading(true);
+      setMaskSel(null);
+      setSwatchSel(null);
+      setTool("none");
+      setZoom(1);
+      setPan({ x: 0, y: 0 });
+    }
+    flush().then(() =>
+      api.getDevelop(id).then((d) => {
+        if (live) setDev(d);
+      }),
+    );
     refreshHistory(id);
     return () => {
       live = false;
     };
   }, [id, flush, refreshHistory]);
   useEffect(() => () => void flush(), [flush]);
+
+  // Tick elapsed time for any running AI tasks across all working images
+  const anyAiBusy = Object.values(p.aiTasks).some((t) => t.busy);
+  useEffect(() => {
+    if (!anyAiBusy) return;
+    const interval = window.setInterval(() => {
+      const now = Date.now();
+      p.setAiTasks((prev) => {
+        let changed = false;
+        const next: Record<number, AiTaskState> = { ...prev };
+        for (const [k, t] of Object.entries(prev)) {
+          if (t.busy && t.startTime != null) {
+            next[Number(k)] = { ...t, elapsed: (now - t.startTime) / 1000 };
+            changed = true;
+          }
+        }
+        return changed ? next : prev;
+      });
+    }, 100);
+    return () => window.clearInterval(interval);
+  }, [anyAiBusy, p.setAiTasks]);
 
   const openSaveAsNewDialog = useCallback(() => {
     if (!p.active) return;
@@ -232,16 +340,26 @@ export function Develop(p: Props) {
     if (split) change(split, "Split AI objects");
   }, [dev, change]);
 
-  // edits from MCP agents / AI providers land here
+  // edits from MCP agents / AI providers land here (including for background working images)
   useEffect(() => {
     const un = listen<{ id: number }>("photo-changed", async (e) => {
-      if (e.payload.id !== idRef.current || pending.current) return;
-      const d = await api.getDevelop(e.payload.id);
-      if (JSON.stringify(d) !== JSON.stringify(devRef.current)) setDev(d);
-      refreshHistory(e.payload.id);
+      const changedId = e.payload.id;
+      p.onPhotoUpdated?.(changedId);
+      if (changedId === idRef.current) {
+        if (pending.current?.id === changedId) return;
+        const d = await api.getDevelop(changedId);
+        if (JSON.stringify(d) !== JSON.stringify(devRef.current)) setDev(d);
+        refreshHistory(changedId);
+      } else if (sessionCache.current[changedId]) {
+        const [d, h] = await Promise.all([api.getDevelop(changedId), api.history(changedId)]);
+        if (sessionCache.current[changedId]) {
+          sessionCache.current[changedId].dev = d;
+          sessionCache.current[changedId].history = h;
+        }
+      }
     });
     return () => void un.then((f) => f());
-  }, [refreshHistory]);
+  }, [refreshHistory, p.onPhotoUpdated]);
 
   // --- render loop: latest request wins, one render in flight --------------------------
   const job = useRef<{ id: number; d: Dev; skip: boolean; overlay: number | null; full: boolean; proof: Proof | null } | null>(null);
@@ -291,10 +409,16 @@ export function Develop(p: Props) {
   }, [id, dev, showBefore, skipCrop, fullFrame, overlay, maskSel, proof.gamut, proof.clipping, spots, p.defaults, pump]);
 
   useEffect(() => {
-    const ro = new ResizeObserver(([e]) => setBox({ w: e.contentRect.width, h: e.contentRect.height }));
-    ro.observe(boxRef.current!);
+    const el = boxRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(([e]) => {
+      if (e.contentRect.width > 0 && e.contentRect.height > 0) {
+        setBox({ w: e.contentRect.width, h: e.contentRect.height });
+      }
+    });
+    ro.observe(el);
     return () => ro.disconnect();
-  }, []);
+  }, [id, isVisible]);
   const fitScale = Math.min((box.w - 24) / imgSize.w, (box.h - 24) / imgSize.h, 1.5);
   const fillRatio = fitScale > 0 ? Math.max(box.w / (imgSize.w * fitScale), box.h / (imgSize.h * fitScale), 1) : 1;
   const scale = fitScale * zoom;
@@ -350,7 +474,7 @@ export function Develop(p: Props) {
     };
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);
-  }, [zoom, zoomTo, clampPan]);
+  }, [id, isVisible, zoom, zoomTo, clampPan]);
 
   // --- history, undo, copy/paste, sync -------------------------------------------------
   const undo = async (dir: number) => {
@@ -360,20 +484,106 @@ export function Develop(p: Props) {
     if (d) setDev(d);
     refreshHistory(id);
   };
-  // AI bar: a new mask from the run (e.g. "select the castle") is selected with its overlay on
-  const aiRun = async (prompt: string, provider: string) => {
-    if (id == null) throw "No photo";
-    await flush();
-    const masks = devRef.current?.masks.length ?? 0;
-    const text = await api.aiRun(id, prompt, provider);
-    const d = await api.getDevelop(id);
-    if (idRef.current === id) {
-      setDev(d);
-      refreshHistory(id);
-      if (d.masks.length > masks) (setMaskSel(d.masks.length - 1), setCompSel(0), setOverlay(true));
-    }
-    return text;
-  };
+
+  // Per-photo concurrent AI execution: keeps running even if the user switches tabs or working images
+  const runPhotoAi = useCallback(
+    async (targetId: number, promptText: string, providerOverride?: string) => {
+      const trimmed = promptText.trim();
+      if (!trimmed || !p.settings) return;
+      if (aiTasksRef.current[targetId]?.busy) return;
+      const provider = providerOverride ?? p.settings.active_provider;
+      const now = Date.now();
+      const startIdx = logsRef.current.length;
+
+      p.onAddWorking?.([targetId]);
+      p.setAiTasks((prev) => ({
+        ...prev,
+        [targetId]: {
+          prompt: trimmed,
+          busy: true,
+          provider,
+          startTime: now,
+          elapsed: 0,
+          result: null,
+          runStartIdx: startIdx,
+          showDetails: prev[targetId]?.userClosedDetails ? false : true,
+          userClosedDetails: prev[targetId]?.userClosedDetails ?? false,
+        },
+      }));
+
+      try {
+        if (pending.current?.id === targetId) {
+          await flush();
+        }
+        const beforeDev = targetId === idRef.current && devRef.current ? devRef.current : await api.getDevelop(targetId);
+        const masksBefore = beforeDev.masks.length;
+        const summary = await api.aiRun(targetId, trimmed, provider);
+        let d = await api.getDevelop(targetId);
+        const split = splitAiObjects(d);
+        if (split) {
+          d = await api.save(targetId, split, "Split AI objects");
+        }
+        const h = await api.history(targetId);
+        if (sessionCache.current[targetId]) {
+          sessionCache.current[targetId].dev = d;
+          sessionCache.current[targetId].history = h;
+          if (d.masks.length > masksBefore) {
+            sessionCache.current[targetId].maskSel = d.masks.length - 1;
+            sessionCache.current[targetId].compSel = 0;
+            sessionCache.current[targetId].overlay = true;
+          }
+        }
+        if (idRef.current === targetId) {
+          setDev(d);
+          setHistory(h);
+          if (d.masks.length > masksBefore) {
+            setMaskSel(d.masks.length - 1);
+            setCompSel(0);
+            setOverlay(true);
+          }
+        }
+        p.onPhotoUpdated?.(targetId);
+        p.setAiTasks((prev) => {
+          const cur = prev[targetId];
+          return {
+            ...prev,
+            [targetId]: {
+              ...(cur ?? {
+                prompt: trimmed,
+                provider,
+                runStartIdx: startIdx,
+                showDetails: true,
+              }),
+              busy: false,
+              startTime: null,
+              elapsed: (Date.now() - now) / 1000,
+              result: { ok: true, text: summary },
+            },
+          };
+        });
+      } catch (e) {
+        p.setAiTasks((prev) => {
+          const cur = prev[targetId];
+          return {
+            ...prev,
+            [targetId]: {
+              ...(cur ?? {
+                prompt: trimmed,
+                provider,
+                runStartIdx: startIdx,
+                showDetails: true,
+              }),
+              busy: false,
+              startTime: null,
+              elapsed: (Date.now() - now) / 1000,
+              result: { ok: false, text: String(e) },
+            },
+          };
+        });
+      }
+    },
+    [flush, p.settings, p.onAddWorking, p.setAiTasks, p.onPhotoUpdated],
+  );
   // AI Select: each clicked object becomes its own selection (⌥-click subtracts from the active one)
   const aiSelect = async (x: number, y: number, subtract: boolean) => {
     if (id == null || !p.settings || picking) return;
@@ -476,11 +686,17 @@ export function Develop(p: Props) {
     if (tool === "guides" || tool === "spot") setTool("none");
   };
 
-  const others = p.selected.filter((s) => s !== id);
+  const others = Array.from(new Set([...p.selected, ...p.workingPhotos.map((w) => w.id)])).filter((s) => s !== id);
   const sync = async () => {
     if (!dev) return;
     await flush();
-    for (const o of others) await api.save(o, paste(await api.getDevelop(o), dev), "Sync settings");
+    for (const o of others) {
+      const saved = await api.save(o, paste(await api.getDevelop(o), dev), "Sync settings");
+      if (sessionCache.current[o]) {
+        sessionCache.current[o].dev = saved;
+      }
+      p.onPhotoUpdated?.(o);
+    }
   };
 
   // Image orientation helpers: keep the cropped region anchored when rotating or flipping
@@ -516,6 +732,7 @@ export function Develop(p: Props) {
 
   const keys = useRef<(e: KeyboardEvent) => void>(() => {});
   keys.current = (e) => {
+    if (!isVisible) return;
     const mod = e.metaKey || e.ctrlKey;
     if (mod && e.key.toLowerCase() === "z") (e.preventDefault(), undo(e.shiftKey ? 1 : -1));
     else if (mod && e.shiftKey && e.key.toLowerCase() === "c" && dev) (e.preventDefault(), (clipboard = structuredClone(dev)));
@@ -564,8 +781,10 @@ export function Develop(p: Props) {
     };
   }, []);
   useEffect(() => {
+    if (!isVisible) return;
     document.getElementById(`fs-${id}`)?.scrollIntoView({ inline: "center", block: "nearest" });
-  }, [id]);
+    document.getElementById(`wtab-${id}`)?.scrollIntoView({ inline: "nearest", block: "nearest" });
+  }, [id, isVisible]);
 
   const cropStart = useRef<Dev["crop"] | null>(null);
   const handleStart = useRef<MaskComponent | null>(null);
@@ -851,6 +1070,135 @@ export function Develop(p: Props) {
       </aside>
 
       <main className="flex min-w-0 flex-1 flex-col">
+        {/* Working Images Tab Bar: allows multiple active Develop images and concurrent AI tasks */}
+        {p.workingPhotos.length > 0 && (
+          <div className="flex items-center gap-1.5 border-b border-neutral-800 bg-neutral-950/90 px-2.5 py-1 text-[11px]">
+            <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wider text-neutral-500 mr-1">
+              Working ({p.workingPhotos.length})
+            </span>
+            <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto py-0.5">
+              {p.workingPhotos.map((wp) => {
+                const isCur = wp.id === id;
+                const task = p.aiTasks[wp.id];
+                const isBusy = !!task?.busy;
+                const hasResult = !isBusy && task?.result != null;
+                return (
+                  <div
+                    id={`wtab-${wp.id}`}
+                    key={wp.id}
+                    role="tab"
+                    aria-selected={isCur}
+                    onClick={() => p.setActive(wp.id)}
+                    onAuxClick={(e) => {
+                      if (e.button === 1) {
+                        e.preventDefault();
+                        p.onCloseWorking?.(wp.id);
+                      }
+                    }}
+                    title={`${wp.filename}${wp.copy_name ? ` (${wp.copy_name})` : ""}${isBusy ? ` — AI working (${task.elapsed.toFixed(1)}s)` : ""}`}
+                    className={`group flex shrink-0 cursor-pointer items-center gap-1.5 rounded-md border px-2 py-1 transition-all select-none ${
+                      isCur
+                        ? "border-sky-500/80 bg-neutral-800 text-white shadow-xs ring-1 ring-sky-500/30"
+                        : isBusy
+                        ? "border-violet-700/70 bg-violet-950/30 text-violet-200 hover:bg-violet-950/50"
+                        : "border-neutral-800 bg-neutral-900/80 text-neutral-400 hover:border-neutral-700 hover:bg-neutral-800/60 hover:text-neutral-200"
+                    }`}
+                  >
+                    <img
+                      src={thumbUrl(wp)}
+                      alt=""
+                      draggable={false}
+                      className="h-5 w-5 shrink-0 rounded-xs object-cover bg-neutral-950"
+                    />
+                    <span className="max-w-32 truncate font-medium">
+                      {wp.filename}
+                      {wp.copy_name ? <span className="ml-1 text-[10px] text-sky-400">· {wp.copy_name}</span> : null}
+                    </span>
+                    {isBusy ? (
+                      <span className="flex items-center gap-1 rounded-full bg-violet-900/80 px-1.5 py-0.2 font-mono text-[9px] font-semibold text-violet-200">
+                        <span className="h-1.5 w-1.5 animate-ping rounded-full bg-violet-300" />
+                        ✦ {task.elapsed.toFixed(0)}s
+                      </span>
+                    ) : hasResult ? (
+                      <span
+                        className={`rounded-full px-1 text-[9px] font-bold ${
+                          task.result!.ok ? "bg-emerald-950/90 text-emerald-400" : "bg-red-950/90 text-red-400"
+                        }`}
+                        title={task.result!.ok ? `AI finished in ${task.elapsed.toFixed(1)}s` : `AI error: ${task.result!.text}`}
+                      >
+                        {task.result!.ok ? "✦✓" : "✦!"}
+                      </span>
+                    ) : wp.edited ? (
+                      <span className="text-[9px] font-semibold text-amber-400" title="Edited">
+                        ±
+                      </span>
+                    ) : null}
+                    {p.onCloseWorking && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          p.onCloseWorking?.(wp.id);
+                        }}
+                        title="Close working image tab"
+                        className="ml-0.5 rounded px-1 text-[10px] text-neutral-500 hover:bg-neutral-700 hover:text-white"
+                      >
+                        ✕
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            <div className="flex shrink-0 items-center gap-1">
+              {(() => {
+                const workingIdSet = new Set(p.workingPhotos.map((w) => w.id));
+                const unopenedSelected = p.selected.filter((sid) => !workingIdSet.has(sid));
+                return unopenedSelected.length > 0 && p.onAddWorking ? (
+                  <button
+                    type="button"
+                    onClick={() => p.onAddWorking?.(unopenedSelected)}
+                    className="rounded border border-sky-800/70 bg-sky-950/50 px-2 py-0.5 text-[10px] font-medium text-sky-300 hover:bg-sky-900/60 hover:text-white"
+                    title="Add all selected Library photos to Develop working images"
+                  >
+                    ＋ Add selected ({unopenedSelected.length})
+                  </button>
+                ) : null;
+              })()}
+              {p.workingPhotos.length > 1 && (
+                <>
+                  <button
+                    type="button"
+                    disabled={p.workingPhotos.every((w) => p.aiTasks[w.id]?.busy)}
+                    onClick={() => {
+                      const fineTunePrompt = "Fine tune this photo: natural colour, balanced exposure, no clipped highlights. Keep it realistic.";
+                      for (const wp of p.workingPhotos) {
+                        if (!p.aiTasks[wp.id]?.busy) {
+                          void runPhotoAi(wp.id, fineTunePrompt);
+                        }
+                      }
+                    }}
+                    className="rounded border border-violet-800/70 bg-violet-950/50 px-2 py-0.5 text-[10px] font-medium text-violet-300 hover:bg-violet-900/60 hover:text-white disabled:opacity-40"
+                    title="Run AI fine tune concurrently on all open working images"
+                  >
+                    ✦ AI fine tune all ({p.workingPhotos.length})
+                  </button>
+                  {p.onCloseOtherWorking && id != null && (
+                    <button
+                      type="button"
+                      onClick={() => p.onCloseOtherWorking?.(id)}
+                      className="rounded bg-neutral-800 px-2 py-0.5 text-[10px] text-neutral-400 hover:bg-neutral-700 hover:text-white"
+                      title="Close other idle working image tabs"
+                    >
+                      Close others
+                    </button>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+        )}
+
         <div className="flex items-center gap-2 border-b border-neutral-800 bg-neutral-900 px-3 py-1.5 text-[11px]">
           <span className="truncate text-neutral-300">
             {p.active.filename}
@@ -1110,21 +1458,78 @@ export function Develop(p: Props) {
           </div>
         </div>
 
-        <AiBar settings={p.settings} setSettings={p.setSettings} run={aiRun} logs={p.logs} clearLogs={p.clearLogs} ask={ask} />
+        {id != null && (
+          <AiBar
+            photoId={id}
+            settings={p.settings}
+            setSettings={p.setSettings}
+            task={p.aiTasks[id]}
+            updateTask={(patch) =>
+              p.setAiTasks((prev) => {
+                const cur: AiTaskState = prev[id] ?? {
+                  prompt: "",
+                  busy: false,
+                  provider: p.settings?.active_provider ?? "",
+                  startTime: null,
+                  elapsed: 0,
+                  result: null,
+                  runStartIdx: null,
+                  showDetails: false,
+                };
+                return { ...prev, [id]: { ...cur, ...patch } };
+              })
+            }
+            onRun={(text) => void runPhotoAi(id, text)}
+            logs={p.logs}
+            clearLogs={p.clearLogs}
+          />
+        )}
 
         <div className="flex h-[84px] shrink-0 gap-1 overflow-x-auto border-t border-neutral-800 bg-neutral-900 p-1.5">
-          {p.photos.map((ph) => (
-            <img
-              id={`fs-${ph.id}`}
-              key={ph.id}
-              src={thumbUrl(ph)}
-              loading="lazy"
-              draggable={false}
-              onClick={() => p.setActive(ph.id)}
-              className={`h-full shrink-0 cursor-pointer rounded-sm object-contain ${ph.id === id ? "ring-2 ring-sky-500" : p.selected.includes(ph.id) ? "opacity-90 ring-1 ring-neutral-400" : "opacity-60 hover:opacity-100"}`}
-              alt=""
-            />
-          ))}
+          {p.photos.map((ph) => {
+            const isWorking = p.workingPhotos.some((w) => w.id === ph.id);
+            const phTask = p.aiTasks[ph.id];
+            const phBusy = !!phTask?.busy;
+            return (
+              <div
+                id={`fs-${ph.id}`}
+                key={ph.id}
+                onClick={() => p.setActive(ph.id)}
+                title={`${ph.filename}${isWorking ? " (Open in Working Images)" : ""}${phBusy ? " — AI working…" : ""}`}
+                className={`relative h-full shrink-0 cursor-pointer rounded-sm ${
+                  ph.id === id
+                    ? "ring-2 ring-sky-500"
+                    : phBusy
+                    ? "ring-2 ring-violet-500"
+                    : isWorking
+                    ? "opacity-95 ring-1 ring-sky-500/50"
+                    : p.selected.includes(ph.id)
+                    ? "opacity-90 ring-1 ring-neutral-400"
+                    : "opacity-60 hover:opacity-100"
+                }`}
+              >
+                <img
+                  src={thumbUrl(ph)}
+                  loading="lazy"
+                  draggable={false}
+                  className="h-full rounded-sm object-contain"
+                  alt=""
+                />
+                {phBusy && (
+                  <span className="pointer-events-none absolute top-1 right-1 flex items-center gap-0.5 rounded bg-violet-950/90 px-1 py-0.5 font-mono text-[8px] font-bold text-violet-200 border border-violet-600/80 shadow">
+                    <span className="h-1.5 w-1.5 animate-ping rounded-full bg-violet-300" />
+                    ✦
+                  </span>
+                )}
+                {!phBusy && isWorking && ph.id !== id && (
+                  <span
+                    className="pointer-events-none absolute top-1 right-1 h-1.5 w-1.5 rounded-full bg-sky-400 shadow"
+                    title="Open in Working Images"
+                  />
+                )}
+              </div>
+            );
+          })}
         </div>
       </main>
 
@@ -1198,7 +1603,9 @@ export function Develop(p: Props) {
             ca={autoCa}
             upright={upright}
             remove={removeSelection}
-            ask={(text) => setAsk({ text, n: Date.now() })}
+            ask={(text) => id != null && void runPhotoAi(id, text)}
+            aiBusy={id != null ? !!p.aiTasks[id]?.busy : false}
+            aiPrompt={id != null ? p.aiTasks[id]?.prompt : undefined}
           />
         )}
         {dev && rtab === "selections" && (
@@ -1681,55 +2088,54 @@ function SelectionsTab({
 }
 
 function AiBar({
+  photoId,
   settings,
   setSettings,
-  run: runAi,
+  task,
+  updateTask,
+  onRun,
   logs,
   clearLogs,
-  ask,
 }: {
+  photoId: number;
   settings: Settings | null;
   setSettings: (s: Settings) => void;
-  run: (prompt: string, provider: string) => Promise<string>;
+  task?: AiTaskState;
+  updateTask: (patch: Partial<AiTaskState>) => void;
+  onRun: (prompt: string) => void;
   logs: Log[];
   clearLogs?: () => void;
-  /** a prompt to run as if typed here (the Auto tab's ✦ buttons); n tells repeats apart */
-  ask?: { text: string; n: number } | null;
 }) {
-  const [prompt, setPrompt] = useState("");
-  const runRef = useRef<(text: string) => void>(() => {});
-  useEffect(() => {
-    if (ask) runRef.current(ask.text);
-  }, [ask]);
-  const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
-  const [startTime, setStartTime] = useState<number | null>(null);
-  const [elapsed, setElapsed] = useState(0);
-  const [runStartIdx, setRunStartIdx] = useState<number | null>(null);
-  const [showDetails, setShowDetails] = useState(false);
   const [logFilter, setLogFilter] = useState<"run" | "all">("run");
   const [copied, setCopied] = useState(false);
-  const userClosedDetails = useRef(false);
   const logEndRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    if (!busy || startTime == null) return;
-    const interval = setInterval(() => {
-      setElapsed((Date.now() - startTime) / 1000);
-    }, 100);
-    return () => clearInterval(interval);
-  }, [busy, startTime]);
+  const prompt = task?.prompt ?? "";
+  const busy = !!task?.busy;
+  const elapsed = task?.elapsed ?? 0;
+  const result = task?.result ?? null;
+  const runStartIdx = task?.runStartIdx ?? null;
+  const showDetails = !!task?.showDetails;
 
   useEffect(() => {
     if (showDetails) {
       logEndRef.current?.scrollIntoView({ behavior: "smooth" });
     }
-  }, [logs, showDetails]);
+  }, [logs, showDetails, photoId]);
 
   if (!settings) return null;
   const provider = settings.active_provider;
 
-  const runLogs = runStartIdx != null ? logs.slice(runStartIdx) : [];
+  // Filter run logs so concurrent AI tasks on other photos don't clutter this photo's "This Run" log
+  const isLogForOtherPhoto = (msg: string) => {
+    const m1 = msg.match(/^photo (\d+):/);
+    if (m1 && Number(m1[1]) !== photoId) return true;
+    const m2 = msg.match(/"photo_id"\s*:\s*"?(?:ols:)?(\d+)"?/);
+    if (m2 && Number(m2[1]) !== photoId) return true;
+    return false;
+  };
+  const rawRunLogs = runStartIdx != null ? logs.slice(runStartIdx) : [];
+  const runLogs = rawRunLogs.filter((l) => !isLogForOtherPhoto(l.message));
   const displayLogs = logFilter === "run" && runStartIdx != null ? runLogs : logs;
   const latestLog = runLogs.length > 0 ? runLogs[runLogs.length - 1] : logs.length > 0 ? logs[logs.length - 1] : null;
 
@@ -1740,27 +2146,10 @@ function AiBar({
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const run = async (text = prompt) => {
+  const run = (text = prompt) => {
     if (!text.trim() || busy) return;
-    const now = Date.now();
-    setStartTime(now);
-    setElapsed(0);
-    setRunStartIdx(logs.length);
-    setBusy(true);
-    setResult(null);
-    if (!userClosedDetails.current) {
-      setShowDetails(true);
-    }
-    try {
-      setResult({ ok: true, text: await runAi(text, provider) });
-    } catch (e) {
-      setResult({ ok: false, text: String(e) });
-    } finally {
-      setBusy(false);
-      setElapsed((Date.now() - now) / 1000);
-    }
+    onRun(text);
   };
-  runRef.current = (text) => (setPrompt(text), run(text));
 
   const getSourceBadge = (source: string) => {
     if (source === "mcp") return "bg-sky-950/70 text-sky-400 border border-sky-800/60";
@@ -1793,7 +2182,7 @@ function AiBar({
           className="min-w-0 flex-1 rounded bg-neutral-800 px-2 py-1 outline-none placeholder:text-neutral-500 focus:ring-1 focus:ring-violet-500"
           placeholder="Describe an edit, e.g. “select the castle and warm it up”, “remove the people on the sand”, “recover the blown sky”"
           value={prompt}
-          onChange={(e) => setPrompt(e.target.value)}
+          onChange={(e) => updateTask({ prompt: e.target.value })}
           onKeyDown={(e) => e.key === "Enter" && run()}
           disabled={busy}
         />
@@ -1849,8 +2238,7 @@ function AiBar({
             type="button"
             onClick={() => {
               const next = !showDetails;
-              userClosedDetails.current = !next;
-              setShowDetails(next);
+              updateTask({ showDetails: next, userClosedDetails: !next });
             }}
             className="flex items-center gap-1.5 rounded px-2 py-0.5 text-[10px] font-medium text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200"
           >
@@ -1938,7 +2326,7 @@ function AiBar({
               <span className="mr-1.5 font-semibold text-violet-300">{result.ok ? "AI summary:" : "Error:"}</span>
               {result.text}
             </div>
-            <button className="shrink-0 p-0.5 text-neutral-500 hover:text-white" onClick={() => setResult(null)}>
+            <button className="shrink-0 p-0.5 text-neutral-500 hover:text-white" onClick={() => updateTask({ result: null })}>
               ✕
             </button>
           </div>

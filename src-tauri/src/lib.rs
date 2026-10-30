@@ -197,7 +197,7 @@ impl Core {
         let mut c = self.cache.lock().unwrap();
         c.retain(|(p, _)| p != path);
         c.insert(0, (path.to_string(), img.clone()));
-        c.truncate(4);
+        c.truncate(12);
         Ok(img)
     }
 
@@ -892,6 +892,7 @@ pub fn run() {
     let core = Arc::new(Core::open(data_dir()).expect("could not open the OpenLight catalog"));
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .menu(app_menu)
         .setup(move |app| {
             let _ = core.app.set(app.handle().clone());
             app.asset_protocol_scope().allow_directory(core.dir.join("thumbs"), true)?;
@@ -985,4 +986,35 @@ pub fn run_import(folder: &str) -> Result<usize, String> {
 /// `openlight-studio --mcp-stdio`: stdio MCP transport (spec §4.1).
 pub fn run_mcp_stdio() {
     mcp::run_stdio();
+}
+
+/// The default menu, with the About panel showing the app icon, a description, disclaimer and developer.
+fn app_menu(handle: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{AboutMetadata, Menu, MenuItemKind, PredefinedMenuItem};
+    let menu = Menu::default(handle)?;
+    let about = AboutMetadata {
+        name: Some("OpenLight Studio".into()),
+        version: Some(handle.package_info().version.to_string()),
+        authors: Some(vec!["Ross Kan <ross.kan@gmail.com>".into()]),
+        comments: Some("Non-destructive RAW processor and photo catalog with a built-in MCP server and a pluggable AI/agent router.".into()),
+        copyright: Some("Developed by Ross Kan (ross.kan@gmail.com)".into()),
+        credits: Some(
+            "Non-destructive RAW processor and photo catalog with a built-in MCP server and a pluggable AI/agent router.\n\n\
+             Disclaimer: provided \"as is\", without warranty of any kind. The developer is not liable for any loss of or damage to photos or data. \
+             Always keep backups of your originals. Third-party services and AI providers are used at your own discretion."
+                .into(),
+        ),
+        icon: handle.default_window_icon().cloned(),
+        ..Default::default()
+    };
+    // macOS puts About first in the app submenu; elsewhere it sits in the Help submenu
+    for item in menu.items()? {
+        if let MenuItemKind::Submenu(sub) = item {
+            if let Some(i) = sub.items()?.iter().position(|it| matches!(it, MenuItemKind::Predefined(p) if p.text().is_ok_and(|t| t.starts_with("About")))) {
+                sub.remove_at(i)?;
+                sub.insert(&PredefinedMenuItem::about(handle, Some("About OpenLight Studio"), Some(about.clone()))?, i)?;
+            }
+        }
+    }
+    Ok(menu)
 }

@@ -55,6 +55,9 @@ type Props = {
   onSelectAutoFn?: (fn: AutoFunction | null) => void;
   jobs?: Record<string, JobProgress>;
   onAiSettings?: () => void;
+  workingIds?: number[];
+  busyAiIds?: number[];
+  onAddWorking?: (ids: number[]) => void;
 };
 
 const short = (folder: string) => folder.split(/[\\/]/).slice(-2).join("/");
@@ -654,7 +657,17 @@ export function Library(p: Props) {
             )}
             <div ref={gridRef} className="grid flex-1 content-start gap-2 overflow-y-auto p-3" style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${size}px, 1fr))` }}>
               {p.photos.map((ph) => (
-                <Cell key={ph.id} photo={ph} size={size} selected={p.selected.includes(ph.id)} active={p.active?.id === ph.id} onClick={(m) => p.select(ph.id, m)} onOpen={() => p.openDevelop(ph.id)} />
+                <Cell
+                  key={ph.id}
+                  photo={ph}
+                  size={size}
+                  selected={p.selected.includes(ph.id)}
+                  active={p.active?.id === ph.id}
+                  inWorking={p.workingIds?.includes(ph.id)}
+                  aiBusy={p.busyAiIds?.includes(ph.id)}
+                  onClick={(m) => p.select(ph.id, m)}
+                  onOpen={() => p.openDevelop(ph.id)}
+                />
               ))}
               {p.nextPage && (
                 <div ref={endRef} className="col-span-full py-4 text-center text-[11px] text-neutral-400 flex items-center justify-center gap-2">
@@ -891,15 +904,51 @@ const ICONS = {
   bolt: "M13 3L5 13.5h6L10 21l8-10.5h-6z",
 };
 
-export function Cell({ photo, size, selected, active, onClick, onOpen }: { photo: Photo; size: number; selected: boolean; active: boolean; onClick: (m: SelectMods) => void; onOpen: () => void }) {
+export function Cell({
+  photo,
+  size,
+  selected,
+  active,
+  inWorking,
+  aiBusy,
+  onClick,
+  onOpen,
+}: {
+  photo: Photo;
+  size: number;
+  selected: boolean;
+  active: boolean;
+  inWorking?: boolean;
+  aiBusy?: boolean;
+  onClick: (m: SelectMods) => void;
+  onOpen: () => void;
+}) {
   return (
     <div
       onClick={(e) => onClick({ shift: e.shiftKey, toggle: e.metaKey || e.ctrlKey })}
       onDoubleClick={onOpen}
-      className={`group relative flex cursor-pointer flex-col rounded-md p-1.5 ${active ? "bg-neutral-600" : selected ? "bg-neutral-700" : "bg-neutral-800 hover:bg-neutral-700/60"} ${photo.flag === -1 ? "opacity-40" : ""}`}
+      className={`group relative flex cursor-pointer flex-col rounded-md p-1.5 ${
+        active ? "bg-neutral-600" : selected ? "bg-neutral-700" : "bg-neutral-800 hover:bg-neutral-700/60"
+      } ${aiBusy ? "ring-1 ring-violet-500/80" : ""} ${photo.flag === -1 ? "opacity-40" : ""}`}
     >
-      <div className="flex items-center justify-center" style={{ height: size * 0.72 }}>
+      <div className="relative flex items-center justify-center" style={{ height: size * 0.72 }}>
         <img src={thumbUrl(photo)} loading="lazy" draggable={false} className="max-h-full max-w-full object-contain shadow-md" alt="" />
+        {aiBusy ? (
+          <span
+            className="pointer-events-none absolute top-1 right-1 flex items-center gap-1 rounded-full bg-violet-950/95 px-2 py-0.5 text-[9px] font-semibold text-violet-200 border border-violet-600/80 shadow-md"
+            title="AI fine tune / edit is working on this photo in Develop"
+          >
+            <span className="h-1.5 w-1.5 animate-ping rounded-full bg-violet-300" />
+            ✦ AI working…
+          </span>
+        ) : inWorking ? (
+          <span
+            className="pointer-events-none absolute top-1 right-1 rounded bg-sky-950/90 px-1.5 py-0.5 text-[9px] font-medium text-sky-300 border border-sky-800/70 shadow-sm"
+            title="Open in Develop working images"
+          >
+            Develop
+          </span>
+        ) : null}
       </div>
       <div className="mt-1 flex items-center gap-1 text-[10px] text-neutral-400">
         <Stars value={photo.rating} />
@@ -1016,7 +1065,21 @@ function Metadata(p: Props & { photo: Photo }) {
             </>
           ) : (
             <>
-              <Btn onClick={() => p.openDevelop(ph.id)}>Develop</Btn>
+              <Btn onClick={() => p.openDevelop(ph.id)} title={p.selected.length > 1 ? `Open all ${p.selected.length} selected photos as working images in Develop` : "Open photo in Develop (D)"}>
+                Develop{p.selected.length > 1 ? ` (${p.selected.length})` : ""}
+              </Btn>
+              {p.onAddWorking && (() => {
+                const targets = p.selected.length ? p.selected : [ph.id];
+                const newIds = targets.filter((id) => !p.workingIds?.includes(id));
+                return newIds.length > 0 ? (
+                  <Btn
+                    onClick={() => p.onAddWorking?.(newIds)}
+                    title="Add selected photo(s) to Develop working images while staying in Library"
+                  >
+                    ＋ Add to Develop{newIds.length > 1 ? ` (${newIds.length})` : ""}
+                  </Btn>
+                ) : null;
+              })()}
               <Btn onClick={p.onExport}>
                 {ph.path.startsWith("immich://") ? "Save to Immich" : "Export"} {p.selected.length > 1 ? `${p.selected.length}` : ""}…
               </Btn>
