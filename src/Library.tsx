@@ -49,7 +49,7 @@ type Props = {
   onMoveToBin: () => void;
   onRestoreFromBin: () => void;
   onPermanentDelete: () => void;
-  onEmptyBin: () => void;
+  onEmptyBin?: () => void;
   onOpenCompare?: () => void;
   autoFn?: AutoFunction | null;
   onSelectAutoFn?: (fn: AutoFunction | null) => void;
@@ -757,41 +757,42 @@ export function Library(p: Props) {
         )}
 
         {f.view === "bin" && (
-          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-red-900/40 bg-red-950/30 px-4 py-2 text-xs">
-            <div className="flex items-center gap-2 text-red-200">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-red-900/50 bg-red-950/40 px-4 py-2.5 text-xs">
+            <div className="flex items-center gap-2.5">
               <span className="text-base">🗑️</span>
-              <span className="font-semibold text-neutral-100">
+              <span className="font-semibold text-white">
                 Bin ({p.photos.length} item{p.photos.length === 1 ? "" : "s"})
               </span>
-              <span className="text-neutral-400 text-[11px] hidden sm:inline">
+              <span className="text-neutral-300 text-[11px] hidden sm:inline">
                 Photos here are kept safely until restored or permanently deleted.
               </span>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2.5">
               <button
                 disabled={!p.selected.length}
                 onClick={p.onRestoreFromBin}
-                className="flex items-center gap-1.5 rounded bg-emerald-600/20 px-2.5 py-1 text-[11px] font-medium text-emerald-300 hover:bg-emerald-600/30 border border-emerald-500/40 transition-colors disabled:opacity-40 cursor-pointer"
+                className="flex items-center gap-1.5 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white px-3.5 py-1.5 text-xs font-semibold shadow-xs border border-emerald-500 transition-colors disabled:opacity-30 disabled:pointer-events-none cursor-pointer"
+                title="Restore selected photos back to their original folders"
               >
                 <span>↩ Restore</span>
-                {p.selected.length > 0 && <span className="tabular-nums font-semibold">({p.selected.length})</span>}
+                {p.selected.length > 0 && (
+                  <span className="rounded bg-emerald-700/90 px-1.5 py-0.5 text-[10px] font-bold text-white">
+                    ({p.selected.length})
+                  </span>
+                )}
               </button>
               <button
                 disabled={!p.selected.length}
                 onClick={p.onPermanentDelete}
-                className="flex items-center gap-1.5 rounded bg-red-600/20 px-2.5 py-1 text-[11px] font-medium text-red-300 hover:bg-red-600/30 border border-red-500/40 transition-colors disabled:opacity-40 cursor-pointer"
+                className="flex items-center gap-1.5 rounded-md bg-red-600 hover:bg-red-500 text-white px-3.5 py-1.5 text-xs font-semibold shadow-xs border border-red-500 transition-colors disabled:opacity-30 disabled:pointer-events-none cursor-pointer"
                 title="Permanently delete selected photos from disk"
               >
                 <span>✕ Delete Permanently</span>
-                {p.selected.length > 0 && <span className="tabular-nums font-semibold">({p.selected.length})</span>}
-              </button>
-              <button
-                disabled={!p.photos.length}
-                onClick={p.onEmptyBin}
-                className="rounded bg-red-600 px-3 py-1 text-[11px] font-semibold text-white hover:bg-red-500 shadow-xs transition-colors disabled:opacity-40 cursor-pointer"
-                title="Permanently delete all photos in the bin from disk"
-              >
-                Empty Bin
+                {p.selected.length > 0 && (
+                  <span className="rounded bg-red-700/90 px-1.5 py-0.5 text-[10px] font-bold text-white">
+                    ({p.selected.length})
+                  </span>
+                )}
               </button>
             </div>
           </div>
@@ -1098,11 +1099,11 @@ function Metadata(p: Props & { photo: Photo }) {
         <div className="flex flex-wrap gap-1">
           {p.filter.view === "bin" ? (
             <>
-              <Btn onClick={p.onRestoreFromBin} className="text-emerald-400 hover:text-emerald-300">
+              <Btn onClick={p.onRestoreFromBin} className="bg-emerald-600 hover:bg-emerald-500 text-white font-semibold">
                 ↩ Restore
               </Btn>
-              <Btn onClick={p.onPermanentDelete} className="text-red-400 hover:text-red-300" title="Permanently delete original file(s) from disk">
-                ✕ Delete Forever
+              <Btn onClick={p.onPermanentDelete} className="bg-red-600 hover:bg-red-500 text-white font-semibold" title="Permanently delete original file(s) from disk">
+                ✕ Delete Permanently
               </Btn>
             </>
           ) : (

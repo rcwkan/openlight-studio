@@ -38,6 +38,7 @@ export default function App() {
   const [loadingFolder, setLoadingFolder] = useState<FolderLoading | null>(null);
   const [binCount, setBinCount] = useState<number>(0);
   const [compareOpen, setCompareOpen] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState<{ ids: number[] } | null>(null);
 
   const reload = useCallback(async () => {
     const [ps, fs, bc] = await Promise.all([
@@ -405,14 +406,16 @@ export default function App() {
     }
   };
 
-  const permanentDelete = async () => {
+  const permanentDelete = () => {
     const ids = targets();
     if (!ids.length) return;
-    const ok = await ask(
-      `Permanently delete ${ids.length} photo(s)?\n\nThis will permanently delete the original file(s) from your disk. This action cannot be undone.`,
-      { title: "Delete Permanently", kind: "error" }
-    );
-    if (!ok) return;
+    setConfirmDelete({ ids });
+  };
+
+  const executePermanentDelete = async () => {
+    if (!confirmDelete) return;
+    const ids = confirmDelete.ids;
+    setConfirmDelete(null);
     try {
       const n = await api.permanentDelete(ids);
       setStatus(`Permanently deleted ${n} photo(s)`);
@@ -660,6 +663,52 @@ export default function App() {
           onCull={(id, culling) => cull(culling, [id])}
           onMoveToBin={(id) => moveToBin([id])}
         />
+      )}
+      {confirmDelete && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-xs p-4"
+          onClick={() => setConfirmDelete(null)}
+        >
+          <div
+            className="w-full max-w-md rounded-xl border border-red-500/40 bg-neutral-900 p-6 text-neutral-100 shadow-2xl space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start gap-3.5">
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-red-500/20 text-red-400 border border-red-500/30 text-xl font-bold">
+                ⚠️
+              </div>
+              <div className="space-y-1.5 flex-1">
+                <h3 className="text-base font-semibold text-white">
+                  Permanently Delete {confirmDelete.ids.length} Photo{confirmDelete.ids.length === 1 ? "" : "s"}?
+                </h3>
+                <p className="text-xs text-neutral-300 leading-relaxed">
+                  This will permanently delete the original file{confirmDelete.ids.length === 1 ? "" : "s"} from your disk. All associated edit history, sidecar metadata, and cached thumbnails will also be removed.
+                </p>
+                <div className="rounded-md bg-red-950/60 border border-red-800/60 px-3 py-2 text-xs font-semibold text-red-300">
+                  This action cannot be undone.
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-neutral-800">
+              <button
+                type="button"
+                autoFocus
+                onClick={() => setConfirmDelete(null)}
+                className="rounded-lg border border-neutral-700 bg-neutral-800 px-4 py-2 text-xs font-medium text-neutral-200 hover:bg-neutral-700 hover:text-white transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={executePermanentDelete}
+                className="rounded-lg bg-red-600 hover:bg-red-500 px-4 py-2 text-xs font-semibold text-white shadow-md transition-colors cursor-pointer flex items-center gap-1.5 border border-red-500"
+              >
+                <span>✕ Delete Permanently</span>
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
