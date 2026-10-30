@@ -27,7 +27,33 @@ if [ ! -d "node_modules" ]; then
   npm install
 fi
 
-# Build native desktop application release bundle
-npx tauri build
+# Detect OS
+OS_NAME="$(uname -s)"
 
-echo "==> Build complete. Artifacts are located in src-tauri/target/release/bundle/"
+if [ "$OS_NAME" = "Darwin" ]; then
+  echo "==> Building macOS Application Bundle (.app)..."
+  npx tauri build -b app
+
+  APP_PATH="src-tauri/target/release/bundle/macos/OpenLight Studio.app"
+  DMG_DIR="src-tauri/target/release/bundle/dmg"
+  ARCH="$(uname -m)"
+  DMG_PATH="${DMG_DIR}/OpenLight Studio_0.1.0_${ARCH}.dmg"
+
+  mkdir -p "$DMG_DIR"
+  echo "==> Packaging macOS DMG installer with hdiutil..."
+  rm -f "$DMG_PATH"
+  hdiutil create -volname "OpenLight Studio" -srcfolder "$APP_PATH" -ov -format UDZO "$DMG_PATH"
+
+  mkdir -p "dist-packages/macos"
+  cp -R "$APP_PATH" "dist-packages/macos/"
+  cp "$DMG_PATH" "dist-packages/macos/"
+
+  echo "==> macOS build complete! Artifacts:"
+  echo "    - .app: dist-packages/macos/OpenLight Studio.app"
+  echo "    - .dmg: dist-packages/macos/OpenLight Studio_0.1.0_${ARCH}.dmg"
+else
+  # Linux or other OS
+  npx tauri build
+fi
+
+echo "==> Build finished successfully."

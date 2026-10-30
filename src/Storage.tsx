@@ -417,15 +417,32 @@ export function CloudBrowser({ account, action, onPick, onClose }: { account: Cl
 }
 
 function Services({ settings, onConnect }: { settings: Settings; onConnect: (s: Source) => void }) {
-  const rows: [Source, string, string][] = [
-    ["immich", "Immich", settings.immich_url ? `Connected to ${settings.immich_url}` : "Browse albums in place; edits are saved back as stacks."],
-    ["google", "Google Photos", settings.google_client_id ? "Signed in" : "Pick photos to download; edits are uploaded as new photos."],
+  const rows: [Source, string, string, boolean][] = [
+    ["immich", "Immich", settings.immich_url ? `Connected to ${settings.immich_url}` : "Browse albums in place; edits are saved back as stacks.", !!settings.immich_url],
+    ["google", "Google Photos", settings.google_client_id ? "Signed in" : "Pick photos to download; edits are uploaded as new photos.", !!settings.google_client_id],
+    [
+      "apple",
+      "Apple iCloud Photos",
+      settings.apple_photos_path ? `Connected to ${settings.apple_photos_path}` : "Index your Apple Photos library or iCloud sync folder; export edits directly back.",
+      !!settings.apple_photos_path,
+    ],
+    [
+      "amazon",
+      "Amazon Photos",
+      settings.amazon_photos_path ? `Connected to ${settings.amazon_photos_path}` : "Sync full-resolution photos and RAW files from Amazon Photos / Amazon Drive.",
+      !!settings.amazon_photos_path,
+    ],
+    [
+      "adobe",
+      "Adobe Cloud Photos",
+      settings.adobe_cloud_path ? `Connected to ${settings.adobe_cloud_path}` : "Sync with Adobe Creative Cloud Files & Lightroom photography library.",
+      !!settings.adobe_cloud_path,
+    ],
   ];
   return (
     <section className={card}>
       <h2 className="mb-1 font-semibold">Photo services</h2>
-      {rows.map(([source, title, detail]) => {
-        const on = source === "immich" ? !!settings.immich_url : !!settings.google_client_id;
+      {rows.map(([source, title, detail, on]) => {
         return (
           <div key={source} className="flex items-center gap-3 border-t border-neutral-800 py-2 first-of-type:border-t-0">
             <span className={`h-2 w-2 shrink-0 rounded-full ${on ? "bg-emerald-500" : "bg-neutral-600"}`} />
@@ -487,7 +504,7 @@ function Automation({ settings, setSettings, onAuto }: { settings: Settings; set
 
 // --- Duplicate ---
 
-type Kind = "folder" | "drive" | "photos" | "immich" | "google" | "cloud";
+type Kind = "folder" | "drive" | "photos" | "immich" | "google" | "apple" | "amazon" | "adobe" | "cloud";
 type Draft = { kind: Kind; path: string; drive: string; album: string; account: string; cloudPath: string };
 const EMPTY: Draft = { kind: "folder", path: "", drive: "", album: "favorites", account: "", cloudPath: "" };
 
@@ -528,6 +545,12 @@ export function Duplicate({ settings, selected, jobs }: { settings: Settings; se
         return { kind: "immich", album: d.album === "favorites" ? null : d.album };
       case "google":
         return { kind: "google" };
+      case "apple":
+        return { kind: "folder", path: settings.apple_photos_path || "" };
+      case "amazon":
+        return { kind: "folder", path: settings.amazon_photos_path || "" };
+      case "adobe":
+        return { kind: "folder", path: settings.adobe_cloud_path || "" };
       case "cloud":
         return { kind: "cloud", account: d.account, path: d.cloudPath.trim() };
     }
@@ -565,6 +588,9 @@ export function Duplicate({ settings, selected, jobs }: { settings: Settings; se
       ...(which === "from" ? ([["photos", `Selected photos (${selected.length})`, selected.length > 0]] as [Kind, string, boolean][]) : []),
       ["immich", which === "from" ? "Immich album" : "Immich", !!settings.immich_url],
       ["google", which === "from" ? "Google Photos picks" : "Google Photos", !!settings.google_client_id],
+      ["apple", which === "from" ? "Apple iCloud Photos" : "Apple Photos", !!settings.apple_photos_path],
+      ["amazon", which === "from" ? "Amazon Photos" : "Amazon Photos", !!settings.amazon_photos_path],
+      ["adobe", which === "from" ? "Adobe Cloud Photos" : "Adobe Creative Cloud", !!settings.adobe_cloud_path],
       ["cloud", "Cloud storage", accounts.length > 0],
     ];
     const patch = (x: Partial<Draft>) => set({ ...d, ...x });

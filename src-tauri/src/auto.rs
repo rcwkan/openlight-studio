@@ -1350,6 +1350,7 @@ mod tests {
             keywords: "trip".into(),
             edited: false,
             thumb_v: 0,
+            deleted_at: None,
         }
     }
 
