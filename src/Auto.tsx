@@ -26,6 +26,8 @@ export function AutoTab(p: {
   levels: () => Promise<void>;
   ca: () => Promise<void>;
   upright: (mode: string) => Promise<void>;
+  /** level a tilted horizon (Upright Level) as its own step; ✦ AI fine tune runs it first */
+  level: () => Promise<void>;
   /** heal away the objects of selection `mask` */
   remove: (mask: number) => Promise<void>;
   ask: (prompt: string) => void;
@@ -52,7 +54,7 @@ export function AutoTab(p: {
       {busy === key ? "Working…" : label}
     </Btn>
   );
-  const ai = (label: string, prompt: string, title: string) => {
+  const ai = (label: string, prompt: string, title: string, first?: () => Promise<void>) => {
     const isRunningThis = !!p.aiBusy && p.aiPrompt === prompt;
     return (
       <Btn
@@ -60,7 +62,7 @@ export function AutoTab(p: {
         disabled={!!p.aiBusy}
         active={isRunningThis}
         title={`${title} — asks the AI provider; follow it in the AI bar`}
-        onClick={() => p.ask(prompt)}
+        onClick={async () => (await first?.(), p.ask(prompt))}
       >
         {isRunningThis ? `✦ ${label}…` : `✦ ${label}`}
       </Btn>
@@ -103,7 +105,12 @@ export function AutoTab(p: {
           {ai("Select subject", "Select the main subject.", "A selection of the main subject")}
           {ai("Select sky", "Select the sky.", "A selection of the sky")}
           {ai("Remove people", "Remove the people.", "Heal away every person")}
-          {ai("AI fine tune", "Fine tune this photo: natural colour, balanced exposure, no clipped highlights. Keep it realistic.", "Let the AI edit the whole photo")}
+          {ai(
+            "AI fine tune",
+            "Fine tune this photo: natural colour, balanced exposure, no clipped highlights. Keep it realistic. The horizon is levelled separately, so leave crop.angle and transform unchanged.",
+            "Level a tilted horizon, then let the AI edit the whole photo",
+            p.level,
+          )}
         </div>
         <div className={sub}>Remove a selected object</div>
         {objects.length ? (
