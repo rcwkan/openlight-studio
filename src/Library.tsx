@@ -4,6 +4,7 @@ import { ReactNode, useEffect, useId, useRef, useState } from "react";
 import { api, AutoFunction, CloudAccount, CloudFolder, Culling, Filter, flagName, FolderLoading, FolderProgress, ImmichAlbum, JobProgress, LABEL_COLORS, LABELS, NetworkDrive, Photo, Settings, Source, thumbUrl } from "./api";
 import { AutoView, FUNCS } from "./AutoView";
 import { Btn, HUE, Hue, Icon, Panel, Stars } from "./controls";
+import { PhotoViewer } from "./PhotoViewer";
 import { CloudBrowser } from "./Storage";
 
 export type SelectMods = { shift: boolean; toggle: boolean };
@@ -58,6 +59,7 @@ type Props = {
   workingIds?: number[];
   busyAiIds?: number[];
   onAddWorking?: (ids: number[]) => void;
+  onOpenViewer?: (id: number) => void;
 };
 
 const short = (folder: string) => folder.split(/[\\/]/).slice(-2).join("/");
@@ -74,6 +76,7 @@ export function Library(p: Props) {
   const openPanel = (fn: AutoFunction | null) => (setAutoFn(fn), setPanel(true));
 
   const [size, setSize] = useState(170);
+  const [viewMode, setViewMode] = useState<"grid" | "viewer">("grid");
   const [albums, setAlbums] = useState<ImmichAlbum[]>([]);
   const [online, setOnline] = useState<Record<string, boolean>>({});
   const [cloudDirs, setCloudDirs] = useState<CloudFolder[]>([]);
@@ -117,6 +120,30 @@ export function Library(p: Props) {
     io.observe(endRef.current);
     return () => io.disconnect();
   }, [p.nextPage, p.photos.length]);
+
+  // Global hotkeys to toggle between Grid mode and Viewer mode
+  useEffect(() => {
+    const handleKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement).tagName;
+      if (["INPUT", "TEXTAREA", "SELECT"].includes(tag)) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const k = e.key.toLowerCase();
+      if ((k === "v" || k === "enter") && viewMode === "grid") {
+        if (p.active || p.photos.length > 0) {
+          e.preventDefault();
+          if (!p.active && p.photos.length > 0) {
+            p.select(p.photos[0].id, { shift: false, toggle: false });
+          }
+          setViewMode("viewer");
+        }
+      } else if ((k === "g" || k === "escape") && viewMode === "viewer") {
+        e.preventDefault();
+        setViewMode("grid");
+      }
+    };
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [viewMode, p.active, p.photos, p.select]);
   const side = "px-1 text-neutral-500 hover:text-neutral-100";
   const manage = (source: Source) => (
     <button title="Connection" className={side} onClick={() => p.onConnect(source)}>
@@ -413,6 +440,51 @@ export function Library(p: Props) {
             </button>
           )}
 
+          {/* ACDSee-style View Mode Switcher: Grid (Manage) vs Viewer (View) */}
+          <div className="flex items-center rounded-md bg-neutral-800 p-0.5 border border-neutral-700/60 shadow-xs">
+            <button
+              type="button"
+              onClick={() => setViewMode("grid")}
+              className={`flex items-center gap-1.5 rounded px-2.5 py-1 text-[11px] font-medium transition-colors cursor-pointer ${
+                viewMode === "grid"
+                  ? "bg-[var(--theme-accent,#0ea5e9)] text-[var(--theme-accent-contrast,#ffffff)] font-semibold shadow-xs"
+                  : "text-neutral-400 hover:text-neutral-200"
+              }`}
+              title="Grid View — Browse thumbnails (Shortcut: G)"
+            >
+              <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <rect x="3" y="3" width="7" height="7" rx="1" />
+                <rect x="14" y="3" width="7" height="7" rx="1" />
+                <rect x="3" y="14" width="7" height="7" rx="1" />
+                <rect x="14" y="14" width="7" height="7" rx="1" />
+              </svg>
+              <span>Grid</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (!p.active && p.photos.length > 0) {
+                  p.select(p.photos[0].id, { shift: false, toggle: false });
+                }
+                setViewMode("viewer");
+              }}
+              disabled={p.photos.length === 0}
+              className={`flex items-center gap-1.5 rounded px-2.5 py-1 text-[11px] font-medium transition-colors disabled:opacity-30 cursor-pointer ${
+                viewMode === "viewer"
+                  ? "bg-[var(--theme-accent,#0ea5e9)] text-[var(--theme-accent-contrast,#ffffff)] font-semibold shadow-xs"
+                  : "text-neutral-400 hover:text-neutral-200"
+              }`}
+              title="Photo Viewer — ACDSee folder image viewing with zoom, pan, filmstrip, slideshow (Shortcut: V or Enter)"
+            >
+              <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <rect x="3" y="3" width="18" height="18" rx="2" />
+                <circle cx="8.5" cy="8.5" r="1.5" />
+                <polyline points="21 15 16 10 5 21" />
+              </svg>
+              <span>Viewer</span>
+            </button>
+          </div>
+
           {f.ids ? (
             <span className={`ml-auto flex items-center gap-1.5 rounded px-2 py-0.5 text-neutral-100 ${HUE[resultFn.hue].soft}`} title="Photos chosen by an auto function">
               <span className={HUE[resultFn.hue].text}>
@@ -609,7 +681,21 @@ export function Library(p: Props) {
           </div>
         )}
 
-        {p.loadingFolder && p.photos.length === 0 ? (
+        {viewMode === "viewer" ? (
+          <PhotoViewer
+            photos={p.photos}
+            active={p.active}
+            onSelectPhoto={(id) => p.select(id, { shift: false, toggle: false })}
+            onClose={() => setViewMode("grid")}
+            openDevelop={p.openDevelop}
+            cull={p.cull}
+            onMoveToBin={p.onMoveToBin}
+            onOpenCompare={p.onOpenCompare}
+            onVirtualCopy={p.onVirtualCopy}
+            selectedIds={p.selected}
+            folderName={f.folder ? short(f.folder) : f.view === "bin" ? "Bin" : "All Photographs"}
+          />
+        ) : p.loadingFolder && p.photos.length === 0 ? (
           <FolderLoadingScreen loading={p.loadingFolder} />
         ) : p.photos.length === 0 && !p.nextPage ? (
           <div className="flex flex-1 flex-col items-center justify-center gap-3 text-neutral-500">
@@ -667,6 +753,10 @@ export function Library(p: Props) {
                   aiBusy={p.busyAiIds?.includes(ph.id)}
                   onClick={(m) => p.select(ph.id, m)}
                   onOpen={() => p.openDevelop(ph.id)}
+                  onView={() => {
+                    p.select(ph.id, { shift: false, toggle: false });
+                    setViewMode("viewer");
+                  }}
                 />
               ))}
               {p.nextPage && (
@@ -685,7 +775,18 @@ export function Library(p: Props) {
 
       <aside className={panel ? "w-72 shrink-0 overflow-y-auto border-l border-neutral-800 bg-neutral-900" : "hidden"}>
         <div className={autoFn ? "hidden" : ""}>
-          {p.active ? <Metadata {...p} photo={p.active} /> : <p className="p-4 text-[11px] text-neutral-500">Select a photo to rate it, see its details and act on it.</p>}
+          {p.active ? (
+            <Metadata
+              {...p}
+              photo={p.active}
+              onOpenViewer={(id) => {
+                p.select(id, { shift: false, toggle: false });
+                setViewMode("viewer");
+              }}
+            />
+          ) : (
+            <p className="p-4 text-[11px] text-neutral-500">Select a photo to rate it, see its details and act on it.</p>
+          )}
         </div>
         {p.settings && (
           <div className={autoFn ? "" : "hidden"}>
@@ -913,6 +1014,7 @@ export function Cell({
   aiBusy,
   onClick,
   onOpen,
+  onView,
 }: {
   photo: Photo;
   size: number;
@@ -922,20 +1024,55 @@ export function Cell({
   aiBusy?: boolean;
   onClick: (m: SelectMods) => void;
   onOpen: () => void;
+  onView?: () => void;
 }) {
   return (
     <div
       onClick={(e) => onClick({ shift: e.shiftKey, toggle: e.metaKey || e.ctrlKey })}
-      onDoubleClick={onOpen}
+      onDoubleClick={onView || onOpen}
       className={`group relative flex cursor-pointer flex-col rounded-md p-1.5 ${
         active ? "bg-neutral-600" : selected ? "bg-neutral-700" : "bg-neutral-800 hover:bg-neutral-700/60"
       } ${aiBusy ? "ring-1 ring-violet-500/80" : ""} ${photo.flag === -1 ? "opacity-40" : ""}`}
     >
-      <div className="relative flex items-center justify-center" style={{ height: size * 0.72 }}>
+      <div className="relative flex items-center justify-center overflow-hidden rounded" style={{ height: size * 0.72 }}>
         <img src={thumbUrl(photo)} loading="lazy" draggable={false} className="max-h-full max-w-full object-contain shadow-md" alt="" />
+        
+        {/* Quick action overlay buttons on hover */}
+        <div className="absolute inset-0 flex items-center justify-center gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity bg-black/45 backdrop-blur-[1px] rounded pointer-events-none">
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              if (onView) onView();
+              else onOpen();
+            }}
+            className="pointer-events-auto flex items-center gap-1 rounded bg-neutral-900/95 hover:bg-neutral-800 text-white px-2 py-1 text-[10px] font-semibold border border-neutral-700 shadow-md cursor-pointer transition-colors"
+            title="Open in Photo Viewer (ACDSee folder image view - V)"
+          >
+            <svg className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <rect x="3" y="3" width="18" height="18" rx="2" />
+              <circle cx="8.5" cy="8.5" r="1.5" />
+              <polyline points="21 15 16 10 5 21" />
+            </svg>
+            <span>View</span>
+          </button>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onOpen();
+            }}
+            className="pointer-events-auto flex items-center gap-1 rounded bg-[var(--theme-accent,#0ea5e9)] hover:bg-[var(--theme-accent-hover,#0284c7)] text-[var(--theme-accent-contrast,#ffffff)] px-2 py-1 text-[10px] font-semibold shadow-md cursor-pointer transition-colors"
+            title="Open in Develop module (D)"
+          >
+            <Icon d="M12 20h9 M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" className="h-3 w-3" />
+            <span>Develop</span>
+          </button>
+        </div>
+
         {aiBusy ? (
           <span
-            className="pointer-events-none absolute top-1 right-1 flex items-center gap-1 rounded-full bg-violet-950/95 px-2 py-0.5 text-[9px] font-semibold text-violet-200 border border-violet-600/80 shadow-md"
+            className="pointer-events-none absolute top-1 right-1 flex items-center gap-1 rounded-full bg-violet-950/95 px-2 py-0.5 text-[9px] font-semibold text-violet-200 border border-violet-600/80 shadow-md z-10"
             title="AI fine tune / edit is working on this photo in Develop"
           >
             <span className="h-1.5 w-1.5 animate-ping rounded-full bg-violet-300" />
@@ -943,7 +1080,7 @@ export function Cell({
           </span>
         ) : inWorking ? (
           <span
-            className="pointer-events-none absolute top-1 right-1 rounded bg-sky-950/90 px-1.5 py-0.5 text-[9px] font-medium text-sky-300 border border-sky-800/70 shadow-sm"
+            className="pointer-events-none absolute top-1 right-1 rounded bg-sky-950/90 px-1.5 py-0.5 text-[9px] font-medium text-sky-300 border border-sky-800/70 shadow-sm z-10"
             title="Open in Develop working images"
           >
             Develop
@@ -1065,6 +1202,13 @@ function Metadata(p: Props & { photo: Photo }) {
             </>
           ) : (
             <>
+              <Btn
+                onClick={() => p.onOpenViewer?.(ph.id)}
+                title="Open photo in Photo Viewer (ACDSee folder image view - V or Enter)"
+                className="bg-[var(--theme-accent,#0ea5e9)] text-[var(--theme-accent-contrast,#ffffff)] font-semibold shadow-xs"
+              >
+                ▣ View Photo
+              </Btn>
               <Btn onClick={() => p.openDevelop(ph.id)} title={p.selected.length > 1 ? `Open all ${p.selected.length} selected photos as working images in Develop` : "Open photo in Develop (D)"}>
                 Develop{p.selected.length > 1 ? ` (${p.selected.length})` : ""}
               </Btn>

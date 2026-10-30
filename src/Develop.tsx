@@ -611,6 +611,19 @@ export function Develop(p: Props) {
       setError(`Upright: ${e}`);
     }
   };
+  // ✦ AI fine tune levels the horizon first (Upright Level), as its own step; not when the photo has a
+  // straighten, Upright, rotate or perspective of its own, no straight edges, or a tilt under 0.25°
+  // (half the 0.5° step Upright measures lines in)
+  const levelHorizon = async () => {
+    const d = devRef.current;
+    if (id == null || !d) return;
+    const { upright: mode, rotate, vertical, horizontal } = d.transform;
+    if (d.crop.angle || mode !== "off" || rotate || vertical || horizontal) return;
+    await flush();
+    const t = await api.upright(id, d, "level").catch(() => null);
+    const cur = devRef.current;
+    if (t && Math.abs(t.rotate) >= 0.25 && idRef.current === id && cur) change({ ...cur, transform: t }, "Level horizon");
+  };
   const autoCa = async () => {
     if (id == null) return;
     setError(null);
@@ -1602,6 +1615,7 @@ export function Develop(p: Props) {
             levels={autoLevels}
             ca={autoCa}
             upright={upright}
+            level={levelHorizon}
             remove={removeSelection}
             ask={(text) => id != null && void runPhotoAi(id, text)}
             aiBusy={id != null ? !!p.aiTasks[id]?.busy : false}
