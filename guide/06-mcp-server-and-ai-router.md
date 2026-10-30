@@ -1,6 +1,6 @@
 # Chapter 6: Model Context Protocol (MCP) Server & Pluggable AI Router
 
-This chapter is the technical guide to OpenLight Studio's built-in **Model Context Protocol (MCP)** server and its **Pluggable AI & CLI Agent Router** implemented in [`src-tauri/src/mcp.rs`](file:///Volumes/RIT-2TB/ws/56%20Desktop%20App/openlight_studio/src-tauri/src/mcp.rs) and [`src-tauri/src/ai.rs`](file:///Volumes/RIT-2TB/ws/56%20Desktop%20App/openlight_studio/src-tauri/src/ai.rs).
+This chapter is the technical guide to OpenLight Studio's built-in **Model Context Protocol (MCP)** server and its **Pluggable AI & CLI Agent Router** implemented in [`src-tauri/src/mcp.rs`](../src-tauri/src/mcp.rs) and [`src-tauri/src/ai.rs`](../src-tauri/src/ai.rs).
 
 ---
 
@@ -133,7 +133,7 @@ Renders full-resolution images with current edits applied.
 
 ---
 
-## 4. Pluggable AI Provider Router ([`ai.rs`](file:///Volumes/RIT-2TB/ws/56%20Desktop%20App/openlight_studio/src-tauri/src/ai.rs))
+## 4. Pluggable AI Provider Router ([`ai.rs`](../src-tauri/src/ai.rs))
 
 When the user enters a prompt in the Develop module's **✦ AI** bar, OpenLight routes the request according to the active provider configured in Settings:
 

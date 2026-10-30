@@ -1,12 +1,12 @@
 # Chapter 4: Backend Rust Core Engine & Module Deep-Dive
 
-This chapter provides a comprehensive technical reference for the Rust backend located in [`src-tauri/src/`](file:///Volumes/RIT-2TB/ws/56%20Desktop%20App/openlight_studio/src-tauri/src/). It details each module's responsibility, data structures, thread safety, memory patterns, and database operations.
+This chapter provides a comprehensive technical reference for the Rust backend located in [`src-tauri/src/`](../src-tauri/src/). It details each module's responsibility, data structures, thread safety, memory patterns, and database operations.
 
 ---
 
 ## 1. Rust Crate Architecture & Cargo Profiles
 
-The backend is built as a hybrid binary/library crate configured in [`src-tauri/Cargo.toml`](file:///Volumes/RIT-2TB/ws/56%20Desktop%20App/openlight_studio/src-tauri/Cargo.toml):
+The backend is built as a hybrid binary/library crate configured in [`src-tauri/Cargo.toml`](../src-tauri/Cargo.toml):
 
 ```toml
 [lib]
@@ -52,7 +52,7 @@ src-tauri/src/
 
 ---
 
-### 2.1 [`lib.rs`](file:///Volumes/RIT-2TB/ws/56%20Desktop%20App/openlight_studio/src-tauri/src/lib.rs) — State Registry & Command Dispatcher
+### 2.1 [`lib.rs`](../src-tauri/src/lib.rs) — State Registry & Command Dispatcher
 * **Central State**: Instantiates `Arc<Core>`, wrapping SQLite connection mutexes, settings, proxy caches, and cancellation tokens.
 * **Tauri Commands**: Exposes high-level commands invoked from `api.ts`:
   * `catalog_list_photos`, `catalog_update_culling`, `catalog_create_virtual_copy`.
@@ -64,7 +64,7 @@ src-tauri/src/
 
 ---
 
-### 2.2 [`develop.rs`](file:///Volumes/RIT-2TB/ws/56%20Desktop%20App/openlight_studio/src-tauri/src/develop.rs) — The Non-Destructive Render Engine
+### 2.2 [`develop.rs`](../src-tauri/src/develop.rs) — The Non-Destructive Render Engine
 * **`Develop` Struct**: The single source of truth for all photo modifications:
   * White balance, basic tone, presence (texture, clarity, dehaze), tone curve splines, 8-band color mixer, 3D Point Color swatches, 3-way color grading wheels, camera calibration, detail (noise reduction & sharpening), effects (vignette), grain, lens corrections, transform (Upright), Photoshop Pro adjustments (levels, hue/sat, selective color, channel mixer, gradient map, filters), image rotation, crop, retouch heals, and boolean masks.
 * **`Img` Representation**:
@@ -79,7 +79,7 @@ src-tauri/src/
 
 ---
 
-### 2.3 [`catalog.rs`](file:///Volumes/RIT-2TB/ws/56%20Desktop%20App/openlight_studio/src-tauri/src/catalog.rs) — Digital Asset Manager & SQLite
+### 2.3 [`catalog.rs`](../src-tauri/src/catalog.rs) — Digital Asset Manager & SQLite
 * **SQLite Connection**: Operates in WAL mode with foreign keys enabled.
 * **Table Schema**:
   * `photos`: Stores path, master/copy relationships, EXIF dimensions, capture date, camera/lens strings, ratings, flags, color labels, keywords, JSON develop state, and thumbnail version counter.
@@ -89,7 +89,7 @@ src-tauri/src/
 
 ---
 
-### 2.4 [`vision.rs`](file:///Volumes/RIT-2TB/ws/56%20Desktop%20App/openlight_studio/src-tauri/src/vision.rs) — Computer Vision & Telemetry
+### 2.4 [`vision.rs`](../src-tauri/src/vision.rs) — Computer Vision & Telemetry
 * **Laplacian Edge-Width Sharpness**: Computes edge width and gradient magnitude across high-contrast contours to score subject focus independently of exposure brightness.
 * **Subject Estimation**: Color contrast analysis with border pixels to estimate the main subject bounding box.
 * **Clipping Metrics**: Calculates highlight clipping (>99% luminance) and shadow crushing (<1% luminance).
@@ -97,14 +97,14 @@ src-tauri/src/
 
 ---
 
-### 2.5 [`enhance.rs`](file:///Volumes/RIT-2TB/ws/56%20Desktop%20App/openlight_studio/src-tauri/src/enhance.rs) — Denoise & Super-Resolution
+### 2.5 [`enhance.rs`](../src-tauri/src/enhance.rs) — Denoise & Super-Resolution
 * **Wavelet Denoise**: Multi-scale *à trous* wavelet shrinkage operating in the perceptual **Oklab** color space, parameterized by measured noise floors at varying luminance levels.
 * **Super Resolution**: Classical 2x–4x detail synthesis using Lanczos interpolation, iterative back-projection (IBP), and edge-preserving sharpening.
 * **External AI Engine Bridge**: Spawns external CLI engines (such as `realesrgan-ncnn-vulkan`) using safe argv substitution (`{{INPUT}}`, `{{OUTPUT}}`, `{{SCALE}}`) without invoking a shell.
 
 ---
 
-### 2.6 [`auto.rs`](file:///Volumes/RIT-2TB/ws/56%20Desktop%20App/openlight_studio/src-tauri/src/auto.rs) — Autonomous Batch Processing
+### 2.6 [`auto.rs`](../src-tauri/src/auto.rs) — Autonomous Batch Processing
 * **Six Core Functions**:
   1. `cull`: Auto cataloging, sharpness scoring, burst selection, star rating, keyword tagging.
   2. `edit`: Measured white balance & auto-tone applied to natural, vivid, portrait, landscape, or monochrome profiles.
@@ -116,7 +116,7 @@ src-tauri/src/
 
 ---
 
-### 2.7 [`storage.rs`](file:///Volumes/RIT-2TB/ws/56%20Desktop%20App/openlight_studio/src-tauri/src/storage.rs) & [`cloud.rs`](file:///Volumes/RIT-2TB/ws/56%20Desktop%20App/openlight_studio/src-tauri/src/cloud.rs)
+### 2.7 [`storage.rs`](../src-tauri/src/storage.rs) & [`cloud.rs`](../src-tauri/src/cloud.rs)
 * **Network Shares**: Discovers and mounts SMB, NFS, and WebDAV shares using native OS facilities (`mount_smbfs` on macOS, GVfs on Linux, UNC paths on Windows).
 * **Cloud Storage**:
   * S3-compatible providers (AWS S3, Backblaze B2, Cloudflare R2, MinIO) with custom **AWS Signature V4** request signing.
@@ -127,7 +127,7 @@ src-tauri/src/
 
 ---
 
-### 2.8 [`remote.rs`](file:///Volumes/RIT-2TB/ws/56%20Desktop%20App/openlight_studio/src-tauri/src/remote.rs) — Immich & Google Photos
+### 2.8 [`remote.rs`](../src-tauri/src/remote.rs) — Immich & Google Photos
 * **Immich Integration**:
   * Paginated streaming (250 items/page) allowing instant browsing of libraries with 100,000+ photos.
   * On-demand download of full-size originals for develop and export.
@@ -139,7 +139,7 @@ src-tauri/src/
 
 ---
 
-### 2.9 [`ai.rs`](file:///Volumes/RIT-2TB/ws/56%20Desktop%20App/openlight_studio/src-tauri/src/ai.rs) & [`mcp.rs`](file:///Volumes/RIT-2TB/ws/56%20Desktop%20App/openlight_studio/src-tauri/src/mcp.rs)
+### 2.9 [`ai.rs`](../src-tauri/src/ai.rs) & [`mcp.rs`](../src-tauri/src/mcp.rs)
 * **Agent Router**: Routes natural language instructions to either external CLI agents (Antigravity CLI, Claude CLI) via the built-in MCP server or HTTP multimodal APIs (Ollama, Gemini, Anthropic, OpenAI).
 * **MCP Implementation**: Detailed in Chapter 6.
 

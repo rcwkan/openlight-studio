@@ -1,6 +1,6 @@
 # Chapter 7: Storage Architecture, Remote Sources & Cloud Sync
 
-This chapter documents OpenLight Studio's storage architecture, in-place local editing, network share mounting, Immich integration, Google Photos Picker API, and multi-cloud synchronization implemented in [`src-tauri/src/storage.rs`](file:///Volumes/RIT-2TB/ws/56%20Desktop%20App/openlight_studio/src-tauri/src/storage.rs), [`src-tauri/src/cloud.rs`](file:///Volumes/RIT-2TB/ws/56%20Desktop%20App/openlight_studio/src-tauri/src/cloud.rs), and [`src-tauri/src/remote.rs`](file:///Volumes/RIT-2TB/ws/56%20Desktop%20App/openlight_studio/src-tauri/src/remote.rs).
+This chapter documents OpenLight Studio's storage architecture, in-place local editing, network share mounting, Immich integration, Google Photos Picker API, and multi-cloud synchronization implemented in [`src-tauri/src/storage.rs`](../src-tauri/src/storage.rs), [`src-tauri/src/cloud.rs`](../src-tauri/src/cloud.rs), and [`src-tauri/src/remote.rs`](../src-tauri/src/remote.rs).
 
 ---
 
@@ -31,7 +31,7 @@ Network shares allow studios and teams to edit photos stored on central NAS syst
 
 ---
 
-## 3. Immich Integration ([`remote.rs`](file:///Volumes/RIT-2TB/ws/56%20Desktop%20App/openlight_studio/src-tauri/src/remote.rs))
+## 3. Immich Integration ([`remote.rs`](../src-tauri/src/remote.rs))
 
 OpenLight Studio features first-class integration with [Immich](https://immich.app), the popular self-hosted photo management server:
 
@@ -70,7 +70,7 @@ Due to Google Photos API restrictions that disallow full library listing or modi
 
 ---
 
-## 5. Multi-Cloud Storage ([`cloud.rs`](file:///Volumes/RIT-2TB/ws/56%20Desktop%20App/openlight_studio/src-tauri/src/cloud.rs))
+## 5. Multi-Cloud Storage ([`cloud.rs`](../src-tauri/src/cloud.rs))
 
 OpenLight Studio supports direct connection to four primary cloud storage backends:
 
@@ -83,7 +83,7 @@ OpenLight Studio supports direct connection to four primary cloud storage backen
 
 ---
 
-## 6. Duplicate Engine & Storage Audit ([`storage.rs`](file:///Volumes/RIT-2TB/ws/56%20Desktop%20App/openlight_studio/src-tauri/src/storage.rs))
+## 6. Duplicate Engine & Storage Audit ([`storage.rs`](../src-tauri/src/storage.rs))
 
 The **Duplicate** facility (**Settings › Storage › Duplicate**) provides safe cross-source photo synchronization:
 

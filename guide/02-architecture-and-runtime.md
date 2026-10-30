@@ -92,7 +92,7 @@ OpenLight Studio is packaged as a single native binary that adapts its execution
 ## 3. Tauri IPC & Communication Architecture
 
 ### 3.1 Command Invocation (`invoke`)
-The frontend communicates with Rust through typed wrapper functions declared in [`src/api.ts`](file:///Volumes/RIT-2TB/ws/56%20Desktop%20App/openlight_studio/src/api.ts). Each function wraps `@tauri-apps/api/core::invoke`:
+The frontend communicates with Rust through typed wrapper functions declared in [`src/api.ts`](../src/api.ts). Each function wraps `@tauri-apps/api/core::invoke`:
 
 ```typescript
 // Frontend (src/api.ts)
@@ -105,7 +105,7 @@ export async function saveDevelop(photoId: number, develop: Develop): Promise<vo
 }
 ```
 
-On the Rust backend, commands are defined as async/sync functions registered in the `tauri::Builder` invoke handler in [`src-tauri/src/lib.rs`](file:///Volumes/RIT-2TB/ws/56%20Desktop%20App/openlight_studio/src-tauri/src/lib.rs):
+On the Rust backend, commands are defined as async/sync functions registered in the `tauri::Builder` invoke handler in [`src-tauri/src/lib.rs`](../src-tauri/src/lib.rs):
 
 ```rust
 // Backend (src-tauri/src/lib.rs)

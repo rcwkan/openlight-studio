@@ -1,6 +1,6 @@
 # Chapter 5: RAW Processing Pipeline, Color Science & Mathematics
 
-This chapter explores the mathematical foundations, color spaces, and execution stages of OpenLight Studio's non-destructive image rendering pipeline implemented in [`src-tauri/src/develop.rs`](file:///Volumes/RIT-2TB/ws/56%20Desktop%20App/openlight_studio/src-tauri/src/develop.rs).
+This chapter explores the mathematical foundations, color spaces, and execution stages of OpenLight Studio's non-destructive image rendering pipeline implemented in [`src-tauri/src/develop.rs`](../src-tauri/src/develop.rs).
 
 ---
 
@@ -116,7 +116,7 @@ To maintain 60fps interactivity during slider adjustments on commodity CPUs, Ope
 | Attribute | Viewport Develop Proxy | Batch Export Renderer |
 |---|---|---|
 | **Resolution** | 1600px on long edge (`PROXY_EDGE`) | Full camera resolution (up to 100+ Megapixels) |
-| **Pipeline Implementation** | [`develop::render`](file:///Volumes/RIT-2TB/ws/56%20Desktop%20App/openlight_studio/src-tauri/src/develop.rs#L1141) | [`develop::render`](file:///Volumes/RIT-2TB/ws/56%20Desktop%20App/openlight_studio/src-tauri/src/develop.rs#L1141) |
+| **Pipeline Implementation** | [`develop::render`](../src-tauri/src/develop.rs#L1141) | [`develop::render`](../src-tauri/src/develop.rs#L1141) |
 | **Execution Target** | Multithreaded CPU via `rayon` | Multithreaded CPU via `rayon` |
 | **Latency** | < 16ms (instantaneous UI feedback) | ~200ms – 1.5s per photo |
 | **Output Format** | Viewport RGBA buffer / JPEG telemetry | JPEG, AVIF, 16-bit PNG, 16-bit TIFF |

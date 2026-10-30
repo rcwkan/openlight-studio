@@ -53,7 +53,7 @@ npm run build
 OpenLight Studio packages native production distributions for **macOS**, **Linux**, and **Windows**.
 
 ### 2.1 macOS Production Packaging (`scripts/build.sh`)
-On macOS, [`scripts/build.sh`](file:///Volumes/RIT-2TB/ws/56%20Desktop%20App/openlight_studio/scripts/build.sh) compiles the optimized binary, bundles the `.app`, and creates a signed/compressed `.dmg` using macOS `hdiutil`:
+On macOS, [`scripts/build.sh`](../scripts/build.sh) compiles the optimized binary, bundles the `.app`, and creates a signed/compressed `.dmg` using macOS `hdiutil`:
 
 ```bash
 ./scripts/build.sh
@@ -74,7 +74,7 @@ Recommended on any platform (including macOS) to build clean Linux `.deb` packag
 ```bash
 ./scripts/build-linux.sh
 ```
-This builds an isolated builder image via [`scripts/Dockerfile.linux`](file:///Volumes/RIT-2TB/ws/56%20Desktop%20App/openlight_studio/scripts/Dockerfile.linux) based on Debian, compiles the binary, and outputs the `.deb` package to `dist-packages/linux/deb/OpenLight Studio_0.1.0_<arch>.deb`.
+This builds an isolated builder image via [`scripts/Dockerfile.linux`](../scripts/Dockerfile.linux) based on Debian, compiles the binary, and outputs the `.deb` package to `dist-packages/linux/deb/OpenLight Studio_0.1.0_<arch>.deb`.
 
 #### Option B: Native Linux System Build
 On a native Linux workstation with prerequisites installed:
@@ -98,7 +98,7 @@ Artifacts generated:
 
 ## 3. Continuous Integration & CD Pipeline
 
-OpenLight Studio features a multi-platform GitHub Actions workflow defined in [`.github/workflows/build-all-platforms.yml`](file:///Volumes/RIT-2TB/ws/56%20Desktop%20App/openlight_studio/.github/workflows/build-all-platforms.yml).
+OpenLight Studio features a multi-platform GitHub Actions workflow defined in [`.github/workflows/build-all-platforms.yml`](../.github/workflows/build-all-platforms.yml).
 
 ### 3.1 Build Matrix Architecture
 The pipeline runs concurrently across 4 build runners on every push to `main` and release tag:

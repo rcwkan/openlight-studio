@@ -6,7 +6,7 @@ This chapter documents the frontend architecture of OpenLight Studio: technology
 
 ## 1. Technology Stack & Directory Structure
 
-The frontend lives in [`src/`](file:///Volumes/RIT-2TB/ws/56%20Desktop%20App/openlight_studio/src/) and is built with:
+The frontend lives in [`src/`](../src/) and is built with:
 * **React 19 (`react` & `react-dom` ^19.1.0)**: Modern concurrent React rendering.
 * **TypeScript (~6.0.3)**: Strict typing enabled across all components, API schemas, and state objects.
 * **Tailwind CSS v4 (`@tailwindcss/vite` ^4.3.3)**: Modern utility-first CSS engine with dark mode theming and sub-millisecond compilation.
@@ -36,13 +36,13 @@ graph TD
     LibraryView --> Controls
 ```
 
-### 2.1 [`App.tsx`](file:///Volumes/RIT-2TB/ws/56%20Desktop%20App/openlight_studio/src/App.tsx) — Application Shell & Root State
+### 2.1 [`App.tsx`](../src/App.tsx) — Application Shell & Root State
 * **Active View State**: Manages top-level navigation: `"library"`, `"develop"`, `"auto"`, `"settings"`, `"storage"`.
 * **Selection State**: Tracks the currently active `selectedId: number | null` and multi-selection array `selectedIds: number[]`.
 * **Global Hotkey Dispatcher**: Centralizes window-level keyboard event listeners (switching modules, flag toggles, star ratings, undo/redo).
 * **Toast & Notification System**: Surfaces non-blocking notification banners for background jobs, cloud sync progress, and MCP tool executions.
 
-### 2.2 [`Library.tsx`](file:///Volumes/RIT-2TB/ws/56%20Desktop%20App/openlight_studio/src/Library.tsx) — Digital Asset Management (DAM)
+### 2.2 [`Library.tsx`](../src/Library.tsx) — Digital Asset Management (DAM)
 * **Sources Sidebar**:
   * Local folders (added via native directory picker).
   * Network shares (SMB/NFS/WebDAV with connection health indicators).
@@ -53,7 +53,7 @@ graph TD
 * **Filter Bar**: Dynamic filtering by search text, star ratings (0–5), flags (Pick, Unflagged, Reject), color labels (Red, Yellow, Green, Blue, Purple), aspect ratio, virtual copy types, and edited status.
 * **Thumbnail Grid**: Renders thumbnail cards via the `asset://` protocol with rating stars, flag badges, and thumbnail generation indicators.
 
-### 2.3 [`Develop.tsx`](file:///Volumes/RIT-2TB/ws/56%20Desktop%20App/openlight_studio/src/Develop.tsx) — RAW Image Editor
+### 2.3 [`Develop.tsx`](../src/Develop.tsx) — RAW Image Editor
 * **Interactive Canvas**: Renders the 1600px proxy viewport rendered by Rust.
 * **Live RGB/Luminance Histogram**: Displays real-time 256-bin histogram with clickable Shadow (`J`) and Highlight clipping overlays.
 * **Panels & Sub-Tabs**:
@@ -65,21 +65,21 @@ graph TD
   * **Selections (Masks)**: Boolean mask layer list with Add, Subtract, Intersect, Invert, Feather, and Edge Shift controls.
 * **Interactive Crop & Straightener**: On-canvas boundary handles, rotation dial, and rule-of-thirds grid.
 
-### 2.4 [`Advanced.tsx`](file:///Volumes/RIT-2TB/ws/56%20Desktop%20App/openlight_studio/src/Advanced.tsx) — Optics, Geometry & Technical Tools
+### 2.4 [`Advanced.tsx`](../src/Advanced.tsx) — Optics, Geometry & Technical Tools
 * **Lens Corrections**: Distortion slider, automatic and manual lateral chromatic aberration (Red/Cyan, Blue/Yellow), defringe controls (Purple/Green hue ranges), lens vignetting.
 * **Transform (Upright)**: Automatic perspective correction modes (`Auto`, `Level`, `Vertical`, `Full`), Guided Upright with interactive line guides, manual keystone, and Constrain Crop.
 * **Camera Calibration**: Shadow tint and primary Red, Green, and Blue Hue/Saturation calibration.
 * **Detail & Grain**: Luminance and color noise reduction, film grain simulation (amount, size, roughness).
 * **Soft Proofing**: Gamut warnings for sRGB, Display P3, and Adobe RGB color spaces.
 
-### 2.5 [`Pro.tsx`](file:///Volumes/RIT-2TB/ws/56%20Desktop%20App/openlight_studio/src/Pro.tsx) — Photoshop-Grade Layer Adjustments
+### 2.5 [`Pro.tsx`](../src/Pro.tsx) — Photoshop-Grade Layer Adjustments
 * **Levels**: Input Black, Gamma, Input White, Output Black, Output White for composite RGB and individual R, G, B channels with one-click Auto Levels.
 * **Hue / Saturation**: Master Hue, Saturation, Lightness, and Colorize mode.
 * **Selective Color**: CMYK channel shifts across Reds, Yellows, Greens, Cyans, Blues, Magentas, Whites, Neutrals, and Blacks.
 * **Channel Mixer & Gradient Map**: Custom monochrome/RGB matrix mixing and dual-tone gradient mapping.
 * **Filters & Rotation**: Gaussian blur, Invert, Posterize, Threshold, 90° rotations, and horizontal/vertical flips.
 
-### 2.6 [`AutoView.tsx`](file:///Volumes/RIT-2TB/ws/56%20Desktop%20App/openlight_studio/src/AutoView.tsx) & [`Auto.tsx`](file:///Volumes/RIT-2TB/ws/56%20Desktop%20App/openlight_studio/src/Auto.tsx) — Auto Engine
+### 2.6 [`AutoView.tsx`](../src/AutoView.tsx) & [`Auto.tsx`](../src/Auto.tsx) — Auto Engine
 * Dedicated dashboard for executing and tracking the 6 core autonomous functions:
   1. **Catalog & Culling** (sharpness, exposure, burst grouping, rating assignment).
   2. **Non-destructive Editing** (auto white balance, auto tone, style profiles).
@@ -90,7 +90,7 @@ graph TD
 
 ---
 
-## 3. Custom UI Controls & Design System ([`controls.tsx`](file:///Volumes/RIT-2TB/ws/56%20Desktop%20App/openlight_studio/src/controls.tsx))
+## 3. Custom UI Controls & Design System ([`controls.tsx`](../src/controls.tsx))
 
 OpenLight Studio does not use heavy external component libraries. Instead, it features dedicated, high-performance photography controls:
 

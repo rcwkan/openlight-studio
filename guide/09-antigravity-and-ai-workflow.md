@@ -8,7 +8,7 @@ This chapter guides developers and AI agents on using **Google Antigravity (AGY)
 
 OpenLight Studio is architected from day one to be developed with and controlled by AI agents. The repository contains built-in configurations for Google Antigravity:
 
-* **In-App Provider**: OpenLight Studio ships with a pre-configured CLI provider for Antigravity in [`src-tauri/src/ai.rs`](file:///Volumes/RIT-2TB/ws/56%20Desktop%20App/openlight_studio/src-tauri/src/ai.rs):
+* **In-App Provider**: OpenLight Studio ships with a pre-configured CLI provider for Antigravity in [`src-tauri/src/ai.rs`](../src-tauri/src/ai.rs):
   ```json
   {
     "id": "cli:antigravity",
