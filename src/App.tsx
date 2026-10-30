@@ -463,10 +463,8 @@ export default function App() {
     if (k === "c" && selected.length >= 2) {
       e.preventDefault();
       setCompareOpen((prev) => !prev);
-    } else if (k === "g") {
-      setModule("library");
-      setLibraryAutoFn(null);
-    } else if (k === "d" && active) setModule("develop");
+    } else if (k === "g") setModule("library");
+    else if (k === "d" && active) setModule("develop");
     else if (/^[0-5]$/.test(k)) cull({ rating: +k });
     else if (k === "p") cull({ flag: "pick" });
     else if (k === "x") cull({ flag: "reject" });
@@ -515,12 +513,7 @@ export default function App() {
             return (
               <button
                 key={m}
-                onClick={() => {
-                  setModule(m);
-                  if (m === "library" && module === "library") {
-                    setLibraryAutoFn(null);
-                  }
-                }}
+                onClick={() => setModule(m)}
                 disabled={m === "develop" && !active}
                 style={
                   isCur

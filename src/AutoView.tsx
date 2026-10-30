@@ -2,7 +2,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { ReactNode, useEffect, useRef, useState } from "react";
 import { api, AutoFunction, AutoResult, AutoSettings, JobProgress, LABEL_COLORS, Photo, Settings, thumbUrl } from "./api";
 import { CompareGroup, CompareModal } from "./CompareModal";
-import { Btn, Seg, Stars } from "./controls";
+import { Btn, HUE, Hue, Icon, Seg, Stars } from "./controls";
 
 type Rec = Record<string, unknown>;
 type When = (s: Rec) => boolean;
@@ -38,12 +38,14 @@ const actions = (keyword: string): [string, string][] => [
 const on = (k: string) => (s: Rec) => !!s[k];
 
 /** The auto functions: what each does, its settings (basic ones show first, the rest under Advanced) and
- *  whether it asks the AI provider. */
-export const FUNCS: { id: AutoFunction; title: string; icon: string; verb: string; blurb: string; fields: Field[]; ai?: When }[] = [
+ *  whether it asks the AI provider. `short`, `icon` (an Icon path) and `hue` show it in the Library's right bar. */
+export const FUNCS: { id: AutoFunction; title: string; short: string; icon: string; hue: Hue; verb: string; blurb: string; fields: Field[]; ai?: When }[] = [
   {
     id: "cull",
     title: "Catalog & Culling",
-    icon: "★",
+    short: "Cull",
+    hue: "amber",
+    icon: "M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z",
     verb: "Cull",
     blurb:
       "Scores each photo's sharpness (on its main subject), exposure and noise, groups bursts and picks the best of each, rejects blurred or badly exposed photos, rates the rest 1–5 stars and adds catalog keywords.",
@@ -73,7 +75,9 @@ export const FUNCS: { id: AutoFunction; title: string; icon: string; verb: strin
   {
     id: "edit",
     title: "Non-destructive Editing",
-    icon: "◐",
+    short: "Edit",
+    hue: "blue",
+    icon: "M4 7h9 M17 7h3 M15 5v4 M4 12h3 M11 12h9 M9 10v4 M4 17h11 M19 17h1 M17 15v4",
     verb: "Edit",
     blurb:
       "Sets white balance and tone from each photo, then a look; can also straighten, remove colour fringes and reduce noise. Each photo gets one history step you can undo; files are never changed.",
@@ -106,7 +110,9 @@ export const FUNCS: { id: AutoFunction; title: string; icon: string; verb: strin
   {
     id: "mask",
     title: "AI Masking",
-    icon: "◍",
+    short: "Mask",
+    hue: "violet",
+    icon: "M4 8V5a1 1 0 0 1 1-1h3 M16 4h3a1 1 0 0 1 1 1v3 M20 16v3a1 1 0 0 1-1 1h-3 M8 20H5a1 1 0 0 1-1-1v-3 M12 7.5a2.5 2.5 0 1 1 0 5 2.5 2.5 0 0 1 0-5z M7.5 17a4.5 4.5 0 0 1 9 0",
     verb: "Select",
     blurb: "Adds selections to tune in Develop: the main subject, the sky, the background, or each person. Each lands in the photo's Selections, ready for its own adjustments.",
     ai: (s) => s.method === "ai",
@@ -144,7 +150,9 @@ export const FUNCS: { id: AutoFunction; title: string; icon: string; verb: strin
   {
     id: "enhance",
     title: "AI Denoise & Super Resolution",
-    icon: "✧",
+    short: "Enhance",
+    hue: "emerald",
+    icon: "M11 3l1.8 5.2L18 10l-5.2 1.8L11 17l-1.8-5.2L4 10l5.2-1.8z M18 14l.7 2.3L21 17l-2.3.7L18 20l-.7-2.3L15 17l2.3-.7z",
     verb: "Enhance",
     blurb: "Writes a cleaner, optionally larger copy as a new photo next to the original (…-Enhanced.tif) with the original's edits. The original stays untouched.",
     fields: [
@@ -205,7 +213,9 @@ export const FUNCS: { id: AutoFunction; title: string; icon: string; verb: strin
   {
     id: "blur",
     title: "Find blurred subjects",
-    icon: "◌",
+    short: "Blur",
+    hue: "rose",
+    icon: "M12 7a5 5 0 1 1 0 10 5 5 0 0 1 0-10z M12 2.5v2 M12 19.5v2 M2.5 12h2 M19.5 12h2",
     verb: "Check",
     blurb: "Finds photos whose main subject is out of focus or shaken, including missed focus, where something else in the frame is sharp.",
     ai: (s) => s.subject === "ai",
@@ -230,7 +240,9 @@ export const FUNCS: { id: AutoFunction; title: string; icon: string; verb: strin
   {
     id: "duplicates",
     title: "Find duplicates",
-    icon: "⧉",
+    short: "Duplicates",
+    hue: "cyan",
+    icon: "M9 8h10a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1z M4 16V5a1 1 0 0 1 1-1h11",
     verb: "Compare",
     blurb: "Finds copies of the same file across folders and sources, and photos that look the same; the best of each group is kept.",
     fields: [
@@ -265,7 +277,6 @@ export const FUNCS: { id: AutoFunction; title: string; icon: string; verb: strin
   },
 ];
 
-const card = "rounded-lg border border-neutral-800 bg-neutral-900 p-4";
 const fieldCls = "rounded bg-neutral-800 px-2 py-1 outline-none focus:ring-1 focus:ring-sky-600";
 const num = (n: unknown) => Number(n ?? 0).toLocaleString();
 
@@ -283,30 +294,30 @@ function FieldRow({ f, s, set }: { f: Field; s: Rec; set: (patch: Rec) => void }
         </span>
       </label>
     );
-  const row = (control: ReactNode) => (
+  // the label sits above its control (and a slider's value beside the label) to fit the narrow panel
+  const row = (control: ReactNode, value?: ReactNode) => (
     <div className="py-1">
-      <div className="flex items-center gap-3">
-        <span className="w-44 shrink-0 text-neutral-400">{f.label}</span>
-        {control}
+      <div className="mb-1 flex items-baseline justify-between gap-2">
+        <span className="text-neutral-400">{f.label}</span>
+        {value}
       </div>
-      {hint && <div className="pl-[11.75rem]">{hint}</div>}
+      {control}
+      {hint}
     </div>
   );
   if (f.kind === "slider") {
     const n = Number(v ?? 0);
     return row(
-      <>
-        <input type="range" className="ol-range min-w-0 flex-1" min={f.min} max={f.max} step={f.step ?? 1} value={n} onChange={(e) => set({ [f.k]: +e.target.value })} />
-        <span className="w-16 text-right tabular-nums text-neutral-200">
-          {n.toFixed(f.digits ?? 0)}
-          {f.unit ?? ""}
-        </span>
-      </>,
+      <input type="range" className="ol-range w-full" min={f.min} max={f.max} step={f.step ?? 1} value={n} onChange={(e) => set({ [f.k]: +e.target.value })} />,
+      <span className="tabular-nums text-neutral-200">
+        {n.toFixed(f.digits ?? 0)}
+        {f.unit ?? ""}
+      </span>,
     );
   }
   if (f.kind === "select")
     return row(
-      <select className={`${fieldCls} min-w-0 flex-1`} value={String(v)} onChange={(e) => set({ [f.k]: f.numeric ? +e.target.value : e.target.value })}>
+      <select className={`${fieldCls} w-full`} value={String(v)} onChange={(e) => set({ [f.k]: f.numeric ? +e.target.value : e.target.value })}>
         {f.options.map(([k, l]) => (
           <option key={k} value={k}>
             {l}
@@ -327,7 +338,7 @@ function FieldRow({ f, s, set }: { f: Field; s: Rec; set: (patch: Rec) => void }
     );
   }
   return row(
-    <div className="flex min-w-0 flex-1 gap-1">
+    <div className="flex gap-1">
       <input className={`${fieldCls} min-w-0 flex-1 font-mono text-[11px]`} value={String(v ?? "")} placeholder={f.placeholder} onChange={(e) => set({ [f.k]: e.target.value })} />
       {f.folder && (
         <Btn
@@ -400,25 +411,14 @@ export type AutoViewProps = {
   onShow: (ids: number[], label: string) => void;
   onAiSettings: () => void;
   onStorage: () => void;
-  fn?: AutoFunction;
-  onFnChange?: (fn: AutoFunction) => void;
-  hideSidebar?: boolean;
-  onBackToGrid?: () => void;
+  fn: AutoFunction;
 };
 
-/** The auto functions, each with its advanced settings, run on the selected photos, the photos in view or
- *  the whole catalog. */
+/** One auto function in the Library's right panel, next to the grid: its settings (the advanced ones folded
+ *  away), run on the selected photos, the photos in view or the whole catalog, and what the last run found.
+ *  The Library keeps it mounted while hidden, so runs and results survive switching functions. */
 export function AutoView(p: AutoViewProps) {
-  const [internalFn, setInternalFn] = useState<AutoFunction>(p.fn ?? "cull");
-  const fn = p.fn ?? internalFn;
-  const setFn = (next: AutoFunction) => {
-    if (p.onFnChange) p.onFnChange(next);
-    else setInternalFn(next);
-  };
-  useEffect(() => {
-    if (p.fn) setInternalFn(p.fn);
-  }, [p.fn]);
-
+  const fn = p.fn;
   const [scope, setScope] = useState<"selected" | "view" | "all">(p.selected.length ? "selected" : "view");
   useEffect(() => {
     if (scope === "selected" && p.selected.length === 0) {
@@ -443,6 +443,7 @@ export function AutoView(p: AutoViewProps) {
   if (!p.settings) return null;
 
   const def = FUNCS.find((f) => f.id === fn)!;
+  const hue = HUE[def.hue];
   const s = p.settings.auto[fn] as unknown as Rec;
   const save = (next: Settings) => {
     p.setSettings(next);
@@ -487,120 +488,100 @@ export function AutoView(p: AutoViewProps) {
   const ai = def.ai?.(s);
 
   return (
-    <div className="flex min-h-0 flex-1 text-[12px]">
-      {!p.hideSidebar && (
-        <aside className="flex w-64 shrink-0 flex-col gap-1 overflow-y-auto border-r border-neutral-800 bg-neutral-900 p-2">
-          {FUNCS.map((f) => (
-            <button key={f.id} onClick={() => setFn(f.id)} className={`rounded px-3 py-2 text-left ${f.id === fn ? "bg-neutral-700" : "hover:bg-neutral-800"}`}>
-              <div className="flex items-center gap-2">
-                <span className="w-4 text-center text-amber-300">{f.icon}</span>
-                <span className="flex-1 font-medium text-neutral-100">{f.title}</span>
-                {running[f.id] && <span className="h-2 w-2 animate-pulse rounded-full bg-sky-400" />}
-              </div>
-              <div className="mt-0.5 line-clamp-2 pl-6 text-[10px] text-neutral-500">{results[f.id] ? summary(results[f.id]!) : f.blurb}</div>
-            </button>
-          ))}
-          <button onClick={p.onStorage} className="mt-auto rounded border border-neutral-800 px-3 py-2 text-left text-[10px] text-neutral-400 hover:bg-neutral-800">
-            <span className={p.settings.auto.on_import.enabled ? "text-emerald-400" : "text-neutral-500"}>●</span> Catalog & Culling on new photos:{" "}
-            {p.settings.auto.on_import.enabled ? "on" : "off"} — Settings › Storage
+    <div className="flex flex-col gap-3 p-3 text-[11px]">
+      {/* the function's colour, as on its button in the right bar */}
+      <header className={`-mx-3 -mt-3 border-t-2 px-3 pt-3 ${hue.border}`}>
+        <h2 className="flex items-center gap-2 text-[12px] font-semibold text-neutral-100">
+          <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md ${hue.soft} ${hue.text}`}>
+            <Icon d={def.icon} className="h-4 w-4" />
+          </span>
+          {def.title}
+        </h2>
+        <p className="mt-1.5 text-neutral-400">{def.blurb}</p>
+      </header>
+
+      <div>
+        <div className="mb-1 text-neutral-400">Photos</div>
+        <Seg
+          options={[
+            ["selected", `Selected ${num(counts.selected)}`],
+            ["view", `In view ${num(counts.view)}`],
+            ["all", `All ${total == null ? "…" : num(total)}`],
+          ]}
+          value={scope}
+          onChange={setScope}
+        />
+      </div>
+
+      <div>
+        {basic.map((f, i) => (
+          <FieldRow key={"k" in f ? f.k : i} f={f} s={s} set={set} />
+        ))}
+        <div className="mt-2 flex items-center justify-between border-t border-neutral-800 pt-2">
+          <button className="font-medium text-sky-400 hover:text-sky-300" onClick={() => setAdvanced(!advanced)}>
+            {advanced ? "▾" : "▸"} Advanced settings{changed ? ` (${changed} changed)` : ""}
           </button>
-        </aside>
+          {defaults && (
+            <button className="text-[10px] text-neutral-500 hover:text-neutral-200" onClick={() => set(defaults[fn] as unknown as Rec)} title="Every setting of this function back to its default">
+              Reset to defaults
+            </button>
+          )}
+        </div>
+        {advanced && (
+          <div className="mt-1">
+            {more.map((f, i) => (
+              <FieldRow key={"k" in f ? f.k : `h${i}`} f={f} s={s} set={set} />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {ai && (
+        <p className="rounded bg-violet-950/40 px-2 py-1.5 text-violet-200">
+          ✦ Uses the AI provider <b>{provider?.name ?? p.settings.active_provider}</b>, one request per photo.{" "}
+          <button className="text-sky-400 hover:text-sky-300" onClick={p.onAiSettings}>
+            Change…
+          </button>
+        </p>
       )}
 
-      <main className="flex min-w-0 flex-1 flex-col gap-4 overflow-y-auto p-4">
-        <header className="flex items-start justify-between gap-4">
-          <div>
-            <h2 className="text-sm font-semibold text-neutral-100">
-              <span className="mr-2 text-amber-300">{def.icon}</span>
-              {def.title}
-            </h2>
-            <p className="mt-1 max-w-3xl text-neutral-400">{def.blurb}</p>
-          </div>
-          {p.onBackToGrid && (
-            <Btn onClick={p.onBackToGrid} className="shrink-0 flex items-center gap-1.5 text-[11px]">
-              ← Back to Photos Grid
-            </Btn>
-          )}
-        </header>
-
-        <section className={`${card} max-w-3xl`}>
-          <div className="mb-3 flex items-center gap-3">
-            <span className="w-44 shrink-0 text-neutral-400">Photos</span>
-            <div className="flex-1">
-              <Seg
-                options={[
-                  ["selected", `Selected (${num(counts.selected)})`],
-                  ["view", `In the Library view (${num(counts.view)})`],
-                  ["all", `All (${total == null ? "…" : num(total)})`],
-                ]}
-                value={scope}
-                onChange={setScope}
-              />
+      <Btn active className="w-full" disabled={!!job || (scope === "selected" && !p.selected.length)} onClick={() => run(fn)}>
+        {job ? "Working…" : `${def.verb} ${scope === "selected" ? num(counts.selected) : scope === "view" ? num(counts.view) : "all"} photos`}
+      </Btn>
+      {job && (
+        <div className="flex items-center gap-2">
+          <div className="min-w-0 flex-1">
+            <div className="mb-0.5 flex justify-between text-[10px] text-neutral-400">
+              <span className="truncate">{progress?.label ?? "Starting"}…</span>
+              {progress && progress.total > 0 && (
+                <span className="tabular-nums">
+                  {num(progress.done)} / {num(progress.total)}
+                </span>
+              )}
+            </div>
+            <div className="relative h-1 overflow-hidden rounded bg-neutral-800">
+              {progress && progress.total > 0 ? (
+                <div className={`h-full transition-all ${hue.bg}`} style={{ width: `${(progress.done / progress.total) * 100}%` }} />
+              ) : (
+                <div className={`animate-indeterminate absolute inset-y-0 w-1/3 rounded ${hue.bg}`} />
+              )}
             </div>
           </div>
-          {basic.map((f, i) => (
-            <FieldRow key={"k" in f ? f.k : i} f={f} s={s} set={set} />
-          ))}
-          <div className="mt-2 flex items-center justify-between border-t border-neutral-800 pt-2">
-            <button className="text-[11px] font-medium text-sky-400 hover:text-sky-300" onClick={() => setAdvanced(!advanced)}>
-              {advanced ? "▾" : "▸"} Advanced settings{changed ? ` (${changed} changed)` : ""}
-            </button>
-            {defaults && (
-              <button className="text-[10px] text-neutral-500 hover:text-neutral-200" onClick={() => set(defaults[fn] as unknown as Rec)} title="Every setting of this function back to its default">
-                Reset to defaults
-              </button>
-            )}
-          </div>
-          {advanced && (
-            <div className="mt-1">
-              {more.map((f, i) => (
-                <FieldRow key={"k" in f ? f.k : `h${i}`} f={f} s={s} set={set} />
-              ))}
-            </div>
-          )}
-          {ai && (
-            <p className="mt-3 rounded bg-violet-950/40 px-2 py-1.5 text-[11px] text-violet-200">
-              ✦ Uses the AI provider <b>{provider?.name ?? p.settings.active_provider}</b>, one request per photo.{" "}
-              <button className="text-sky-400 hover:text-sky-300" onClick={p.onAiSettings}>
-                Change…
-              </button>
-            </p>
-          )}
-        </section>
-
-        <div className="flex max-w-3xl items-center gap-3">
-          <Btn active className="px-4 py-1.5 text-[12px] font-medium" disabled={!!job || (scope === "selected" && !p.selected.length)} onClick={() => run(fn)}>
-            {job ? "Working…" : `${def.verb} ${scope === "selected" ? num(counts.selected) : scope === "view" ? num(counts.view) : "all"} photos`}
+          <Btn onClick={() => api.cancelJob(job)} title="Stop after the current photo; what is done stays">
+            Cancel
           </Btn>
-          {job && (
-            <>
-              <div className="min-w-0 flex-1">
-                <div className="mb-0.5 flex justify-between text-[10px] text-neutral-400">
-                  <span>{progress?.label ?? "Starting"}…</span>
-                  {progress && progress.total > 0 && (
-                    <span className="tabular-nums">
-                      {num(progress.done)} / {num(progress.total)}
-                    </span>
-                  )}
-                </div>
-                <div className="relative h-1 overflow-hidden rounded bg-neutral-800">
-                  {progress && progress.total > 0 ? (
-                    <div className="h-full bg-sky-500 transition-all" style={{ width: `${(progress.done / progress.total) * 100}%` }} />
-                  ) : (
-                    <div className="animate-indeterminate absolute inset-y-0 w-1/3 rounded bg-sky-500" />
-                  )}
-                </div>
-              </div>
-              <Btn onClick={() => api.cancelJob(job)} title="Stop after the current photo; what is done stays">
-                Cancel
-              </Btn>
-            </>
-          )}
-          {errors[fn] && <span className="text-red-400">{errors[fn]}</span>}
         </div>
+      )}
+      {errors[fn] && <p className="break-words text-red-400">{errors[fn]}</p>}
 
-        <div ref={resultRef}>{result && <Results r={result} photos={photos} filter={filter} setFilter={setFilter} onShow={p.onShow} title={def.title} />}</div>
-      </main>
+      <div ref={resultRef}>{result && <Results r={result} photos={photos} filter={filter} setFilter={setFilter} onShow={p.onShow} title={def.title} />}</div>
+
+      {fn === "cull" && (
+        <button onClick={p.onStorage} className="text-left text-[10px] text-neutral-500 hover:text-neutral-200">
+          <span className={p.settings.auto.on_import.enabled ? "text-emerald-400" : "text-neutral-500"}>●</span> Culling new photos as they arrive:{" "}
+          {p.settings.auto.on_import.enabled ? "on" : "off"} · Settings › Locations
+        </button>
+      )}
     </div>
   );
 }
@@ -651,64 +632,60 @@ function Results({ r, photos, filter, setFilter, onShow, title }: { r: AutoResul
   });
   const name = (x: Rec) => <span className="truncate text-neutral-200">{String(x.file ?? "")}</span>;
   return (
-    <section className={`${card} flex max-w-5xl flex-col gap-3`}>
-      <div className="flex flex-wrap items-center gap-2">
-        <h3 className="font-semibold">Result</h3>
+    <section className="flex flex-col gap-2 border-t border-neutral-800 pt-3">
+      <div className="flex items-baseline gap-2">
+        <h3 className="font-semibold text-neutral-100">Result</h3>
         <span className="text-neutral-400">
           {summary(r)}
           {r.cancelled ? " (cancelled)" : ""}
         </span>
-        <span className="ml-auto flex items-center gap-1">
-          {acted && <span className="mr-1 text-emerald-400">{acted}</span>}
-          {r.function === "duplicates" && rows.length > 0 && (
-            <Btn
-              onClick={() => setCompareGroupIdx(0)}
-              className="bg-sky-600 text-white font-medium shadow-xs hover:bg-sky-500"
-              title="Open full-screen side-by-side comparison to inspect and decide"
-            >
-              ⧉ Side-by-Side Compare ({rows.length} groups)
-            </Btn>
-          )}
-          {(r.function === "blur" || r.function === "duplicates") && extra.length > 0 && (
-            <>
-              <Btn onClick={() => act("Rejected", { flag: "reject" })} title={r.function === "duplicates" ? "Flag the extra copies as rejects; the ones kept stay as they are" : "Flag them as rejects"}>
-                Reject {r.function === "duplicates" ? "extra copies" : ""}
-              </Btn>
-              <Btn onClick={() => act("Labelled red", { color_label: "red" })} title={r.function === "duplicates" ? "Label the extra copies red" : "Label them red"}>
-                Label red
-              </Btn>
-            </>
-          )}
-          <Btn disabled={!ids.length} onClick={() => onShow(ids, title)}>
-            Show in Library
-          </Btn>
-        </span>
       </div>
+      <div className="flex flex-wrap gap-1">
+        {r.function === "duplicates" && rows.length > 0 && (
+          <Btn active onClick={() => setCompareGroupIdx(0)} title="Open full-screen side-by-side comparison to inspect and decide">
+            ⧉ Compare {rows.length} groups
+          </Btn>
+        )}
+        {(r.function === "blur" || r.function === "duplicates") && extra.length > 0 && (
+          <>
+            <Btn onClick={() => act("Rejected", { flag: "reject" })} title={r.function === "duplicates" ? "Flag the extra copies as rejects; the ones kept stay as they are" : "Flag them as rejects"}>
+              Reject {r.function === "duplicates" ? "extra copies" : ""}
+            </Btn>
+            <Btn onClick={() => act("Labelled red", { color_label: "red" })} title={r.function === "duplicates" ? "Label the extra copies red" : "Label them red"}>
+              Label red
+            </Btn>
+          </>
+        )}
+        <Btn disabled={!ids.length} onClick={() => onShow(ids, title)} title="Show these photos in the grid">
+          Show in Library
+        </Btn>
+      </div>
+      {acted && <p className="text-emerald-400">{acted}</p>}
       {filters && <Seg options={filters} value={filters.some(([k]) => k === filter) ? filter : filters[0][0]} onChange={setFilter} />}
       {Array.isArray(r.notes) && (r.notes as string[]).map((n) => <p key={n} className="text-amber-300">{n}</p>)}
-      <div className="flex max-h-[28rem] flex-col gap-1 overflow-y-auto">
+      <div className="flex flex-col gap-1">
         {r.function === "duplicates"
           ? rows.map((g, i) => (
-              <div key={i} className="flex items-center gap-2 rounded bg-neutral-950 p-2 hover:bg-neutral-900/60 transition-colors">
-                <div className="flex flex-col w-24 shrink-0">
+              <div key={i} className="rounded bg-neutral-950 p-2">
+                <div className="mb-1.5 flex items-center justify-between">
                   <span className={`text-[10px] uppercase font-bold ${g.kind === "exact" ? "text-amber-300" : "text-sky-300"}`}>
                     {g.kind === "exact" ? "exact copies" : "look alike"}
                   </span>
                   <button
                     onClick={() => setCompareGroupIdx(i)}
-                    className="mt-1 flex items-center gap-1 rounded bg-neutral-800 hover:bg-sky-600 hover:text-white px-2 py-0.5 text-[10px] text-sky-300 border border-neutral-700/80 transition-colors w-fit cursor-pointer"
+                    className="flex items-center gap-1 rounded bg-neutral-800 hover:bg-sky-600 hover:text-white px-2 py-0.5 text-[10px] text-sky-300 border border-neutral-700/80 transition-colors cursor-pointer"
                     title="Open side by side comparison for this group"
                   >
                     <span>⧉</span>
                     <span>Compare</span>
                   </button>
                 </div>
-                <div className="flex min-w-0 flex-1 gap-2 overflow-x-auto">
+                <div className="flex gap-2 overflow-x-auto">
                   {(g.ids as number[]).map((id, k) => (
                     <div
                       key={id}
                       onClick={() => setCompareGroupIdx(i)}
-                      className="flex w-24 shrink-0 flex-col items-center gap-0.5 cursor-pointer group"
+                      className="flex w-16 shrink-0 flex-col items-center gap-0.5 cursor-pointer group"
                       title={`Click to compare: ${(g.files as string[])[k]}`}
                     >
                       <Thumb photo={photos[id]} ring={id === g.keep ? "ring-2 ring-emerald-500 shadow-xs" : "group-hover:ring-1 group-hover:ring-neutral-500"} />
@@ -776,7 +753,7 @@ function Detail({ r, x }: { r: AutoResult; x: Rec }) {
     case "cull":
       return (
         <span className={`flex flex-wrap items-center gap-2 ${small}`}>
-          {x.flag === "pick" && <span className="text-white">⚑ Pick</span>}
+          {x.flag === "pick" && <span className="text-neutral-100">⚑ Pick</span>}
           {x.flag === "reject" && <span className="text-red-400">✕ Reject{(x.reasons as string[]).length ? `: ${(x.reasons as string[]).join(", ")}` : ""}</span>}
           {x.rating != null && <Stars value={x.rating as number} />}
           {x.label != null && x.label !== "none" && <span className="h-2 w-2 rounded-full" style={{ background: LABEL_COLORS[x.label as string] }} />}

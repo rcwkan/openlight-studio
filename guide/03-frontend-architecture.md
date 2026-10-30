@@ -43,14 +43,12 @@ graph TD
 * **Toast & Notification System**: Surfaces non-blocking notification banners for background jobs, cloud sync progress, and MCP tool executions.
 
 ### 2.2 [`Library.tsx`](../src/Library.tsx) — Digital Asset Management (DAM)
-* **Sources Sidebar**:
-  * Local folders (added via native directory picker).
-  * Network shares (SMB/NFS/WebDAV with connection health indicators).
-  * Immich albums and favorites.
-  * Google Photos picked collections.
-  * Cloud accounts (S3, Dropbox, OneDrive, WebDAV).
-  * System Bin / Trash view for deleted photos.
-* **Filter Bar**: Dynamic filtering by search text, star ratings (0–5), flags (Pick, Unflagged, Reject), color labels (Red, Yellow, Green, Blue, Purple), aspect ratio, virtual copy types, and edited status.
+* **Sources Sidebar**, in three groups that list only what is added or connected; **＋** on a group's heading (`AddMenu`, a native popover) offers the rest:
+  * **Library**: All Photographs and the Bin.
+  * **Folders**: local folders (native directory picker), then network shares (SMB/NFS/WebDAV, with a connection dot).
+  * **Cloud & services**: Google Photos, Apple iCloud, Amazon and Adobe as one row each (pick or sync ↻ and the connection ⋯ show on hover), Immich favorites and albums, and each cloud account (S3, Dropbox, OneDrive, WebDAV) with its downloaded folders.
+* **Filter Bar**: search text, star ratings (0–5), flags (Pick, Unflagged, Reject) and color labels; **Filters** opens the photo type (edited, original, virtual copy, untouched) and orientation.
+* **Right Panel & Bar**: the bar at the window's right edge switches the panel between **Info** (quick culling, metadata, actions) and the six auto functions (`AutoView`), so they run next to the grid; choosing the open one again folds the panel away. The panel stays mounted while hidden, so a running function and its results survive switching.
 * **Thumbnail Grid**: Renders thumbnail cards via the `asset://` protocol with rating stars, flag badges, and thumbnail generation indicators.
 
 ### 2.3 [`Develop.tsx`](../src/Develop.tsx) — RAW Image Editor
@@ -80,7 +78,7 @@ graph TD
 * **Filters & Rotation**: Gaussian blur, Invert, Posterize, Threshold, 90° rotations, and horizontal/vertical flips.
 
 ### 2.6 [`AutoView.tsx`](../src/AutoView.tsx) & [`Auto.tsx`](../src/Auto.tsx) — Auto Engine
-* Dedicated dashboard for executing and tracking the 6 core autonomous functions:
+* The Library's right panel runs and tracks the 6 core autonomous functions, one at a time, with its settings stacked to fit the panel:
   1. **Catalog & Culling** (sharpness, exposure, burst grouping, rating assignment).
   2. **Non-destructive Editing** (auto white balance, auto tone, style profiles).
   3. **AI Masking** (Subject, Sky, Background, People segmentation).
@@ -101,6 +99,7 @@ OpenLight Studio does not use heavy external component libraries. Instead, it fe
 | `<ColorWheel>` | 3-way color grading | Polar coordinate picker ($r, \theta$); saturation ring; luminance slider; reset double-click. |
 | `<PointColorSwatch>` | 3D HSL swatch editor | Visualizes sampled color in 3D color ellipsoid with interactive range limits. |
 | `<Toggle>` / `<SegmentedControl>` | State switching | Accessible binary and multi-option switches with instantaneous feedback. |
+| `HUE` / `<Icon>` | Category colour & outline icons | One colour per sidebar group (Library blue, Folders amber, Cloud & services violet; the Bin rose), per auto function (`FUNCS[].hue`: Cull amber, Edit blue, Mask violet, Enhance emerald, Blur rose, Duplicates cyan) and per Info section. Shades keep 3:1 on light and dark themes; `soft` tints sit behind normal text. `<Icon>` draws a 24-unit outline path in the current colour. |
 
 ---
 
