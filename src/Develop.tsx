@@ -16,6 +16,7 @@ type Props = {
   settings: Settings | null;
   setSettings: (s: Settings) => void;
   onExport: () => void;
+  onSaveAsNewPhoto?: (newPhoto: Photo) => Promise<void> | void;
   logs: Log[];
   clearLogs?: () => void;
 };
@@ -138,6 +139,10 @@ export function Develop(p: Props) {
   const [dragging, setDragging] = useState(false);
   const [spaceHeld, setSpaceHeld] = useState(false);
   const [peekingBefore, setPeekingBefore] = useState(false);
+  const [savingNew, setSavingNew] = useState(false);
+  const [saveNewModal, setSaveNewModal] = useState(false);
+  const [copyNameInput, setCopyNameInput] = useState("");
+  const [saveSuccessMsg, setSaveSuccessMsg] = useState("");
   const panStart = useRef<{ x: number; y: number; px: number; py: number; id: number; moved: boolean } | null>(null);
   const suppressClick = useRef(false);
   const canvas = useRef<HTMLCanvasElement>(null);
@@ -187,6 +192,39 @@ export function Develop(p: Props) {
     };
   }, [id, flush, refreshHistory]);
   useEffect(() => () => void flush(), [flush]);
+
+  const openSaveAsNewDialog = useCallback(() => {
+    if (!p.active) return;
+    const masterTarget = p.active.master_id ?? p.active.id;
+    const existingCopies = p.photos.filter((ph) => (ph.master_id ?? ph.id) === masterTarget && ph.master_id != null).length;
+    setCopyNameInput(p.active.copy_name ? `${p.active.copy_name} (Copy)` : `Copy ${existingCopies + 1}`);
+    setSaveNewModal(true);
+  }, [p.active, p.photos]);
+
+  const handleSaveAsNewPhoto = useCallback(
+    async (nameToUse?: string) => {
+      if (!p.active || !dev) return;
+      setSavingNew(true);
+      try {
+        await flush();
+        const finalName = (nameToUse !== undefined ? nameToUse : copyNameInput).trim();
+        const newPhoto = await api.saveAsNewPhoto(p.active.id, dev, finalName || undefined);
+        setSaveNewModal(false);
+        setSaveSuccessMsg(`Saved as new photo: ${newPhoto.copy_name || newPhoto.filename}`);
+        setTimeout(() => setSaveSuccessMsg(""), 3500);
+        if (p.onSaveAsNewPhoto) {
+          await p.onSaveAsNewPhoto(newPhoto);
+        } else {
+          p.setActive(newPhoto.id);
+        }
+      } catch (e) {
+        setError(`Save as new photo failed: ${e}`);
+      } finally {
+        setSavingNew(false);
+      }
+    },
+    [dev, flush, p, copyNameInput],
+  );
 
   useEffect(() => {
     if (!dev) return;
@@ -783,6 +821,15 @@ export function Develop(p: Props) {
               Sync to {others.length}
             </Btn>
             <Btn onClick={() => dev && change({ ...structuredClone(p.defaults), ai_provenance_log: dev.ai_provenance_log }, "Reset all")}>Reset all</Btn>
+            <div className="col-span-2 pt-1 border-t border-neutral-800">
+              <Btn
+                className="w-full justify-center border-sky-800/60 bg-sky-950/40 text-sky-300 hover:border-sky-600 hover:bg-sky-900/50 hover:text-white"
+                onClick={openSaveAsNewDialog}
+                title="Save current edit as a new photo in catalog"
+              >
+                ＋ Save as new photo
+              </Btn>
+            </div>
           </div>
         </Panel>
         {dev && dev.ai_provenance_log.length > 0 && (
@@ -830,6 +877,13 @@ export function Develop(p: Props) {
             </Btn>
             <Btn active={tool === "crop"} onClick={() => setTool(tool === "crop" ? "none" : "crop")} title="Crop & straighten (R)">
               Crop
+            </Btn>
+            <Btn
+              onClick={openSaveAsNewDialog}
+              title="Save this edit as a new photo in the catalog (virtual copy)"
+              className="border border-sky-700/60 bg-sky-950/50 text-sky-200 hover:border-sky-500 hover:bg-sky-900/80 hover:text-white"
+            >
+              ＋ Save as new photo
             </Btn>
             <Btn onClick={p.onExport}>Export…</Btn>
           </span>
@@ -1341,6 +1395,93 @@ export function Develop(p: Props) {
           </>
         )}
       </aside>
+
+      {saveSuccessMsg && (
+        <div className="absolute top-12 left-1/2 -translate-x-1/2 z-40 flex items-center gap-2 rounded-full border border-sky-500/50 bg-sky-950/95 px-4 py-1.5 text-[11px] text-sky-200 shadow-xl backdrop-blur">
+          <span className="text-sky-400">✓</span>
+          <span>{saveSuccessMsg}</span>
+        </div>
+      )}
+
+      {saveNewModal && p.active && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" onClick={() => !savingNew && setSaveNewModal(false)}>
+          <div
+            className="w-full max-w-md rounded-lg border border-neutral-800 bg-neutral-900 p-5 shadow-2xl text-[12px]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between pb-3 border-b border-neutral-800">
+              <h3 className="text-sm font-semibold text-white flex items-center gap-2">
+                <span className="text-sky-400">＋</span> Save Edit as New Photo
+              </h3>
+              <button
+                className="text-neutral-500 hover:text-white text-base"
+                onClick={() => !savingNew && setSaveNewModal(false)}
+                disabled={savingNew}
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="py-4 space-y-3">
+              <p className="text-neutral-300">
+                This creates a new photo (virtual copy) in your catalog containing your current edit settings, preserving the master photo.
+              </p>
+
+              <div className="rounded bg-neutral-950/80 p-3 border border-neutral-800 flex items-center gap-3">
+                <img
+                  src={thumbUrl(p.active)}
+                  alt={p.active.filename}
+                  className="h-14 w-14 rounded object-cover border border-neutral-800 shrink-0"
+                />
+                <div className="min-w-0 flex-1">
+                  <div className="truncate font-medium text-white">{p.active.filename}</div>
+                  <div className="text-[11px] text-neutral-400">
+                    {p.active.copy_name ? `Current version: ${p.active.copy_name}` : "Original master photo"}
+                  </div>
+                  <div className="text-[10px] text-neutral-500 truncate">
+                    {[p.active.camera, p.active.iso && `ISO ${p.active.iso}`, p.active.focal_length && `${p.active.focal_length}mm`].filter(Boolean).join(" · ")}
+                  </div>
+                </div>
+              </div>
+
+              <div>
+                <label className="block mb-1 font-medium text-neutral-300">
+                  Version / Copy Name
+                </label>
+                <input
+                  type="text"
+                  autoFocus
+                  disabled={savingNew}
+                  value={copyNameInput}
+                  onChange={(e) => setCopyNameInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") handleSaveAsNewPhoto();
+                    if (e.key === "Escape") setSaveNewModal(false);
+                  }}
+                  placeholder="e.g. B&W Contrast, Warm Tone, Copy 2"
+                  className="w-full rounded border border-neutral-700 bg-neutral-950 px-3 py-2 text-white outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-3 border-t border-neutral-800">
+              <Btn
+                disabled={savingNew}
+                onClick={() => setSaveNewModal(false)}
+              >
+                Cancel
+              </Btn>
+              <Btn
+                disabled={savingNew}
+                onClick={() => handleSaveAsNewPhoto()}
+                className="bg-sky-600 hover:bg-sky-500 text-white font-medium px-4"
+              >
+                {savingNew ? "Saving…" : "Save as New Photo"}
+              </Btn>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

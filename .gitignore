@@ -11,6 +11,9 @@ lerna-debug.log*
 node_modules
 dist
 dist-ssr
+dist-packages/
+*.deb
+*.dmg
 *.local
 target/
 src-tauri/target/

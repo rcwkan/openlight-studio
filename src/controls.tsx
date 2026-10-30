@@ -38,15 +38,15 @@ export function Slider({ label, value, min, max, step = 1, def, digits = 0, log,
   );
 }
 
-export function Panel({ title, children, open: initial = true, right }: { title: string; children: ReactNode; open?: boolean; right?: ReactNode }) {
+export function Panel({ title, children, open: initial = true, right }: { title: ReactNode; children: ReactNode; open?: boolean; right?: ReactNode }) {
   const [open, setOpen] = useState(initial);
   return (
     <section className="border-b border-neutral-800">
       <header
-        className="flex cursor-pointer items-center justify-between px-3 py-2 text-[11px] font-semibold uppercase tracking-wider text-neutral-300 hover:bg-neutral-800/60"
+        className="flex cursor-pointer items-center justify-between px-3 py-2 text-[11px] font-semibold uppercase tracking-wider text-neutral-300 hover:bg-neutral-800/60 transition-colors"
         onClick={() => setOpen(!open)}
       >
-        <span>
+        <span className="flex items-center gap-1.5 truncate">
           <span className="inline-block w-3 text-neutral-500">{open ? "▾" : "▸"}</span>
           {title}
         </span>
@@ -63,8 +63,10 @@ export function Btn({ children, onClick, active, disabled, title, className = ""
       title={title}
       disabled={disabled}
       onClick={onClick}
-      className={`rounded px-2 py-1 text-[11px] transition-colors disabled:opacity-40 ${
-        active ? "bg-sky-600 text-white" : "bg-neutral-800 text-neutral-200 hover:bg-neutral-700"
+      className={`rounded px-2.5 py-1 text-[11px] font-medium transition-all duration-150 disabled:opacity-40 ${
+        active
+          ? "bg-[var(--theme-accent,#0ea5e9)] text-[var(--theme-accent-contrast,#ffffff)] shadow-xs font-semibold"
+          : "bg-neutral-800 text-neutral-200 hover:bg-neutral-700"
       } ${className}`}
     >
       {children}

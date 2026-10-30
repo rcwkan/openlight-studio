@@ -1,25 +1,25 @@
 import { listen } from "@tauri-apps/api/event";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Agent, Log } from "./Agent";
-import { api, AppInfo, CloudFolder, Culling, Develop as Dev, Filter, JobProgress, LABELS, NetworkDrive, Photo, setThumbsDir, Settings, Source } from "./api";
-import { AutoView } from "./AutoView";
+import { Log } from "./Agent";
+import { api, AppInfo, AutoFunction, CloudFolder, Culling, Develop as Dev, Filter, FolderLoading, JobProgress, LABELS, NetworkDrive, Photo, setThumbsDir, Settings, Source } from "./api";
 import { Develop } from "./Develop";
 import { ExportDialog, Library, RemoteDialog, SelectMods } from "./Library";
+import { CompareModal } from "./CompareModal";
 import { SettingsTab, SettingsView } from "./Settings";
+import { applyTheme, getStoredTheme } from "./theme";
 
-type Module = "library" | "develop" | "auto" | "agent" | "settings";
+type Module = "library" | "develop" | "settings";
 const MODULES: [Module, string][] = [
   ["library", "Library"],
   ["develop", "Develop"],
-  ["auto", "Auto"],
-  ["agent", "AI & MCP"],
   ["settings", "Settings"],
 ];
 
 export default function App() {
   const [info, setInfo] = useState<AppInfo | null>(null);
   const [module, setModule] = useState<Module>("library");
+  const [libraryAutoFn, setLibraryAutoFn] = useState<AutoFunction | null>(null);
   const [filter, setFilter] = useState<Filter>({});
   const [photos, setPhotos] = useState<Photo[]>([]);
   const [folders, setFolders] = useState<[string, number][]>([]);
@@ -34,12 +34,20 @@ export default function App() {
   const [albumPages, setAlbumPages] = useState<{ album: string | null; next: number | null } | null>(null);
   const loadingPage = useRef(false);
   const [jobs, setJobs] = useState<Record<string, JobProgress>>({});
-  const [settingsTab, setSettingsTab] = useState<SettingsTab>("locations");
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>("appearance");
+  const [loadingFolder, setLoadingFolder] = useState<FolderLoading | null>(null);
+  const [binCount, setBinCount] = useState<number>(0);
+  const [compareOpen, setCompareOpen] = useState(false);
 
   const reload = useCallback(async () => {
-    const [ps, fs] = await Promise.all([api.query(filter), api.folders()]);
+    const [ps, fs, bc] = await Promise.all([
+      api.query(filter),
+      api.folders(),
+      api.binCount().catch(() => 0),
+    ]);
     setPhotos(ps);
     setFolders(fs);
+    setBinCount(bc);
   }, [filter]);
   const reloadRef = useRef(reload);
   reloadRef.current = reload;
@@ -47,7 +55,14 @@ export default function App() {
 
   useEffect(() => {
     api.appInfo().then((i) => (setThumbsDir(i.thumbs_dir), setInfo(i)));
-    api.settings().then(setSettings);
+    api.settings().then((s) => {
+      setSettings(s);
+      if (s.theme) {
+        applyTheme(s.theme);
+      } else {
+        applyTheme(getStoredTheme());
+      }
+    });
     api.defaultDevelop().then(setDefaults);
     const subs = [
       listen("catalog-changed", () => reloadRef.current()),
@@ -55,7 +70,10 @@ export default function App() {
         const ph = await api.photo(e.payload.id);
         if (ph) setPhotos((ps) => ps.map((p) => (p.id === ph.id ? ph : p)));
       }),
-      listen<{ label?: string; done: number; total: number }>("import-progress", (e) => setStatus(`${e.payload.label ?? "Adding photos"} ${e.payload.done} / ${e.payload.total}`)),
+      listen<{ label?: string; done: number; total: number }>("import-progress", (e) => {
+        setStatus(`${e.payload.label ?? "Adding photos"} ${e.payload.done} / ${e.payload.total}`);
+        setLoadingFolder((cur) => (cur ? { ...cur, progress: e.payload } : cur));
+      }),
       listen<string>("remote-error", (e) => setStatus(e.payload)),
       listen<JobProgress>("job-progress", (e) =>
         setJobs((js) => {
@@ -67,8 +85,20 @@ export default function App() {
     ];
     return () => subs.forEach((s) => s.then((f) => f()));
   }, []);
-  useEffect(() => void (module === "agent" && api.appInfo().then(setInfo)), [module]);
+  useEffect(() => void (module === "settings" && settingsTab === "agent" && api.appInfo().then(setInfo)), [module, settingsTab]);
   useEffect(() => void api.setSelection(selected), [selected]);
+
+  useEffect(() => {
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const handler = () => {
+      const cur = settings?.theme ?? getStoredTheme();
+      if (cur === "system") {
+        applyTheme("system");
+      }
+    };
+    mq.addEventListener("change", handler);
+    return () => mq.removeEventListener("change", handler);
+  }, [settings?.theme]);
 
   const active = photos.find((p) => p.id === activeId) ?? null;
   // Auto Catalog & Culling of new photos runs in the background
@@ -89,8 +119,8 @@ export default function App() {
   };
   const focus = (id: number) => (setActiveId(id), setSelected([id]));
 
-  const cull = async (u: Culling) => {
-    const ids = targets();
+  const cull = async (u: Culling, idsOverride?: number[]) => {
+    const ids = idsOverride || targets();
     if (!ids.length) return;
     try {
       await api.update(ids, u);
@@ -101,41 +131,83 @@ export default function App() {
       ps.map((p) =>
         ids.includes(p.id)
           ? {
-              ...p,
-              ...(u.rating != null && { rating: u.rating }),
-              ...(u.flag && { flag: u.flag === "pick" ? 1 : u.flag === "reject" ? -1 : 0 }),
-              ...(u.color_label && { color_label: u.color_label === "none" ? "" : u.color_label }),
-              ...(u.keywords != null && { keywords: u.keywords }),
-            }
+            ...p,
+            ...(u.rating != null && { rating: u.rating }),
+            ...(u.flag && { flag: u.flag === "pick" ? 1 : u.flag === "reject" ? -1 : 0 }),
+            ...(u.color_label && { color_label: u.color_label === "none" ? "" : u.color_label }),
+            ...(u.keywords != null && { keywords: u.keywords }),
+          }
           : p,
       ),
     );
   };
 
+  const shortFolder = (f: string) => f.split(/[\\/]/).filter(Boolean).slice(-2).join("/") || f;
+
   // A folder is a live source: opening it picks up files added since it was last read.
-  const openFolder = (folder: string) => {
-    setFilter((f) => ({ ...f, folder, immich_album: null, ids: null, view: null }));
-    api.importFolder(folder).then(
-      (n) => setStatus(n ? `${n} new photo(s) in ${folder}` : ""),
-      (e) => setStatus(`Could not read ${folder}: ${e}`),
-    );
-    setTimeout(() => setStatus(""), 8000);
+  const openFolder = async (folder: string) => {
+    const viewId = `folder:${folder}`;
+    const name = shortFolder(folder);
+    const isSwitching = filter.folder !== folder || filter.immich_album != null || filter.ids != null;
+    setLoadingFolder({ viewId, name });
+    if (isSwitching) {
+      setPhotos([]);
+    }
+    setFilter((f) => ({ ...f, folder, immich_album: null, ids: null, view: viewId, in_bin: null }));
+    setStatus(`Reading ${name}…`);
+    try {
+      const n = await api.importFolder(folder);
+      setStatus(n ? `${n} new photo(s) in ${name}` : "");
+      setTimeout(() => setStatus(""), 8000);
+    } catch (e) {
+      setStatus(`Could not read ${folder}: ${e}`);
+    } finally {
+      setLoadingFolder((cur) => (cur?.viewId === viewId ? null : cur));
+      await reloadRef.current();
+    }
   };
+
+  const openAll = async () => {
+    const viewId = "all";
+    const isSwitching = filter.folder != null || filter.immich_album != null || filter.ids != null;
+    setLoadingFolder({ viewId, name: "All Photographs" });
+    if (isSwitching) {
+      setPhotos([]);
+    }
+    setFilter((f) => ({ ...f, folder: null, immich_album: null, ids: null, view: null, in_bin: null }));
+    try {
+      await reloadRef.current();
+    } finally {
+      setLoadingFolder((cur) => (cur?.viewId === viewId ? null : cur));
+    }
+  };
+
   const addFolder = async () => {
     const dir = await open({ directory: true, title: "Add a folder of photos" });
     if (typeof dir === "string") openFolder(dir);
   };
+
   const openImmich = async (album: string | null, name: string) => {
+    const viewId = `immich:${album ?? ""}`;
+    const isSwitching = filter.view !== viewId;
+    setLoadingFolder({ viewId, name });
+    if (isSwitching) {
+      setPhotos([]);
+    }
+    setFilter((f) => ({ ...f, folder: null, immich_album: album ?? "favorites", ids: null, view: viewId, in_bin: null }));
     setStatus(`Opening ${name}…`);
     try {
       const { next } = await api.immichOpen(album, 1);
       setAlbumPages({ album, next });
-      setFilter((f) => ({ ...f, folder: null, immich_album: album ?? "favorites", ids: null, view: `immich:${album ?? ""}` }));
       setStatus("");
     } catch (e) {
       setStatus(`Immich: ${e}`);
+    } finally {
+      setLoadingFolder((cur) => (cur?.viewId === viewId ? null : cur));
+      await reloadRef.current();
     }
   };
+
   // Albums arrive a page at a time; the grid asks for the next page as its end comes near.
   const nextPage = albumPages?.next && filter.view === `immich:${albumPages.album ?? ""}` ? albumPages.next : null;
   const loadMore = async () => {
@@ -151,34 +223,117 @@ export default function App() {
     }
     loadingPage.current = false;
   };
+
   const pickGoogle = async () => {
+    const viewId = "google";
+    setLoadingFolder({ viewId, name: "Google Photos" });
     setStatus("Pick photos in the Google Photos tab, then press Done…");
     try {
       const r = await api.googleImport();
       const notes = [r.skipped && `${r.skipped} skipped (format not supported)`, r.failed && `${r.failed} failed (${r.error})`];
       setStatus([`Added ${r.imported} photo(s) from Google Photos`, ...notes.filter(Boolean)].join(", "));
-      setFilter((f) => ({ ...f, folder: r.folder, immich_album: null, ids: null, view: null }));
+      setFilter((f) => ({ ...f, folder: r.folder, immich_album: null, ids: null, view: "google", in_bin: null }));
     } catch (e) {
       setStatus(`Google Photos: ${e}`);
+    } finally {
+      setLoadingFolder((cur) => (cur?.viewId === viewId ? null : cur));
+      await reloadRef.current();
     }
     setTimeout(() => setStatus(""), 8000);
   };
+
+  const syncApple = async () => {
+    const viewId = "apple";
+    setLoadingFolder({ viewId, name: "Apple iCloud Photos" });
+    setStatus("Syncing Apple iCloud Photos…");
+    try {
+      const r = await api.appleImport();
+      const notes = [r.skipped && `${r.skipped} up to date`, r.failed && `${r.failed} failed`];
+      setStatus([`Synced ${r.imported} photo(s) from Apple iCloud Photos`, ...notes.filter(Boolean)].join(", "));
+      setFilter((f) => ({ ...f, folder: r.folder, immich_album: null, ids: null, view: "apple", in_bin: null }));
+    } catch (e) {
+      setStatus(`Apple iCloud Photos: ${e}`);
+    } finally {
+      setLoadingFolder((cur) => (cur?.viewId === viewId ? null : cur));
+      await reloadRef.current();
+    }
+    setTimeout(() => setStatus(""), 8000);
+  };
+
+  const syncAmazon = async () => {
+    const viewId = "amazon";
+    setLoadingFolder({ viewId, name: "Amazon Photos" });
+    setStatus("Syncing Amazon Photos…");
+    try {
+      const r = await api.amazonImport();
+      const notes = [r.skipped && `${r.skipped} up to date`, r.failed && `${r.failed} failed`];
+      setStatus([`Synced ${r.imported} photo(s) from Amazon Photos`, ...notes.filter(Boolean)].join(", "));
+      setFilter((f) => ({ ...f, folder: r.folder, immich_album: null, ids: null, view: "amazon", in_bin: null }));
+    } catch (e) {
+      setStatus(`Amazon Photos: ${e}`);
+    } finally {
+      setLoadingFolder((cur) => (cur?.viewId === viewId ? null : cur));
+      await reloadRef.current();
+    }
+    setTimeout(() => setStatus(""), 8000);
+  };
+
+  const syncAdobe = async () => {
+    const viewId = "adobe";
+    setLoadingFolder({ viewId, name: "Adobe Cloud Photos" });
+    setStatus("Syncing Adobe Cloud Photos…");
+    try {
+      const r = await api.adobeImport();
+      const notes = [r.skipped && `${r.skipped} up to date`, r.failed && `${r.failed} failed`];
+      setStatus([`Synced ${r.imported} photo(s) from Adobe Cloud Photos`, ...notes.filter(Boolean)].join(", "));
+      setFilter((f) => ({ ...f, folder: r.folder, immich_album: null, ids: null, view: "adobe", in_bin: null }));
+    } catch (e) {
+      setStatus(`Adobe Cloud Photos: ${e}`);
+    } finally {
+      setLoadingFolder((cur) => (cur?.viewId === viewId ? null : cur));
+      await reloadRef.current();
+    }
+    setTimeout(() => setStatus(""), 8000);
+  };
+
   // A network drive opens like a folder; it is connected first when it isn't mounted.
   const openDrive = async (d: NetworkDrive) => {
-    setFilter((f) => ({ ...f, folder: d.path, immich_album: null, ids: null, view: `drive:${d.id}` }));
+    const viewId = `drive:${d.id}`;
+    const isSwitching = filter.view !== viewId;
+    setLoadingFolder({ viewId, name: d.name });
+    if (isSwitching) {
+      setPhotos([]);
+    }
+    setFilter((f) => ({ ...f, folder: d.path, immich_album: null, ids: null, view: viewId, in_bin: null }));
     setStatus(`Opening ${d.name}…`);
     try {
       const r = await api.networkOpen(d.id);
       setStatus(r.new ? `${r.new} new photo(s) on ${d.name}` : "");
+      setTimeout(() => setStatus(""), 8000);
     } catch (e) {
       setStatus(`${d.name}: ${e}`);
+    } finally {
+      setLoadingFolder((cur) => (cur?.viewId === viewId ? null : cur));
+      await reloadRef.current();
     }
-    setTimeout(() => setStatus(""), 8000);
   };
+
   // A downloaded cloud folder shows at once; what's new in the cloud is downloaded meanwhile.
   const openCloud = async (c: CloudFolder, name: string) => {
-    setFilter((f) => ({ ...f, folder: c.local, immich_album: null, ids: null, view: `cloud:${c.id}:${c.path}` }));
-    await syncCloud(c.id, c.path, name);
+    const viewId = `cloud:${c.id}:${c.path}`;
+    const folderName = `${name} › ${c.path || "All files"}`;
+    const isSwitching = filter.view !== viewId;
+    setLoadingFolder({ viewId, name: folderName });
+    if (isSwitching) {
+      setPhotos([]);
+    }
+    setFilter((f) => ({ ...f, folder: c.local, immich_album: null, ids: null, view: viewId, in_bin: null }));
+    try {
+      await syncCloud(c.id, c.path, name);
+    } finally {
+      setLoadingFolder((cur) => (cur?.viewId === viewId ? null : cur));
+      await reloadRef.current();
+    }
   };
   const syncing = useRef(new Set<string>());
   const syncCloud = async (id: string, path: string, name: string) => {
@@ -207,6 +362,89 @@ export default function App() {
     await reload();
     focus(n);
   };
+  const handleSaveAsNewPhoto = async (newPhoto: Photo) => {
+    await reload();
+    focus(newPhoto.id);
+    const label = newPhoto.copy_name ? `${newPhoto.filename} (${newPhoto.copy_name})` : newPhoto.filename;
+    setStatus(`Saved edit as new photo: ${label}`);
+    setTimeout(() => setStatus(""), 4000);
+  };
+  const openBin = () => {
+    setSelected([]);
+    setActiveId(null);
+    setFilter({ folder: null, immich_album: null, ids: null, view: "bin", in_bin: true });
+  };
+
+  const moveToBin = async (idsOverride?: number[]) => {
+    const ids = idsOverride || targets();
+    if (!ids.length) return;
+    try {
+      const n = await api.moveToBin(ids);
+      setStatus(`Moved ${n} photo(s) to Bin`);
+      setSelected((prev) => prev.filter((id) => !ids.includes(id)));
+      if (activeId && ids.includes(activeId)) setActiveId(null);
+      await reload();
+      setTimeout(() => setStatus(""), 4000);
+    } catch (e) {
+      setStatus(`Move to Bin failed: ${e}`);
+    }
+  };
+
+  const restoreFromBin = async () => {
+    const ids = targets();
+    if (!ids.length) return;
+    try {
+      const n = await api.restoreFromBin(ids);
+      setStatus(`Restored ${n} photo(s) from Bin`);
+      setSelected([]);
+      setActiveId(null);
+      await reload();
+      setTimeout(() => setStatus(""), 4000);
+    } catch (e) {
+      setStatus(`Restore failed: ${e}`);
+    }
+  };
+
+  const permanentDelete = async () => {
+    const ids = targets();
+    if (!ids.length) return;
+    const ok = await ask(
+      `Permanently delete ${ids.length} photo(s)?\n\nThis will permanently delete the original file(s) from your disk. This action cannot be undone.`,
+      { title: "Delete Permanently", kind: "error" }
+    );
+    if (!ok) return;
+    try {
+      const n = await api.permanentDelete(ids);
+      setStatus(`Permanently deleted ${n} photo(s)`);
+      setSelected([]);
+      setActiveId(null);
+      await reload();
+      setTimeout(() => setStatus(""), 4000);
+    } catch (e) {
+      setStatus(`Permanent delete failed: ${e}`);
+    }
+  };
+
+  const emptyBin = async () => {
+    const count = binCount || photos.length;
+    if (count === 0) return;
+    const ok = await ask(
+      `Empty Bin (${count} photo(s))?\n\nAll photos in the Bin will be permanently deleted from your disk. This action cannot be undone.`,
+      { title: "Empty Bin", kind: "error" }
+    );
+    if (!ok) return;
+    try {
+      const n = await api.emptyBin();
+      setStatus(`Emptied Bin (${n} photo(s) permanently deleted)`);
+      setSelected([]);
+      setActiveId(null);
+      await reload();
+      setTimeout(() => setStatus(""), 4000);
+    } catch (e) {
+      setStatus(`Empty Bin failed: ${e}`);
+    }
+  };
+
   const remove = async () => {
     const ids = targets();
     if (!ids.length || !(await ask(`Remove ${ids.length} photo(s) from the catalog? Files on disk are not touched.`, { title: "Remove from catalog", kind: "warning" }))) return;
@@ -215,12 +453,17 @@ export default function App() {
     setActiveId(null);
   };
 
-  const keys = useRef<(e: KeyboardEvent) => void>(() => {});
+  const keys = useRef<(e: KeyboardEvent) => void>(() => { });
   keys.current = (e) => {
-    if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey || module === "auto" || module === "agent" || module === "settings") return;
+    if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey || module === "settings") return;
     const k = e.key.toLowerCase();
-    if (k === "g") setModule("library");
-    else if (k === "d" && active) setModule("develop");
+    if (k === "c" && selected.length >= 2) {
+      e.preventDefault();
+      setCompareOpen((prev) => !prev);
+    } else if (k === "g") {
+      setModule("library");
+      setLibraryAutoFn(null);
+    } else if (k === "d" && active) setModule("develop");
     else if (/^[0-5]$/.test(k)) cull({ rating: +k });
     else if (k === "p") cull({ flag: "pick" });
     else if (k === "x") cull({ flag: "reject" });
@@ -232,6 +475,13 @@ export default function App() {
       e.preventDefault();
       const i = photos.findIndex((p) => p.id === activeId) + (k === "arrowright" ? 1 : -1);
       if (photos[i]) focus(photos[i].id);
+    } else if (e.key === "Backspace" || e.key === "Delete") {
+      e.preventDefault();
+      if (filter.view === "bin" || e.shiftKey) {
+        permanentDelete();
+      } else {
+        moveToBin();
+      }
     }
   };
   useEffect(() => {
@@ -246,20 +496,45 @@ export default function App() {
   return (
     <div className="flex h-full flex-col">
       <header className="flex h-10 shrink-0 items-center gap-5 border-b border-neutral-800 bg-neutral-950 px-4">
-        <span className="font-semibold tracking-wide text-neutral-100">
-          <span className="text-amber-300">◐</span> OpenLight Studio
+        <span className="font-semibold tracking-wide text-neutral-100 flex items-center gap-2">
+          <img
+            src="/icon.png"
+            alt="OpenLight Studio"
+            className="h-5 w-5 rounded object-cover shadow-xs"
+          />
+          <span>
+            OpenLight <span className="font-normal text-neutral-400">Studio</span>
+          </span>
         </span>
         <nav className="flex gap-1">
-          {MODULES.map(([m, label]) => (
-            <button
-              key={m}
-              onClick={() => setModule(m)}
-              disabled={m === "develop" && !active}
-              className={`rounded px-3 py-1 text-[12px] disabled:opacity-40 ${module === m ? "bg-neutral-800 text-white" : "text-neutral-400 hover:text-neutral-200"}`}
-            >
-              {label}
-            </button>
-          ))}
+          {MODULES.map(([m, label]) => {
+            const isCur = module === m;
+            return (
+              <button
+                key={m}
+                onClick={() => {
+                  setModule(m);
+                  if (m === "library" && module === "library") {
+                    setLibraryAutoFn(null);
+                  }
+                }}
+                disabled={m === "develop" && !active}
+                style={
+                  isCur
+                    ? {
+                      backgroundColor: "var(--theme-accent, #0ea5e9)",
+                      color: "var(--theme-accent-contrast, #ffffff)",
+                      boxShadow: "0 0 10px var(--theme-accent-glow, rgba(14,165,233,0.3))",
+                    }
+                    : undefined
+                }
+                className={`rounded-md px-3 py-1 text-[12px] transition-all duration-150 disabled:opacity-40 ${isCur ? "font-semibold shadow-xs" : "text-neutral-400 hover:text-neutral-200 hover:bg-neutral-900"
+                  }`}
+              >
+                {label}
+              </button>
+            );
+          })}
         </nav>
         <span className="ml-auto truncate text-[11px] text-neutral-400" title={status}>
           {status || background}
@@ -269,10 +544,20 @@ export default function App() {
             ✕
           </button>
         )}
-        <span className="flex items-center gap-1.5 text-[11px] text-neutral-500" title={info?.mcp_url}>
-          <span className={`h-2 w-2 rounded-full ${info?.mcp_status === "running" ? "bg-emerald-500" : "bg-neutral-600"}`} />
-          MCP
-        </span>
+        <button
+          className="flex items-center gap-1.5 text-[11px] text-neutral-400 hover:text-neutral-200 transition-colors cursor-pointer"
+          title={`${info?.mcp_url ?? "MCP server"} — Click to open AI & MCP Settings`}
+          onClick={() => {
+            setSettingsTab("agent");
+            setModule("settings");
+          }}
+        >
+          <span
+            className={`h-2 w-2 rounded-full transition-all ${info?.mcp_status === "running" ? "bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.6)]" : "bg-neutral-600"
+              }`}
+          />
+          <span className="font-mono text-[10px]">MCP</span>
+        </button>
       </header>
 
       {module === "library" && (
@@ -287,13 +572,19 @@ export default function App() {
           openDevelop={(id) => (focus(id), setModule("develop"))}
           cull={cull}
           settings={settings}
+          setSettings={setSettings}
           dataDir={info?.data_dir ?? ""}
+          loadingFolder={loadingFolder}
+          onShowAll={openAll}
           onAddFolder={addFolder}
           onOpenFolder={openFolder}
           onImmich={openImmich}
           nextPage={nextPage}
           onLoadMore={loadMore}
           onPickGoogle={pickGoogle}
+          onSyncApple={syncApple}
+          onSyncAmazon={syncAmazon}
+          onSyncAdobe={syncAdobe}
           onOpenDrive={openDrive}
           onOpenCloud={openCloud}
           onAddCloudFolder={syncCloud}
@@ -302,6 +593,20 @@ export default function App() {
           onExport={() => setExportIds(targets())}
           onVirtualCopy={virtualCopy}
           onRemove={remove}
+          binCount={binCount}
+          onOpenBin={openBin}
+          onMoveToBin={moveToBin}
+          onRestoreFromBin={restoreFromBin}
+          onPermanentDelete={permanentDelete}
+          onEmptyBin={emptyBin}
+          onOpenCompare={() => setCompareOpen(true)}
+          autoFn={libraryAutoFn}
+          onSelectAutoFn={setLibraryAutoFn}
+          jobs={jobs}
+          onAiSettings={() => {
+            setSettingsTab("agent");
+            setModule("settings");
+          }}
         />
       )}
       {module === "develop" && defaults && (
@@ -314,28 +619,48 @@ export default function App() {
           settings={settings}
           setSettings={setSettings}
           onExport={() => setExportIds(targets())}
+          onSaveAsNewPhoto={handleSaveAsNewPhoto}
           logs={logs}
           clearLogs={() => setLogs([])}
         />
       )}
-      {module === "auto" && (
-        <AutoView
+      {module === "settings" && (
+        <SettingsView
+          tab={settingsTab}
+          setTab={setSettingsTab}
           settings={settings}
           setSettings={setSettings}
           selected={selected}
-          view={photos}
           jobs={jobs}
-          onShow={(ids, label) => (setFilter({ ids, view: `auto:${label}` }), setModule("library"))}
-          onAiSettings={() => setModule("agent")}
-          onStorage={() => (setSettingsTab("locations"), setModule("settings"))}
+          onConnect={setRemote}
+          onAuto={() => {
+            setModule("library");
+            setLibraryAutoFn("cull");
+          }}
+          info={info}
+          logs={logs}
+          clearLogs={() => setLogs([])}
         />
-      )}
-      {module === "agent" && <Agent info={info} settings={settings} setSettings={setSettings} logs={logs} clearLogs={() => setLogs([])} />}
-      {module === "settings" && (
-        <SettingsView tab={settingsTab} setTab={setSettingsTab} settings={settings} setSettings={setSettings} selected={selected} jobs={jobs} onConnect={setRemote} onAuto={() => setModule("auto")} />
       )}
       {exportIds && exportIds.length > 0 && <ExportDialog ids={exportIds} settings={settings} dest={exportDest(exportIds)} onClose={() => setExportIds(null)} />}
       {remote && settings && <RemoteDialog source={remote} settings={settings} setSettings={setSettings} onClose={() => setRemote(null)} />}
+      {compareOpen && selected.length >= 2 && (
+        <CompareModal
+          groups={[
+            {
+              id: "selection",
+              title: `Selected Photos (${selected.length})`,
+              kind: "manual",
+              photos: selected.map((id) => photos.find((p) => p.id === id)).filter(Boolean) as Photo[],
+              keepId: selected[0],
+            },
+          ]}
+          initialIndex={0}
+          onClose={() => setCompareOpen(false)}
+          onCull={(id, culling) => cull(culling, [id])}
+          onMoveToBin={(id) => moveToBin([id])}
+        />
+      )}
     </div>
   );
 }

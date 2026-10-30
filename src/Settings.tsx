@@ -1,8 +1,10 @@
 import { ask } from "@tauri-apps/plugin-dialog";
 import { useEffect, useState } from "react";
-import { api, CleanUp, JobProgress, Settings, size, Source, StorageReport } from "./api";
+import { Agent, Log } from "./Agent";
+import { api, AppInfo, CleanUp, JobProgress, Settings, size, Source, StorageReport } from "./api";
 import { Btn } from "./controls";
 import { Duplicate, Locations } from "./Storage";
+import { applyTheme, getStoredTheme, isSystemDark, Theme, THEMES } from "./theme";
 
 const card = "rounded-lg border border-neutral-800 bg-neutral-900 p-4";
 const heading = "mb-1 text-[11px] font-semibold uppercase tracking-wider text-neutral-400";
@@ -11,15 +13,16 @@ const num = (n: number) => n.toLocaleString();
 const plural = (n: number, word: string) => `${num(n)} ${word}${n === 1 ? "" : "s"}`;
 const short = (folder: string) => folder.split(/[\\/]/).slice(-2).join("/");
 
-export type SettingsTab = "locations" | "duplicate" | "usage";
+export type SettingsTab = "appearance" | "locations" | "duplicate" | "usage" | "agent";
 const TABS: [SettingsTab, string][] = [
+  ["appearance", "Appearance"],
   ["locations", "Locations"],
   ["duplicate", "Duplicate"],
   ["usage", "Usage & clean up"],
+  ["agent", "AI & MCP"],
 ];
 
-/** Storage: where photos come from (network drives, cloud storage, photo services, automation), copying
- *  them between places, and what the catalog folder holds. */
+/** Settings: Appearance & theme selection, storage locations, duplicate detection, library clean-up, and AI & MCP configuration. */
 export function SettingsView(p: {
   tab: SettingsTab;
   setTab: (t: SettingsTab) => void;
@@ -29,21 +32,330 @@ export function SettingsView(p: {
   jobs: Record<string, JobProgress>;
   onConnect: (s: Source) => void;
   onAuto: () => void;
+  info?: AppInfo | null;
+  logs?: Log[];
+  clearLogs?: () => void;
 }) {
   const reload = () => void api.settings().then(p.setSettings);
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <nav className="flex shrink-0 items-center gap-1 border-b border-neutral-800 bg-neutral-900 px-4 py-1.5 text-[12px]">
-        <span className="mr-3 font-semibold text-neutral-300">Storage</span>
+        <span className="mr-3 font-semibold text-neutral-300">Settings</span>
         {TABS.map(([t, label]) => (
           <button key={t} onClick={() => p.setTab(t)} className={`rounded px-3 py-1 ${p.tab === t ? "bg-neutral-700 text-white" : "text-neutral-400 hover:text-neutral-200"}`}>
             {label}
           </button>
         ))}
       </nav>
+      {p.settings && p.tab === "appearance" && <Appearance settings={p.settings} setSettings={p.setSettings} />}
       {p.settings && p.tab === "locations" && <Locations settings={p.settings} setSettings={p.setSettings} onConnect={p.onConnect} onAuto={p.onAuto} />}
       {p.settings && p.tab === "duplicate" && <Duplicate settings={p.settings} selected={p.selected} jobs={p.jobs} />}
       {p.tab === "usage" && <Usage onSettingsChanged={reload} />}
+      {p.tab === "agent" && (
+        <Agent
+          info={p.info ?? null}
+          settings={p.settings}
+          setSettings={p.setSettings}
+          logs={p.logs ?? []}
+          clearLogs={p.clearLogs ?? (() => { })}
+        />
+      )}
+    </div>
+  );
+}
+
+/** Appearance settings: theme selection (9 distinct palettes including Studio Dark, Light, Cool Slate, Warm Darkroom, Nordic Frost, Midnight Violet, Forest Sage, OLED Obsidian, and System OS sync),
+ *  with category filtering, dynamic accent glowing cards, and live previews. */
+function Appearance({ settings, setSettings }: { settings: Settings; setSettings: (s: Settings) => void }) {
+  const currentTheme: Theme = (settings.theme as Theme) || getStoredTheme();
+  const [activeTheme, setActiveTheme] = useState<Theme>(currentTheme);
+  const [previewExposure, setPreviewExposure] = useState<number>(0.35);
+  const [categoryFilter, setCategoryFilter] = useState<string>("All");
+  const sysDark = isSystemDark();
+
+  const handleSelect = (t: Theme) => {
+    setActiveTheme(t);
+    applyTheme(t);
+    const updated: Settings = { ...settings, theme: t };
+    setSettings(updated);
+    api.saveSettings(updated);
+  };
+
+  const categories = ["All", "Vibrant", "Neutral", "Warm", "Light"];
+  const filteredThemes = THEMES.filter((th) => {
+    if (categoryFilter === "All") return true;
+    if (categoryFilter === "Neutral" && (th.category === "Neutral" || th.id === "system")) return true;
+    return th.category === categoryFilter;
+  });
+
+  const activeThemeMeta = THEMES.find((t) => t.id === activeTheme) || THEMES[0];
+
+  return (
+    <div className="flex-1 overflow-y-auto p-6">
+      <div className="mx-auto max-w-5xl space-y-6">
+        <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h2 className="text-base font-semibold text-neutral-100 flex items-center gap-2">
+              <span>Appearance & Color Themes</span>
+              <span className="rounded-full bg-neutral-800 px-2 py-0.5 text-[10px] font-medium text-neutral-400">
+                {THEMES.length} Themes
+              </span>
+            </h2>
+            <p className="mt-0.5 text-xs text-neutral-400">
+              Modern color palettes crafted for studio color grading, analog warmth, high-contrast daylight, and HDR/OLED displays.
+            </p>
+          </div>
+
+          {/* Operating system status banner */}
+          <div className="flex items-center gap-3 rounded-lg border border-neutral-800 bg-neutral-900/60 px-3 py-1.5 text-xs">
+            <span className="flex items-center gap-1.5 text-neutral-300">
+              <span>🖥️ OS:</span>
+              <strong className="text-neutral-100 font-medium">{sysDark ? "Dark" : "Light"}</strong>
+            </span>
+            {activeTheme !== "system" && (
+              <button
+                onClick={() => handleSelect("system")}
+                className="text-[11px] font-medium text-sky-400 hover:text-sky-300 transition-colors"
+                title="Synchronize appearance with your system appearance settings"
+              >
+                Sync OS
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Category Filter Pills */}
+        <div className="flex items-center gap-1.5 border-b border-neutral-800/80 pb-3 overflow-x-auto">
+          {categories.map((cat) => {
+            const count =
+              cat === "All"
+                ? THEMES.length
+                : THEMES.filter((t) => (cat === "Neutral" ? t.category === "Neutral" || t.id === "system" : t.category === cat)).length;
+            const isCur = categoryFilter === cat;
+            return (
+              <button
+                key={cat}
+                onClick={() => setCategoryFilter(cat)}
+                className={`flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium transition-all ${isCur
+                    ? "bg-neutral-100 text-neutral-900 shadow-sm"
+                    : "bg-neutral-900/80 text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200 border border-neutral-800"
+                  }`}
+              >
+                <span>{cat}</span>
+                <span className={`text-[10px] px-1 rounded-full ${isCur ? "bg-neutral-300/80 text-neutral-900" : "bg-neutral-800 text-neutral-400"}`}>
+                  {count}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Theme selection grid */}
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {filteredThemes.map((th) => {
+            const isSelected = activeTheme === th.id;
+            return (
+              <div
+                key={th.id}
+                onClick={() => handleSelect(th.id)}
+                style={
+                  isSelected
+                    ? {
+                      borderColor: th.colors.accent,
+                      boxShadow: `0 0 18px ${th.colors.accentGlow}`,
+                    }
+                    : undefined
+                }
+                className={`group relative flex cursor-pointer flex-col justify-between rounded-xl border p-4 transition-all duration-200 ${isSelected
+                    ? "bg-neutral-900/90 ring-1"
+                    : "border-neutral-800/90 bg-neutral-900/40 hover:border-neutral-700 hover:bg-neutral-900/80 hover:shadow-md"
+                  }`}
+              >
+                <div>
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex items-center gap-2.5">
+                      <div
+                        className="flex h-8 w-8 items-center justify-center rounded-lg border border-neutral-700/60 text-base shadow-xs"
+                        style={{ backgroundColor: th.colors.card }}
+                      >
+                        {th.icon}
+                      </div>
+                      <div>
+                        <div className="text-xs font-semibold text-neutral-100 group-hover:text-white flex items-center gap-1.5">
+                          {th.label}
+                        </div>
+                        <div className="text-[10px] font-medium" style={{ color: th.colors.accent }}>
+                          {th.tagline}
+                        </div>
+                      </div>
+                    </div>
+
+                    {isSelected ? (
+                      <span
+                        className="flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold tracking-wide shadow-xs"
+                        style={{
+                          backgroundColor: th.colors.accent,
+                          color: th.colors.bg === "#000000" || th.colors.bg.startsWith("#0") || th.colors.bg.startsWith("#1") ? "#ffffff" : "#0f172a",
+                        }}
+                      >
+                        ✓ Active
+                      </span>
+                    ) : (
+                      <span className="rounded bg-neutral-800/90 px-1.5 py-0.5 text-[10px] text-neutral-400">
+                        {th.category}
+                      </span>
+                    )}
+                  </div>
+
+                  <p className="mt-3 text-[11px] leading-relaxed text-neutral-400">
+                    {th.description}
+                  </p>
+                </div>
+
+                <div className="mt-4 pt-3 border-t border-neutral-800/80">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] text-neutral-500 font-mono uppercase tracking-wider">Palette</span>
+                    <div className="flex items-center gap-1.5">
+                      <span
+                        className="h-3.5 w-3.5 rounded-full border border-neutral-700/80 shadow-xs"
+                        style={{ backgroundColor: th.colors.bg }}
+                        title={`Canvas Canvas: ${th.colors.bg}`}
+                      />
+                      <span
+                        className="h-3.5 w-3.5 rounded-full border border-neutral-700/80 shadow-xs"
+                        style={{ backgroundColor: th.colors.card }}
+                        title={`Panel Surface: ${th.colors.card}`}
+                      />
+                      <span
+                        className="h-3.5 w-3.5 rounded-full border border-neutral-700/80 shadow-xs"
+                        style={{ backgroundColor: th.colors.text }}
+                        title={`Primary Text: ${th.colors.text}`}
+                      />
+                      <span
+                        className="h-4 w-4 rounded-full border border-white/20 shadow-sm ring-1 ring-white/10"
+                        style={{ backgroundColor: th.colors.accent, boxShadow: `0 0 8px ${th.colors.accentGlow}` }}
+                        title={`Signature Accent: ${th.colors.accent}`}
+                      />
+                      {th.colors.secondaryAccent && (
+                        <span
+                          className="h-3 w-3 rounded-full border border-white/15 shadow-xs"
+                          style={{ backgroundColor: th.colors.secondaryAccent }}
+                          title={`Secondary Accent: ${th.colors.secondaryAccent}`}
+                        />
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Live Interface Preview */}
+        <div className="rounded-xl border border-neutral-800 bg-neutral-900/90 p-5 shadow-lg space-y-4">
+          <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between border-b border-neutral-800 pb-3">
+            <div>
+              <div className="flex items-center gap-2">
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-300">
+                  Live Theme Preview
+                </h3>
+                <span
+                  className="rounded px-2 py-0.5 text-[10px] font-semibold"
+                  style={{
+                    backgroundColor: activeThemeMeta.colors.accent,
+                    color: activeThemeMeta.colors.bg.startsWith("#f") ? "#0f172a" : "#ffffff",
+                  }}
+                >
+                  {activeThemeMeta.label}
+                </span>
+              </div>
+              <p className="text-[11px] text-neutral-400 mt-0.5">
+                {activeThemeMeta.tagline} — Active studio color tokens rendered in real time.
+              </p>
+            </div>
+            <div className="flex items-center gap-2 text-xs text-neutral-400">
+              <span className="flex items-center gap-1.5 rounded bg-neutral-800 px-2 py-1">
+                <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
+                <span>Engine Ready</span>
+              </span>
+            </div>
+          </div>
+
+          <div className="space-y-4 rounded-lg border border-neutral-800 bg-neutral-950 p-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <button className="rounded bg-neutral-800 px-3 py-1.5 text-xs font-medium text-neutral-200 border border-neutral-700/60 hover:bg-neutral-700">
+                  Default Button
+                </button>
+                <button
+                  className="rounded px-3 py-1.5 text-xs font-medium shadow-md transition-shadow"
+                  style={{
+                    backgroundColor: "var(--theme-accent, #0ea5e9)",
+                    color: "var(--theme-accent-contrast, #ffffff)",
+                    boxShadow: "0 0 12px var(--theme-accent-glow, rgba(14,165,233,0.3))",
+                  }}
+                >
+                  Active Accent Button
+                </button>
+                <button
+                  className="rounded border px-3 py-1.5 text-xs font-medium"
+                  style={{
+                    borderColor: "var(--theme-accent, #0ea5e9)",
+                    color: "var(--theme-accent, #0ea5e9)",
+                    backgroundColor: "var(--theme-accent-subtle, rgba(14,165,233,0.1))",
+                  }}
+                >
+                  Subtle Accent Pill
+                </button>
+              </div>
+
+              {/* Color Labels Preview */}
+              <div className="flex items-center gap-1.5">
+                <span className="text-[11px] text-neutral-500 mr-1">Labels:</span>
+                <span className="h-3.5 w-3.5 rounded-full bg-red-500 shadow-xs" title="Red label" />
+                <span className="h-3.5 w-3.5 rounded-full bg-amber-400 shadow-xs" title="Yellow label" />
+                <span className="h-3.5 w-3.5 rounded-full bg-emerald-500 shadow-xs" title="Green label" />
+                <span className="h-3.5 w-3.5 rounded-full bg-sky-500 shadow-xs" title="Blue label" />
+                <span className="h-3.5 w-3.5 rounded-full bg-purple-500 shadow-xs" title="Purple label" />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
+              <div className="rounded-md border border-neutral-800/80 bg-neutral-900/60 p-3">
+                <div className="mb-1 flex justify-between text-xs text-neutral-400">
+                  <span>Interactive Exposure Slider</span>
+                  <span className="font-mono text-neutral-200 font-medium">
+                    {previewExposure > 0 ? `+${previewExposure.toFixed(2)}` : previewExposure.toFixed(2)} EV
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  className="ol-range w-full"
+                  min={-3}
+                  max={3}
+                  step={0.05}
+                  value={previewExposure}
+                  onChange={(e) => setPreviewExposure(+e.target.value)}
+                />
+              </div>
+
+              <div className="flex items-center justify-between rounded-md border border-neutral-800/80 bg-neutral-900/60 p-3 text-xs text-neutral-400">
+                <div className="flex items-center gap-2">
+                  <span className="text-base">{activeThemeMeta.icon}</span>
+                  <div>
+                    <div className="font-medium text-neutral-200">{activeThemeMeta.label}</div>
+                    <div className="text-[10px] text-neutral-500">Contrast ratio compliant (WCAG AA)</div>
+                  </div>
+                </div>
+                <span
+                  className="h-5 w-5 rounded-full border border-white/20 shadow-xs"
+                  style={{ backgroundColor: activeThemeMeta.colors.accent }}
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -112,27 +424,27 @@ function Usage({ onSettingsChanged }: { onSettingsChanged: () => void }) {
     ["originals", "Immich photo cache", "Kept after you open or export an Immich photo; downloaded again when needed while Immich is connected.", `${plural(c.originals.count, "file")} · ${size(c.originals.bytes)}`, "Clear"],
     ...(c.immich_albums && c.immich_albums.bytes > 0
       ? [
-          [
-            "immich_albums" as CleanUp,
-            "Downloaded Immich albums",
-            "Full albums downloaded from Immich. Photos remain safe on your Immich server.",
-            `${plural(c.immich_albums.count, "photo")} · ${size(c.immich_albums.bytes)}`,
-            "Clear",
-            `Delete the downloaded Immich albums (${plural(c.immich_albums.count, "photo")}, ${size(c.immich_albums.bytes)})?\n\nTheir photos are also removed from the catalog, with any edits, ratings and keywords you made to them here. The originals stay on your Immich server, where you can browse them in place.`,
-          ] as [CleanUp, string, string, string, string, string?],
-        ]
+        [
+          "immich_albums" as CleanUp,
+          "Downloaded Immich albums",
+          "Full albums downloaded from Immich. Photos remain safe on your Immich server.",
+          `${plural(c.immich_albums.count, "photo")} · ${size(c.immich_albums.bytes)}`,
+          "Clear",
+          `Delete the downloaded Immich albums (${plural(c.immich_albums.count, "photo")}, ${size(c.immich_albums.bytes)})?\n\nTheir photos are also removed from the catalog, with any edits, ratings and keywords you made to them here. The originals stay on your Immich server, where you can browse them in place.`,
+        ] as [CleanUp, string, string, string, string, string?],
+      ]
       : []),
     ...(c.cloud && c.cloud.bytes > 0
       ? [
-          [
-            "cloud" as CleanUp,
-            "Cloud downloads",
-            "Folders downloaded from cloud storage. The originals stay in the cloud.",
-            `${plural(c.cloud.count, "file")} · ${size(c.cloud.bytes)}`,
-            "Clear",
-            `Delete the downloaded cloud folders (${plural(c.cloud.count, "file")}, ${size(c.cloud.bytes)})?\n\nTheir photos are also removed from the catalog, with any edits, ratings and keywords you made to them here. The originals stay in your cloud storage, where you can download them again.`,
-          ] as [CleanUp, string, string, string, string, string?],
-        ]
+        [
+          "cloud" as CleanUp,
+          "Cloud downloads",
+          "Folders downloaded from cloud storage. The originals stay in the cloud.",
+          `${plural(c.cloud.count, "file")} · ${size(c.cloud.bytes)}`,
+          "Clear",
+          `Delete the downloaded cloud folders (${plural(c.cloud.count, "file")}, ${size(c.cloud.bytes)})?\n\nTheir photos are also removed from the catalog, with any edits, ratings and keywords you made to them here. The originals stay in your cloud storage, where you can download them again.`,
+        ] as [CleanUp, string, string, string, string, string?],
+      ]
       : []),
     [
       "missing",
