@@ -3,7 +3,7 @@ name = "openlight-studio"
 version = "0.1.0"
 description = "OpenLight Studio: non-destructive RAW processor and DAM with a built-in MCP server"
 authors = ["OpenLight Studio contributors"]
-license = "MPL-2.0 OR GPL-3.0-or-later"
+license = "MIT"
 edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

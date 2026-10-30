@@ -1,7 +1,7 @@
 # OpenLight Studio (OLS) — Functional & System Specification
 
 **Version:** 1.0.0-draft  
-**License:** MPL-2.0 / GPLv3 Dual-Licensed Open Source  
+**License:** MIT License  
 **Target Platforms:**  
 - **Desktop Native:** macOS (Apple Silicon / Intel), Windows (x64 / ARM64), Linux (Wayland / X11) via **Tauri v2 + Rust + WebGPU (`wgpu`)**  
 - **Web Application:** Progressive Web App (PWA) & Self-Hosted Server via **Rust-to-WASM + WebGPU + Origin Private File System (OPFS) + Optional Headless Studio Daemon**
