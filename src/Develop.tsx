@@ -19,7 +19,7 @@ export interface AiTaskState {
   userClosedDetails?: boolean;
 }
 
-type RTab = "adjust" | "selections" | "advanced" | "pro" | "auto";
+type RTab = "adjust" | "advanced" | "pro" | "auto";
 
 export type CompareMode = "off" | "side-by-side" | "split";
 export type CompareOrientation = "horizontal" | "vertical";
@@ -859,7 +859,7 @@ export function Develop(p: Props) {
   };
   const switchTab = (t: typeof rtab) => {
     setRtab(t);
-    if (t === "advanced" || t === "auto") setMaskSel(null); // these panels edit the whole photo
+    if (t === "advanced") setMaskSel(null); // these panels edit the whole photo (Auto's own do too, and it lists the selections)
     if (tool === "guides" || tool === "spot") setTool("none");
   };
 
@@ -2056,7 +2056,7 @@ export function Develop(p: Props) {
         )}
         <div className="border-b border-neutral-800 px-3 py-2">
           <Seg
-            options={[["adjust", "Adjust"], ["selections", dev?.masks.length ? `Selections (${dev.masks.length})` : "Selections"], ["advanced", "Advanced"], ["pro", "Pro"], ["auto", "Auto"]]}
+            options={[["adjust", "Adjust"], ["advanced", "Advanced"], ["pro", "Pro"], ["auto", dev?.masks.length ? `Auto (${dev.masks.length})` : "Auto"]]}
             value={rtab}
             onChange={switchTab}
           />
@@ -2096,7 +2096,7 @@ export function Develop(p: Props) {
             aiPrompt={id != null ? p.aiTasks[id]?.prompt : undefined}
           />
         )}
-        {dev && rtab === "selections" && (
+        {dev && rtab === "auto" && (
           <SelectionsTab
             dev={dev}
             change={change}
@@ -2411,7 +2411,7 @@ export function Develop(p: Props) {
   );
 }
 
-/** Stored selections (masks). Each AI-selected object is its own selection that can be selected
+/** Stored selections (masks), listed in the Auto tab. Each AI-selected object is its own selection that can be selected
  *  to finetune in Adjust, unselected, toggled on/off or deleted without a new AI run. */
 function SelectionsTab({
   dev,
