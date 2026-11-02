@@ -6,10 +6,10 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Release](https://img.shields.io/badge/Release-v0.1.0--beta-success.svg)](https://github.com/rcwkan/openlight-studio/releases)
-[![Website](https://img.shields.io/badge/Website-openlight--studio.pages.dev-25c6d8.svg)](https://openlight-studio.pages.dev)
+[![Website](https://img.shields.io/badge/Website-openlight--studio.pages.dev-25c6d8.svg)](https://openlight.makecade.com/)
 [![Platforms](https://img.shields.io/badge/Platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg)](https://github.com/rcwkan/openlight-studio/releases)
 
-[**Download App**](#-download--installation) · [**User Guide**](#-user-guide--key-features) · [**AI & Agents**](#-ai--agent-integration) · [**Developer Guide**](#-developer--contributor-guide) · [**Website**](https://openlight-studio.pages.dev)
+[**Download App**](#-download--installation) · [**User Guide**](#-user-guide--key-features) · [**AI & Agents**](#-ai--agent-integration) · [**Developer Guide**](#-developer--contributor-guide) · [**Website**](https://openlight.makecade.com/)
 
 </div>
 
