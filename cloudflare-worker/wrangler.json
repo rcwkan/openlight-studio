@@ -1,0 +1,16 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "makecade-openlight-router",
+  "main": "worker.js",
+  "compatibility_date": "2026-08-01",
+  "routes": [
+    {
+      "pattern": "openlight.makecade.com/*",
+      "zone_name": "makecade.com"
+    }
+  ],
+  "vars": {
+    "PAGES_ORIGIN": "https://openlight-studio.pages.dev",
+    "CUSTOM_DOMAIN": "https://openlight.makecade.com"
+  }
+}
