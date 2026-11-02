@@ -14,7 +14,8 @@
     "tauri": "tauri",
     "test:rs": "cargo test --manifest-path src-tauri/Cargo.toml",
     "test": "./scripts/test.sh",
-    "mcp": "./scripts/mcp.sh"
+    "mcp": "./scripts/mcp.sh",
+    "deploy:cf": "./scripts/deploy-cloudflare.sh"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
