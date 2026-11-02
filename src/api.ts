@@ -152,6 +152,8 @@ export type Develop = {
   channel_mixer: { red: number[]; green: number[]; blue: number[]; monochrome: boolean; gray: number[] };
   /** colours are sRGB 0-1 */
   gradient_map: { amount: number; shadows: number[]; highlights: number[] };
+  /** HDR Toning: radius / edge / compression 0-100, exposure EV, detail -100..300 %, the rest -100..100 */
+  hdr: { enabled: boolean; radius: number; edge: number; compression: number; exposure: number; detail: number; shadows: number; highlights: number; vibrance: number; saturation: number };
   filters: { blur: number; invert: boolean; posterize: number; threshold: number };
   /** angle 0/90/180/270 clockwise, then the mirrors; the crop is in the rotated frame */
   image_rotation: { angle: number; flip_h: boolean; flip_v: boolean };
@@ -193,7 +195,7 @@ export type Settings = {
 };
 
 // --- auto functions: their advanced settings, as kept in Settings.auto ---
-export type AutoFunction = "cull" | "edit" | "mask" | "enhance" | "blur" | "duplicates";
+export type AutoFunction = "cull" | "edit" | "mask" | "enhance" | "hdr" | "blur" | "duplicates";
 /** detail: where sharpness is checked: fast (1024 px) | screen (2048 px) | full (100%) */
 export type CullSettings = {
   detail: string;
@@ -223,6 +225,7 @@ export type EditSettings = {
   noise_reduction: boolean;
   skip_edited: boolean;
   virtual_copy: boolean;
+  ai_type: boolean;
 };
 export type MaskSettings = { targets: string[]; method: string; feather: number; edge_shift: number; replace: boolean; adjust: number };
 export type EnhanceSettings = {
@@ -240,6 +243,8 @@ export type EnhanceSettings = {
   folder: string;
   copy_edits: boolean;
 };
+/** grouping: brackets (taken within bracket_seconds) | all; deghost: off | low | medium | high */
+export type HdrSettings = { grouping: string; bracket_seconds: number; align: boolean; deghost: string; auto_tone: boolean; folder: string };
 export type BlurSettings = { detail: string; threshold: number; subject: string; motion: number; missed_focus: boolean; action: string };
 export type DuplicateSettings = { mode: string; similarity: number; window_minutes: number; keep: string; action: string };
 /** Run Auto Catalog & Culling on photos new to the catalog, by where they came from */
@@ -249,6 +254,7 @@ export type AutoSettings = {
   edit: EditSettings;
   mask: MaskSettings;
   enhance: EnhanceSettings;
+  hdr: HdrSettings;
   blur: BlurSettings;
   duplicates: DuplicateSettings;
   on_import: OnImport;
@@ -372,6 +378,8 @@ export const api = {
   healSpot: (id: number, x: number, y: number, radius: number) => invoke<Develop>("heal_spot", { id, x, y, radius }),
   /** Auto fine tune to a profile (natural | neutral | vivid | portrait | landscape | bw | film | moody); not saved */
   autoDevelop: (id: number, develop: Develop, profile: string) => invoke<Develop>("auto_develop", { id, develop, profile }),
+  /** the develop profile for what the photo shows, and the AI's error when it fell back to keywords */
+  photoType: (id: number) => invoke<[string, string | null]>("photo_type", { id }),
   autoWhiteBalance: (id: number) => invoke<Develop["white_balance"]>("auto_white_balance", { id }),
   /** under develop's white balance */
   autoTone: (id: number, develop: Develop) => invoke<Develop["basic_tone"]>("auto_tone", { id, develop }),

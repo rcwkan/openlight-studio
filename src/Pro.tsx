@@ -74,6 +74,22 @@ export function ProTab(p: {
         {S("Output white", ["levels", ch, "out_white"], 0, 255)}
       </Panel>
 
+      <Panel title="HDR toning" right={reset("hdr", "HDR toning")}>
+        {check("HDR toning", ["hdr", "enabled"], "Squeeze the photo's range region by region and bring its detail back, like Photoshop's HDR Toning")}
+        <div className={dev.hdr.enabled ? "" : "pointer-events-none opacity-40"}>
+          {S("Radius", ["hdr", "radius"], 0, 100)}
+          {S("Edge strength", ["hdr", "edge"], 0, 100)}
+          {S("Compression", ["hdr", "compression"], 0, 100)}
+          {S("Exposure", ["hdr", "exposure"], -5, 5, { step: 0.05, digits: 2 })}
+          {S("Detail", ["hdr", "detail"], -100, 300)}
+          {S("Shadows", ["hdr", "shadows"], -100, 100)}
+          {S("Highlights", ["hdr", "highlights"], -100, 100)}
+          {S("Vibrance", ["hdr", "vibrance"], -100, 100)}
+          {S("Saturation", ["hdr", "saturation"], -100, 100)}
+        </div>
+        <p className={hint}>Radius sets how large the regions are; a low edge strength glows across edges, a high one stops at them. Detail adds back the fine contrast compression flattened.</p>
+      </Panel>
+
       <Panel title="Hue / Saturation" right={reset("hue_saturation", "hue/saturation")}>
         {hs.colorize ? (
           <>

@@ -1,5 +1,5 @@
-//! Denoise & Super Resolution (spec §3.4.3) for Enhance, which writes a new master next to the original as
-//! Lightroom does. The built-in engine removes noise with noise-adaptive wavelet shrinkage and enlarges
+//! Denoise & Super Resolution (spec §3.4.3) for Enhance, and HDR Merge of exposure brackets (§3.5,
+//! FR-HDR-03); each writes a new master next to the original as Lightroom does. The built-in engine removes noise with noise-adaptive wavelet shrinkage and enlarges
 //! with Lanczos-3 refined by back-projection; an external engine (e.g. Real-ESRGAN) plugs in as a command.
 //!
 //! ponytail: no neural model is bundled, so the built-in engine is classical: it removes noise well but
@@ -7,7 +7,7 @@
 
 use crate::{
     ai,
-    develop::{self, Img, es},
+    develop::{self, Img, Px, es, luma, smooth},
 };
 use rayon::prelude::*;
 use std::{
@@ -278,6 +278,141 @@ pub fn run_command(template: &str, input: &Path, output: &Path, scale: u32, stre
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// HDR Merge
+// ---------------------------------------------------------------------------
+
+/// Half size, each pixel the mean of a 2×2 block.
+fn half(v: &[f32], w: usize, h: usize) -> (Vec<f32>, usize, usize) {
+    let (nw, nh) = (w / 2, h / 2);
+    let at = |x: usize, y: usize| v[y * w + x];
+    ((0..nw * nh).map(|i| {
+        let (x, y) = (i % nw * 2, i / nw * 2);
+        0.25 * (at(x, y) + at(x + 1, y) + at(x, y + 1) + at(x + 1, y + 1))
+    }).collect(), nw, nh)
+}
+
+/// Threshold bitmaps in the manner of Ward's MTB, but split at the local mean of the log luminance rather
+/// than the global median: exposure only adds to log values, so the bitmaps match across the bracket and
+/// every textured area counts, not just one big edge. Flat, clipped and black areas are left out (the mask).
+fn mtb(v: &[f32], w: usize, h: usize) -> (Vec<bool>, Vec<bool>) {
+    let m = develop::blur(v, w, h, 3.0);
+    (v.iter().zip(&m).map(|(x, m)| x > m).collect(), v.iter().zip(&m).map(|(x, m)| (x - m).abs() > 0.05).collect())
+}
+
+/// The whole-pixel shift (dx, dy) that lines `b` up with `a` (log luminance, w × h): coarse to fine over a
+/// pyramid down to 32 px, ±1 px at each level, so up to ±63 px (six levels).
+/// ponytail: translation only; a rotated or zoomed handheld frame needs a homography (feature matching).
+fn align(a: &[f32], b: &[f32], w: usize, h: usize) -> (i32, i32) {
+    let mut levels = vec![(a.to_vec(), b.to_vec(), w, h)];
+    while levels.len() < 6 && levels.last().is_some_and(|l| l.2.min(l.3) >= 64) {
+        let (a, b, w, h) = levels.last().unwrap();
+        let (na, nw, nh) = half(a, *w, *h);
+        levels.push((na, half(b, *w, *h).0, nw, nh));
+    }
+    let mut best = (0i32, 0i32);
+    for (a, b, w, h) in levels.iter().rev() {
+        let ((ab, am), (bb, bm)) = (mtb(a, *w, *h), mtb(b, *w, *h));
+        let (w, h) = (*w as i32, *h as i32);
+        let err = |dx: i32, dy: i32| -> usize {
+            (0..h).into_par_iter().map(|y| {
+                let sy = y - dy;
+                if !(0..h).contains(&sy) { return 0; }
+                (0..w).filter(|&x| {
+                    let sx = x - dx;
+                    let (i, j) = ((y * w + x) as usize, (sy * w + sx) as usize);
+                    (0..w).contains(&sx) && am[i] && bm[j] && ab[i] != bb[j]
+                }).count()
+            }).sum()
+        };
+        let c = (best.0 * 2, best.1 * 2);
+        best = (-1..=1).flat_map(|dy| (-1..=1).map(move |dx| (c.0 + dx, c.1 + dy))).min_by_key(|&(dx, dy)| err(dx, dy)).unwrap_or(c);
+    }
+    best
+}
+
+/// `img` moved by (dx, dy), edge pixels repeated into the gap.
+fn shifted(img: &Img, (dx, dy): (i32, i32)) -> Img {
+    let (w, h) = (img.w as i32, img.h as i32);
+    let px = (0..w * h).into_par_iter().map(|i| {
+        let (x, y) = ((i % w - dx).clamp(0, w - 1), (i / w - dy).clamp(0, h - 1));
+        img.px[(y * w + x) as usize]
+    }).collect();
+    Img { w: img.w, h: img.h, px }
+}
+
+/// One merged bracket: the radiance image (1.0 = the middle frame's exposure), each input frame's exposure
+/// in EV against it and its alignment shift in pixels.
+pub struct Merged {
+    pub img: Img,
+    /// the reference frame's index
+    pub reference: usize,
+    pub ev: Vec<f32>,
+    pub shift: Vec<(i32, i32)>,
+}
+
+/// Merge exposure brackets (linear frames of one size, in any order) into one high dynamic range image.
+/// The middle frame by brightness is the reference: the others are lined up with it (`align`), their
+/// exposure measured against it from the pixels well exposed in both, then each pixel is the weighted
+/// mean of the frames that saw it well (mid-tones count most; clipped and near-black ones not at all).
+/// `deghost` (stops; 0 = off) drops a frame's pixel that differs from the reference by more than that,
+/// so something that moved comes from the reference frame alone.
+/// ponytail: the exposure is measured, not read from EXIF, and a camera JPEG's tone curve bends the
+/// ratios a little; per-pixel deghosting (no motion masks), all frames held in memory at once.
+pub fn merge_hdr(frames: Vec<Img>, align_frames: bool, deghost: f32) -> Result<Merged, String> {
+    let (w, h) = (frames.first().ok_or("no frames")?.w, frames[0].h);
+    if frames.len() < 2 {
+        return Err("an HDR merge needs at least two exposures".into());
+    }
+    if frames.iter().any(|f| (f.w, f.h) != (w, h)) {
+        return Err("the exposures differ in size".into());
+    }
+    let logl = |f: &Img| f.px.par_iter().map(|p| luma(*p).max(1e-5).log2()).collect::<Vec<f32>>();
+    let mean = |v: &[f32]| v.iter().sum::<f32>() / v.len().max(1) as f32;
+    let mut order: Vec<(usize, f32)> = frames.iter().enumerate().map(|(i, f)| (i, mean(&logl(f)))).collect();
+    order.sort_by(|a, b| a.1.total_cmp(&b.1));
+    let r = order[order.len() / 2].0;
+    let rl = logl(&frames[r]);
+    let shift: Vec<(i32, i32)> = frames.iter().enumerate().map(|(i, f)| if i == r || !align_frames { (0, 0) } else { align(&rl, &logl(f), w, h) }).collect();
+    let frames: Vec<Img> = frames.into_iter().zip(&shift).map(|(f, &s)| if s == (0, 0) { f } else { shifted(&f, s) }).collect();
+    let peak = |p: &Px| p[0].max(p[1]).max(p[2]);
+    let usable = |p: &Px| (0.02..0.85).contains(&peak(p));
+    // exposure against the reference: the median ratio over pixels both saw well
+    let gain: Vec<f32> = frames.iter().map(|f| {
+        let mut q: Vec<f32> = f.px.iter().zip(&frames[r].px).step_by(7).filter(|(a, b)| usable(a) && usable(b)).map(|(a, b)| (luma(*a) / luma(*b).max(1e-6)).max(1e-6).log2()).collect();
+        if q.len() < 50 {
+            return mean(&logl(f)) - mean(&rl);
+        }
+        let k = q.len() / 2;
+        *q.select_nth_unstable_by(k, f32::total_cmp).1
+    }).collect();
+    let (dark, bright) = (order[0].0, order[order.len() - 1].0);
+    let px = (0..w * h).into_par_iter().map(|i| {
+        let rp = frames[r].px[i];
+        let norm = |k: usize| frames[k].px[i].map(|c| c * (-gain[k]).exp2());
+        let rv = luma(rp).max(1e-6).log2();
+        let (mut acc, mut sum) = ([0f32; 3], 0f32);
+        for k in 0..frames.len() {
+            let v = peak(&frames[k].px[i]);
+            let mut wt = smooth(0.0, 0.08, v) * (1.0 - smooth(0.85, 0.98, v));
+            if deghost > 0.0 && k != r && usable(&rp) {
+                let d = (luma(frames[k].px[i]).max(1e-6).log2() - gain[k] - rv).abs();
+                wt *= 1.0 - smooth(deghost, 2.0 * deghost, d);
+            }
+            if wt > 0.0 {
+                let q = norm(k);
+                for c in 0..3 {
+                    acc[c] += wt * q[c];
+                }
+                sum += wt;
+            }
+        }
+        // clipped in every frame: the darkest saw the most; black in every frame: the brightest
+        if sum < 1e-4 { norm(if peak(&rp) > 0.5 { dark } else { bright }) } else { acc.map(|c| c / sum) }
+    }).collect();
+    Ok(Merged { img: Img { w, h, px }, reference: r, ev: gain, shift })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,6 +454,40 @@ mod tests {
         let (x, y) = (develop::to_rgba8(a), develop::to_rgba8(b));
         let mse = x.iter().zip(&y).map(|(p, q)| (*p as f32 - *q as f32).powi(2)).sum::<f32>() / x.len() as f32;
         10.0 * (255.0f32 * 255.0 / mse.max(1e-6)).log10()
+    }
+
+    #[test]
+    fn hdr_merge_recovers_the_range_lines_up_and_deghosts() {
+        let (w, h) = (300, 200);
+        // radiance from 0.004 to 8 (11 stops) with texture, so the frames can be lined up
+        let radiance: Vec<Px> = (0..w * h).map(|i| {
+            let (x, y) = (i % w, i / w);
+            let v = 0.004 * 2000f32.powf(x as f32 / w as f32) * if (x / 7 + y / 9) % 2 == 0 { 1.0 } else { 1.4 };
+            [v, v * 0.8, v * 0.6]
+        }).collect();
+        let frame = |ev: f32, s: (i32, i32)| shifted(&Img { w, h, px: radiance.iter().map(|p| p.map(|c| (c * ev.exp2()).min(1.0))).collect() }, s);
+        // something passes through the bright frame only
+        let mut bright = frame(2.0, (0, 0));
+        for y in 80..120 {
+            for x in 100..140 {
+                bright.px[y * w + x] = [0.05; 3];
+            }
+        }
+        let frames = vec![bright, frame(-3.0, (4, -3)), frame(0.0, (0, 0))];
+        let m = merge_hdr(frames.clone(), true, 0.5).unwrap();
+        assert_eq!(m.shift[1], (-4, 3), "the dark frame is lined up");
+        assert!((m.ev[0] - 2.0).abs() < 0.1 && (m.ev[1] + 3.0).abs() < 0.1 && m.ev[2] == 0.0, "EVs {:?}", m.ev);
+        // away from the shifted border, the ghost and the far right (past 7.8, clipped even at -3 EV), every
+        // pixel is its radiance, though the 0 EV frame clips at 1
+        let err = |m: &Merged, x0: usize, x1: usize, y0: usize, y1: usize| {
+            (y0..y1).flat_map(|y| (x0..x1).map(move |x| y * w + x)).map(|i| (m.img.px[i][0] / radiance[i][0]).log2().abs()).fold(0f32, f32::max)
+        };
+        assert!(err(&m, 10, 280, 10, 70) < 0.05, "radiance off by {} stops", err(&m, 10, 280, 10, 70));
+        assert!(m.img.px.iter().map(|p| p[0]).fold(0f32, f32::max) > 6.0, "highlights above the 0 EV frame's clip are kept");
+        // the ghost comes from the reference frame alone; without deghosting it shows
+        assert!(err(&m, 105, 135, 85, 115) < 0.05, "deghosted: {}", err(&m, 105, 135, 85, 115));
+        assert!(err(&merge_hdr(frames, true, 0.0).unwrap(), 105, 135, 85, 115) > 0.5);
+        assert!(merge_hdr(vec![frame(0.0, (0, 0))], true, 0.0).is_err());
     }
 
     #[test]

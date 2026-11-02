@@ -85,9 +85,10 @@ The **Pro** tab provides advanced adjustments applied non-destructively on top o
 Open the **Auto** bar on the right side of the Library to run background batch operations:
 - **Auto Catalog & Culling**: Measures edge-width subject sharpness, highlights/shadows clipping, and noise; automatically detects bursts, selects the sharpest frame, and tags rejects.
 - **Auto Horizon Levelling**: Detects tilted horizons and levels images as dedicated history steps.
-- **Auto Look Profiles**: One-click professional color profiling (Natural, Vivid, Portrait, Landscape, Film, Moody, B&W).
+- **Auto Look Profiles**: One-click professional color profiling (Natural, Vivid, Portrait, Landscape, Street, Food, Architecture, Night, Nature, Film, Moody, B&W), or picked per photo by type with the AI.
 - **Find Blurred Subjects & Duplicates**: Flag missed-focus or motion-blurred shots; identify duplicate and visually similar photos by perceptual hash.
 - **Wavelet Denoise & Super Resolution**: Enhance images with multi-scale wavelet denoising and 1.5–4× enlargement into clean 32-bit float master TIFFs.
+- **HDR Merge & HDR Toning**: Merge exposure brackets (aligned, deghosted) into a 32-bit float master; tone-map any photo with local adaptation and detail control in Pro.
 
 ---
 

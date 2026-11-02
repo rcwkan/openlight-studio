@@ -50,6 +50,7 @@ pub struct Develop {
     pub selective_color: SelectiveColor,
     pub channel_mixer: ChannelMixer,
     pub gradient_map: GradientMap,
+    pub hdr: Hdr,
     pub filters: Filters,
     pub image_rotation: ImageRotation,
     pub crop: Crop,
@@ -415,6 +416,31 @@ impl Default for GradientMap {
     }
 }
 
+/// Photoshop-style HDR Toning (local adaptation): the photo's log luminance splits into an edge-aware base
+/// (regions `radius` 0-100 across, held at edges as firmly as `edge` 0-100) and the detail on it. The base's
+/// range is squeezed by `compression` 0-100 around the photo's key and moved by `exposure` (EV), `shadows`
+/// and `highlights` -100..100 (in stops of the base); the detail comes back at `detail` -100..300 % extra.
+/// `vibrance` and `saturation` -100..100 follow. Off unless `enabled`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct Hdr {
+    pub enabled: bool,
+    pub radius: f32,
+    pub edge: f32,
+    pub compression: f32,
+    pub exposure: f32,
+    pub detail: f32,
+    pub shadows: f32,
+    pub highlights: f32,
+    pub vibrance: f32,
+    pub saturation: f32,
+}
+impl Default for Hdr {
+    fn default() -> Self {
+        Self { enabled: false, radius: 30.0, edge: 50.0, compression: 50.0, exposure: 0.0, detail: 30.0, shadows: 0.0, highlights: 0.0, vibrance: 0.0, saturation: 0.0 }
+    }
+}
+
 /// Gaussian blur 0-100 (sigma up to 2% of the long edge), invert, posterize levels (0 = off, 2-255)
 /// and threshold (0 = off, 1-255 luminance).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
@@ -714,6 +740,15 @@ impl Develop {
         cl(&mut g.amount, 0.0, 100.0);
         for v in g.shadows.iter_mut().chain(&mut g.highlights) {
             cl(v, 0.0, 1.0);
+        }
+        let x = &mut self.hdr;
+        for v in [&mut x.radius, &mut x.edge, &mut x.compression] {
+            cl(v, 0.0, 100.0);
+        }
+        cl(&mut x.exposure, -5.0, 5.0);
+        cl(&mut x.detail, -100.0, 300.0);
+        for v in [&mut x.shadows, &mut x.highlights, &mut x.vibrance, &mut x.saturation] {
+            cl(v, -100.0, 100.0);
         }
         let f = &mut self.filters;
         cl(&mut f.blur, 0.0, 100.0);
@@ -1211,6 +1246,9 @@ fn tones(src: &[Px], w: usize, h: usize, d: &Develop, overlay: Option<usize>) ->
         sharpen(&mut px, w, h, &d.detail);
     }
     // 7b. Pro: Photoshop adjustments on the result (inside the mask, for a mask's tuning)
+    if d.hdr.enabled {
+        hdr(&mut px, w, h, &d.hdr);
+    }
     let pro = Pro::new(d);
     if d.filters.blur > 0.0 {
         let s = d.filters.blur / 100.0 * 0.02 * w.max(h) as f32;
@@ -1341,6 +1379,39 @@ fn local_contrast(px: &mut [Px], w: usize, h: usize, clarity: f32, texture: f32)
         }
         let r = ((v0 + d).max(0.0) / v0).powi(2).min(8.0);
         *p = p.map(|c| c * r);
+    });
+}
+
+/// HDR Toning (see Hdr): a self-guided filter on log2 luminance gives the base; the base is compressed and
+/// shifted, the detail scaled, and each pixel takes the luminance ratio (hue kept), then vibrance/saturation.
+fn hdr(px: &mut [Px], w: usize, h: usize, x: &Hdr) {
+    let r = w.max(h) as f32 * (0.002 + 0.05 * x.radius / 100.0);
+    // edge 0: barely edge-aware (a wide glow); 100: halts at a 1/4-stop step
+    let eps = (4.0 * (1.0 - x.edge / 100.0) + 0.0625).powi(2) / 16.0;
+    let l: Vec<f32> = px.par_iter().map(|p| luma(*p).max(1e-5).log2()).collect();
+    let mean = blur(&l, w, h, r);
+    let sq = blur(&l.iter().map(|v| v * v).collect::<Vec<f32>>(), w, h, r);
+    let a: Vec<f32> = sq.iter().zip(&mean).map(|(s, m)| (s - m * m).max(0.0)).map(|var| var / (var + eps)).collect();
+    let b: Vec<f32> = a.iter().zip(&mean).map(|(a, m)| m * (1.0 - a)).collect();
+    let (ma, mb) = (blur(&a, w, h, r), blur(&b, w, h, r));
+    let base: Vec<f32> = (0..l.len()).map(|i| ma[i] * l[i] + mb[i]).collect();
+    let key = base.iter().sum::<f32>() / base.len().max(1) as f32;
+    let (c, k) = (1.0 - 0.8 * x.compression / 100.0, 1.0 + x.detail / 100.0);
+    let (sat, vib) = (x.saturation / 100.0, x.vibrance / 100.0);
+    px.par_iter_mut().enumerate().for_each(|(i, p)| {
+        let t = base[i] - key;
+        let lift = 2.0 * x.shadows / 100.0 * smooth(0.0, 3.0, -t) + 2.0 * x.highlights / 100.0 * smooth(0.0, 3.0, t);
+        let out = key + t * c + x.exposure + lift + (l[i] - base[i]) * k;
+        let g = (out - l[i]).exp2().min(64.0);
+        let q = p.map(|v| v.max(0.0) * g);
+        if sat == 0.0 && vib == 0.0 {
+            *p = q;
+            return;
+        }
+        let (y, hi) = (luma(q), q[0].max(q[1]).max(q[2]));
+        let s = if hi > 1e-6 { 1.0 - q[0].min(q[1]).min(q[2]) / hi } else { 0.0 };
+        let m = (1.0 + sat + vib * (1.0 - s)).max(0.0);
+        *p = q.map(|v| (y + (v - y) * m).max(0.0));
     });
 }
 
@@ -2938,20 +3009,34 @@ pub fn estimate_ca(img: &Img) -> [f32; 2] {
 // ---------------------------------------------------------------------------
 
 /// Profiles the Auto tab tunes to: auto white balance and tone, then a look.
-pub const PROFILES: &[&str] = &["natural", "neutral", "vivid", "portrait", "landscape", "bw", "film", "moody"];
+/// The photo-type ones (portrait … night) follow the looks common on Unsplash for that kind of photo; the
+/// Auto tab picks one per photo from what it shows (auto::photo_type).
+pub const PROFILES: &[&str] = &[
+    "natural", "neutral", "vivid", "portrait", "landscape", "bw", "film", "moody", "street", "food", "architecture", "night", "nature",
+];
 
-/// A profile's look on top of the auto result: numbers add to it, everything else is set.
+/// A profile's look on top of the auto result: numbers add to it, everything else is set. Colour mixer
+/// bands: red, orange, yellow, green, aqua, blue, purple, magenta.
 fn look(profile: &str) -> Option<Value> {
     Some(match profile {
         "natural" => json!({ "presence": { "vibrance": 10 } }),
         "neutral" => json!({ "basic_tone": { "contrast": -20, "highlights": -15, "shadows": 15 }, "presence": { "vibrance": -10 } }),
         "vivid" => json!({ "basic_tone": { "contrast": 15 }, "presence": { "clarity": 10, "vibrance": 35, "saturation": 5 } }),
+        // warm and soft: smooth skin, calm orange/red, quieter greens behind, a slightly faded black
         "portrait" => json!({
             "white_balance": { "temperature_k": 200 },
             "basic_tone": { "exposure": 0.1, "contrast": -5, "highlights": -10, "shadows": 10 },
-            "presence": { "texture": -15, "clarity": -10, "vibrance": 5 }
+            "presence": { "texture": -15, "clarity": -10, "vibrance": 5 },
+            "color_mixer": { "saturation": [-5, -8, 0, -15, 0, 0, 0, 0], "luminance": [0, 8, 0, 0, 0, 0, 0, 0] },
+            "tone_curve": { "point_luma": [[0, 10], [128, 130], [255, 252]] }
         }),
-        "landscape" => json!({ "basic_tone": { "contrast": 10, "highlights": -25, "shadows": 15 }, "presence": { "clarity": 15, "dehaze": 10, "vibrance": 25 } }),
+        // held-back skies, open shadows, deep blues, greens toward yellow, warm highlights
+        "landscape" => json!({
+            "basic_tone": { "contrast": 10, "highlights": -25, "shadows": 15 },
+            "presence": { "clarity": 15, "dehaze": 10, "vibrance": 25 },
+            "color_mixer": { "hue": [0, 0, 0, -8, 8, 0, 0, 0], "saturation": [0, 5, 0, -10, 0, 10, 0, 0], "luminance": [0, 0, 0, 0, 0, -10, 0, 0] },
+            "color_grading_3way": { "highlights": { "hue": 45, "sat": 8 } }
+        }),
         "bw" => json!({ "profile": "Monochrome", "basic_tone": { "contrast": 20 }, "presence": { "clarity": 10 } }),
         "film" => json!({
             "basic_tone": { "contrast": -10 },
@@ -2964,6 +3049,46 @@ fn look(profile: &str) -> Option<Value> {
             "basic_tone": { "exposure": -0.3, "contrast": 15, "highlights": -20 },
             "presence": { "clarity": 10, "dehaze": 5, "saturation": -20 },
             "effects": { "vignette": -25 }
+        }),
+        // muted, cinematic: punchy midtones, teal shadows, warm highlights, matte black, light grain
+        "street" => json!({
+            "basic_tone": { "contrast": 20, "highlights": -15, "shadows": 10 },
+            "presence": { "clarity": 15, "saturation": -15 },
+            "color_mixer": { "saturation": [0, 5, -10, -20, 0, -15, -10, -10] },
+            "tone_curve": { "point_luma": [[0, 15], [64, 60], [192, 198], [255, 248]] },
+            "color_grading_3way": { "shadows": { "hue": 200, "sat": 12 }, "highlights": { "hue": 40, "sat": 10 } },
+            "effects": { "vignette": -15 },
+            "grain": { "amount": 10 }
+        }),
+        // bright and warm: open shadows, rich reds/oranges/herb greens, cool window light calmed
+        "food" => json!({
+            "white_balance": { "temperature_k": 150 },
+            "basic_tone": { "exposure": 0.15, "contrast": 5, "highlights": -10, "shadows": 20 },
+            "presence": { "texture": 15, "clarity": 5, "vibrance": 20 },
+            "color_mixer": { "saturation": [10, 10, 5, 10, 0, -20, 0, 0] }
+        }),
+        // clean and cool: crisp lines, even tones, pastel skies, little colour
+        "architecture" => json!({
+            "white_balance": { "temperature_k": -150 },
+            "basic_tone": { "contrast": 15, "highlights": -20, "shadows": 20, "whites": 10 },
+            "presence": { "texture": 10, "clarity": 20, "saturation": -10 },
+            "color_mixer": { "saturation": [0, 0, -10, -15, 0, -10, 0, 0], "luminance": [0, 0, 0, 0, 0, 10, 0, 0] }
+        }),
+        // teal and orange city light: cooler, neon held back, greens to aqua, deep blacks
+        "night" => json!({
+            "white_balance": { "temperature_k": -400 },
+            "basic_tone": { "contrast": 15, "highlights": -30, "shadows": 10, "blacks": -10 },
+            "presence": { "clarity": 10, "dehaze": 5, "vibrance": 15 },
+            "color_mixer": { "hue": [0, 0, -10, 15, 0, 0, 0, 0], "saturation": [0, 5, 0, -20, 15, 15, 10, 10] },
+            "color_grading_3way": { "shadows": { "hue": 210, "sat": 15 }, "highlights": { "hue": 35, "sat": 10 } }
+        }),
+        // macro, flowers, wildlife: slightly warm, lush greens and yellows, fine detail, a soft vignette
+        "nature" => json!({
+            "white_balance": { "temperature_k": 100 },
+            "basic_tone": { "contrast": 5, "shadows": 10 },
+            "presence": { "texture": 10, "clarity": 5, "vibrance": 30 },
+            "color_mixer": { "hue": [0, 0, 0, -5, 0, 0, 0, 0], "saturation": [0, 0, 10, 5, 0, 0, 0, 0], "luminance": [0, 0, 0, 5, 0, 0, 0, 0] },
+            "effects": { "vignette": -15 }
         }),
         _ => return None,
     })
@@ -3600,6 +3725,36 @@ mod tests {
         // hull of both squares: the 6 outer corners
         assert_eq!(g[1].1.len(), 6);
         assert!(g[1].1.contains(&a[0]) && g[1].1.contains(&b[2]) && !g[1].1.contains(&b[0]));
+    }
+
+    #[test]
+    fn hdr_toning_squeezes_the_range_and_keeps_detail() {
+        // a deep shadow half and a bright half, each with fine stripes
+        let (w, h) = (200, 100);
+        let px: Vec<Px> = (0..w * h).map(|i| [if i % w < w / 2 { 0.01 } else { 2.0 } * if (i % w) % 4 < 2 { 1.0 } else { 1.3 }; 3]).collect();
+        let src = Img { w, h, px };
+        let run = |x: Hdr| {
+            let mut px = src.px.clone();
+            hdr(&mut px, w, h, &x);
+            px
+        };
+        // mean log2 brightness of each half, and the stripes' contrast in the dark half (in stops)
+        let halves = |px: &[Px]| {
+            let side = |left: bool| (0..w * h).filter(|i| (i % w < w / 2) == left && (i % w) % (w / 2) > 20 && (i % w) % (w / 2) < 80).map(|i| luma(px[i]).log2()).sum::<f32>() / (60 * h) as f32;
+            (side(true), side(false), luma(px[w / 4 + 1]).log2() - luma(px[w / 4 + 3]).log2())
+        };
+        let (d0, b0, s0) = halves(&src.px);
+        let (d1, b1, s1) = halves(&run(Hdr { enabled: true, compression: 100.0, detail: 0.0, ..Default::default() }));
+        assert!(b1 - d1 < 0.4 * (b0 - d0), "range {} -> {}", b0 - d0, b1 - d1);
+        assert!((s1 - s0).abs() < 0.05, "detail kept: {s0} -> {s1}");
+        let (.., s2) = halves(&run(Hdr { enabled: true, compression: 100.0, detail: 100.0, ..Default::default() }));
+        // the edge-aware base keeps a little of the stripes, so +100% nearly doubles them
+        assert!(s2 > 1.6 * s0, "detail +100%: {s0} -> {s2}");
+        // nothing squeezed or added: the photo stays as it is
+        let same = run(Hdr { enabled: true, compression: 0.0, detail: 0.0, ..Default::default() });
+        assert!(same.iter().zip(&src.px).all(|(a, b)| (a[0] - b[0]).abs() < 1e-3 * b[0].max(1.0)));
+        // off by default
+        assert_eq!(render(&src, &Develop::default(), &Opts::default()).px, render(&src, &Develop { hdr: Hdr { compression: 100.0, ..Default::default() }, ..Default::default() }, &Opts::default()).px);
     }
 
     #[test]

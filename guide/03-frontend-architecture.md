@@ -60,7 +60,7 @@ graph TD
   * **Color Mixer**: 8-band HSL sliders (Red, Orange, Yellow, Green, Aqua, Blue, Purple, Magenta).
   * **Point Color**: 3D HSL swatch picker with interactive eyedropper, range sliders, and falloff control.
   * **Color Grading**: 3-way color wheels (Shadows, Midtones, Highlights) + Global wheel with blending and balance.
-  * **Selections (Masks)**: Boolean mask layer list with Add, Subtract, Intersect, Invert, Feather, and Edge Shift controls.
+  * **Selections (Masks)**, listed in the Auto tab under its auto panels: Boolean mask layer list with Add, Subtract, Intersect, Invert, Feather, and Edge Shift controls.
 * **Interactive Crop & Straightener**: On-canvas boundary handles, rotation dial, and rule-of-thirds grid.
 
 ### 2.4 [`Advanced.tsx`](../src/Advanced.tsx) — Optics, Geometry & Technical Tools
@@ -78,13 +78,14 @@ graph TD
 * **Filters & Rotation**: Gaussian blur, Invert, Posterize, Threshold, 90° rotations, and horizontal/vertical flips.
 
 ### 2.6 [`AutoView.tsx`](../src/AutoView.tsx) & [`Auto.tsx`](../src/Auto.tsx) — Auto Engine
-* The Library's right panel runs and tracks the 6 core autonomous functions, one at a time, with its settings stacked to fit the panel:
+* The Library's right panel runs and tracks the 7 core autonomous functions, one at a time, with its settings stacked to fit the panel:
   1. **Catalog & Culling** (sharpness, exposure, burst grouping, rating assignment).
   2. **Non-destructive Editing** (auto white balance, auto tone, style profiles).
   3. **AI Masking** (Subject, Sky, Background, People segmentation).
   4. **AI Denoise & Super Resolution** (wavelet denoise and 2x–4x upscaling).
-  5. **Find Blurred Subjects** (motion blur and missed focus detection).
-  6. **Find Duplicates** (SHA-256 and pHash duplicate grouping).
+  5. **HDR Merge** (exposure brackets grouped by capture time, lined up, deghosted, merged into a 32-bit float TIFF).
+  6. **Find Blurred Subjects** (motion blur and missed focus detection).
+  7. **Find Duplicates** (SHA-256 and pHash duplicate grouping).
 
 ---
 

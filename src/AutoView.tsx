@@ -15,6 +15,7 @@ type Field =
   | { kind: "heading"; label: string; when?: When };
 
 const PROFILES: [string, string][] = [
+  ["type", "By photo type (AI)"],
   ["natural", "Natural"],
   ["neutral", "Neutral"],
   ["vivid", "Vivid"],
@@ -23,6 +24,11 @@ const PROFILES: [string, string][] = [
   ["bw", "B&W"],
   ["film", "Film"],
   ["moody", "Moody"],
+  ["street", "Street"],
+  ["food", "Food"],
+  ["architecture", "Architecture"],
+  ["night", "Night"],
+  ["nature", "Nature & macro"],
 ];
 const DETAIL: [string, string][] = [
   ["fast", "Fast (1024 px)"],
@@ -81,8 +87,10 @@ export const FUNCS: { id: AutoFunction; title: string; short: string; icon: stri
     verb: "Edit",
     blurb:
       "Sets white balance and tone from each photo, then a look; can also straighten, remove colour fringes and reduce noise. Each photo gets one history step you can undo; files are never changed.",
+    ai: (s) => s.profile === "type" && !!s.ai_type,
     fields: [
-      { kind: "select", k: "profile", label: "Look", options: PROFILES, basic: true },
+      { kind: "select", k: "profile", label: "Look", options: PROFILES, basic: true, hint: "By photo type: landscape, portrait, street, food, architecture, night, nature or B&W, each with its own look" },
+      { kind: "check", k: "ai_type", label: "Ask the AI provider what each photo shows", basic: true, when: (s) => s.profile === "type", hint: "One request per photo; off, its keywords and measurements decide" },
       { kind: "slider", k: "strength", label: "Strength", min: 0, max: 100, unit: "%", basic: true },
       { kind: "check", k: "skip_edited", label: "Skip photos I have edited", basic: true },
       { kind: "heading", label: "What changes" },
@@ -208,6 +216,46 @@ export const FUNCS: { id: AutoFunction; title: string; short: string; icon: stri
       },
       { kind: "text", k: "folder", label: "Folder", folder: true, placeholder: "Next to the original", hint: "Photos from Immich or the cloud go to Pictures/OpenLight Enhanced" },
       { kind: "check", k: "copy_edits", label: "Copy the edits, rating and keywords" },
+    ],
+  },
+  {
+    id: "hdr",
+    title: "HDR Merge",
+    short: "HDR",
+    hue: "orange",
+    icon: "M12 4a8 8 0 1 0 0 16z M12 4a8 8 0 0 1 0 16 M3.5 12h5 M15.5 12h5",
+    verb: "Merge",
+    blurb:
+      "Merges each exposure bracket (photos taken a few seconds apart at different exposures) into one high dynamic range photo: lined up, ghosts of moving things removed, written as a new 32-bit float photo (…-HDR.tif). The originals stay untouched.",
+    fields: [
+      {
+        kind: "select",
+        k: "grouping",
+        label: "Merge",
+        basic: true,
+        options: [
+          ["brackets", "Each bracket among the photos"],
+          ["all", "All the photos as one bracket"],
+        ],
+      },
+      { kind: "slider", k: "bracket_seconds", label: "A bracket is taken within", min: 1, max: 30, unit: " s", basic: true, when: (s) => s.grouping === "brackets", hint: "Between one shot and the next" },
+      {
+        kind: "select",
+        k: "deghost",
+        label: "Deghost",
+        basic: true,
+        options: [
+          ["off", "Off"],
+          ["low", "Low"],
+          ["medium", "Medium"],
+          ["high", "High"],
+        ],
+        hint: "What moved between shots (people, leaves, water) comes from the middle exposure alone",
+      },
+      { kind: "heading", label: "Merging" },
+      { kind: "check", k: "align", label: "Line up handheld shots" },
+      { kind: "check", k: "auto_tone", label: "Start with auto white balance and tone" },
+      { kind: "text", k: "folder", label: "Folder", folder: true, placeholder: "Next to the photos", hint: "Photos from Immich or the cloud go to Pictures/OpenLight Enhanced" },
     ],
   },
   {
@@ -374,6 +422,8 @@ function summary(r: AutoResult): string {
       return `${n("masks")} selections on ${n("total")} photos`;
     case "enhance":
       return `${n("made")} enhanced copies of ${n("total")}`;
+    case "hdr":
+      return `${n("made")} HDR photos from ${n("brackets")} brackets of ${n("total")} photos`;
     case "blur":
       return `${n("found")} of ${n("total")} have a blurred subject`;
     case "duplicates":
@@ -396,6 +446,7 @@ function resultIds(r: AutoResult): number[] {
     case "duplicates":
       return rows.flatMap((x) => x.ids as number[]);
     case "enhance":
+    case "hdr":
       return rows.flatMap((x) => (x.new_id ? [x.new_id as number] : []));
     default:
       return rows.map((x) => x.id as number);
@@ -704,7 +755,7 @@ function Results({ r, photos, filter, setFilter, onShow, title }: { r: AutoResul
                   {name(x)}
                   <Detail r={r} x={x} />
                 </div>
-                {r.function === "enhance" && x.new_id != null && <Thumb photo={photos[x.new_id as number]} ring="ring-1 ring-emerald-600" />}
+                {(r.function === "enhance" || r.function === "hdr") && x.new_id != null && <Thumb photo={photos[x.new_id as number]} ring="ring-1 ring-emerald-600" />}
               </div>
             ))}
         {r.function !== "duplicates" && !shown.length && <p className="text-neutral-500">Nothing to show.</p>}
@@ -790,6 +841,12 @@ function Detail({ r, x }: { r: AutoResult; x: Rec }) {
       return (
         <span className={`truncate ${small}`} title={String(x.output ?? "")}>
           {String(x.size ?? "")} · {String(x.output ?? "")}
+        </span>
+      );
+    case "hdr":
+      return (
+        <span className={`truncate ${small}`} title={String(x.output ?? "")}>
+          {String(x.frames)} exposures ({String(x.evs)}){Number(x.aligned_px) ? ` · lined up by ${String(x.aligned_px)} px` : ""} · {String(x.output ?? "")}
         </span>
       );
     default:

@@ -12,6 +12,11 @@ const PROFILES: [string, string, string][] = [
   ["bw", "B&W", "Black and white with extra contrast"],
   ["film", "Film", "Matte blacks, teal shadows, warm highlights and grain"],
   ["moody", "Moody", "Darker and muted, with a vignette"],
+  ["street", "Street", "Muted and cinematic: teal shadows, warm highlights, matte blacks, light grain"],
+  ["food", "Food", "Bright and warm, open shadows, rich reds, oranges and greens"],
+  ["architecture", "Architecture", "Clean and cool: crisp lines, even tones, pastel skies, little colour"],
+  ["night", "Night", "Teal and orange city light, neon held back, deep blacks"],
+  ["nature", "Nature", "Macro, flowers and wildlife: lush greens, fine detail, soft vignette"],
 ];
 const sub = "mb-1 mt-3 text-[10px] uppercase tracking-wider text-neutral-500";
 const hint = "mt-1 text-[10px] text-neutral-500";
@@ -21,6 +26,8 @@ const hint = "mt-1 text-[10px] text-neutral-500";
 export function AutoTab(p: {
   dev: Dev;
   profile: (id: string, label: string) => Promise<void>;
+  /** the profile for what the photo shows (landscape, portrait, food…), picked by the AI provider */
+  byType: () => Promise<void>;
   whiteBalance: () => Promise<void>;
   tone: () => Promise<void>;
   levels: () => Promise<void>;
@@ -73,9 +80,12 @@ export function AutoTab(p: {
   return (
     <>
       <Panel title="Auto fine tune">
-        {run("auto", "✦ Auto", () => p.profile("natural", "Natural"), "White balance and tone measured on the photo", "w-full")}
+        <div className="grid grid-cols-2 gap-1">
+          {run("auto", "✦ Auto", () => p.profile("natural", "Natural"), "White balance and tone measured on the photo")}
+          {run("type", "✦ By photo type", p.byType, "The AI provider tells what the photo shows (landscape, portrait, street, food, architecture, night, nature, B&W), then tunes it to that type's profile")}
+        </div>
         <div className={sub}>To a profile</div>
-        <div className="grid grid-cols-4 gap-1">{PROFILES.map(([id, label, title]) => run(id, label, () => p.profile(id, label), title))}</div>
+        <div className="grid grid-cols-3 gap-1">{PROFILES.map(([id, label, title]) => run(id, label, () => p.profile(id, label), title))}</div>
         <p className={hint}>Sets white balance, Basic and presence from the photo, then the profile's look. Your other edits stay.</p>
         <div className={sub}>One at a time</div>
         <div className="grid grid-cols-2 gap-1">
