@@ -435,9 +435,28 @@ export function Develop(p: Props) {
     }
   }, []);
 
+  // a tuning step in progress: its label shows over the photo until the photo is drawn with its result;
+  // `slow`: a render has taken over 250 ms (e.g. dragging HDR toning), shown as a small badge
+  const [working, setWorking] = useState<string | null>(null);
+  const [slow, setSlow] = useState(false);
+  const settle = useRef(false);
+  const waitFor = async <T,>(label: string, f: () => Promise<T>): Promise<T> => {
+    setWorking(label);
+    try {
+      return await f();
+    } finally {
+      settle.current = true;
+      // the step's render starts once React applies it; if nothing changed, no render comes
+      setTimeout(() => {
+        if (!busy.current && settle.current) (settle.current = false, setWorking(null));
+      }, 50);
+    }
+  };
+
   const pump = useCallback(async () => {
     if (busy.current) return;
     busy.current = true;
+    const slowTimer = setTimeout(() => setSlow(true), 250);
     while (job.current) {
       const j = job.current;
       job.current = null;
@@ -449,7 +468,10 @@ export function Develop(p: Props) {
       }
     }
     busy.current = false;
+    clearTimeout(slowTimer);
+    setSlow(false);
     setLoading(false);
+    if (settle.current) (settle.current = false, setWorking(null));
   }, []);
 
   const mask = dev && maskSel != null ? dev.masks[maskSel] : null;
@@ -768,12 +790,14 @@ export function Develop(p: Props) {
   const upright = async (mode: string, d: Dev | null = dev) => {
     if (id == null || !d) return;
     setError(null);
-    try {
-      const t = await api.upright(id, d, mode);
-      if (idRef.current === id && devRef.current) change({ ...devRef.current, transform: t }, `Upright: ${mode}`);
-    } catch (e) {
-      setError(`Upright: ${e}`);
-    }
+    await waitFor(mode === "level" ? "Straightening" : `Upright: ${mode}`, async () => {
+      try {
+        const t = await api.upright(id, d, mode);
+        if (idRef.current === id && devRef.current) change({ ...devRef.current, transform: t }, `Upright: ${mode}`);
+      } catch (e) {
+        setError(`Upright: ${e}`);
+      }
+    });
   };
   // ✦ AI fine tune levels the horizon first (Upright Level), as its own step; not when the photo has a
   // straighten, Upright, rotate or perspective of its own, no straight edges, or a tilt under 0.25°
@@ -791,19 +815,22 @@ export function Develop(p: Props) {
   const autoCa = async () => {
     if (id == null) return;
     setError(null);
-    try {
-      const [rc, by] = await api.autoCa(id);
-      const cur = devRef.current;
-      if (idRef.current === id && cur) change({ ...cur, lens: { ...cur.lens, ca_red_cyan: rc, ca_blue_yellow: by } }, "Auto chromatic aberration");
-    } catch (e) {
-      setError(`Chromatic aberration: ${e}`);
-    }
+    await waitFor("Chromatic aberration", async () => {
+      try {
+        const [rc, by] = await api.autoCa(id);
+        const cur = devRef.current;
+        if (idRef.current === id && cur) change({ ...cur, lens: { ...cur.lens, ca_red_cyan: rc, ca_blue_yellow: by } }, "Auto chromatic aberration");
+      } catch (e) {
+        setError(`Chromatic aberration: ${e}`);
+      }
+    });
   };
   // Pro: Photoshop's Auto Levels (each channel's black / white point, 0.1% clipped), measured
   // on a render without the current levels so pressing it again does not undo it
   const autoLevels = async () => {
     if (id == null || !dev) return;
     setError(null);
+    await waitFor("Auto levels", async () => {
     try {
       const { hist: h } = await api.render(id, { ...dev, levels: p.defaults.levels }, false, null);
       const cur = devRef.current;
@@ -819,6 +846,7 @@ export function Develop(p: Props) {
     } catch (e) {
       setError(`Auto levels: ${e}`);
     }
+    });
   };
   // Spot removal: the engine picks a matching source area and commits the heal
   const healSpot = async (x: number, y: number) => {
@@ -1179,13 +1207,15 @@ export function Develop(p: Props) {
   const measured = async <R,>(label: string, get: (id: number, cur: Dev) => Promise<R>, put: (cur: Dev, r: R) => Dev) => {
     if (id == null || !devRef.current) return;
     setError(null);
-    try {
-      const r = await get(id, devRef.current);
-      const cur = devRef.current;
-      if (idRef.current === id && cur) change(put(cur, r), label);
-    } catch (e) {
-      setError(`${label}: ${e}`);
-    }
+    await waitFor(label, async () => {
+      try {
+        const r = await get(id, devRef.current!);
+        const cur = devRef.current;
+        if (idRef.current === id && cur) change(put(cur, r), label);
+      } catch (e) {
+        setError(`${label}: ${e}`);
+      }
+    });
   };
   const autoTone = () => measured("Auto tone", api.autoTone, (cur, basic_tone) => ({ ...cur, basic_tone }));
   const autoHdr = () => measured("Auto HDR toning", (i) => api.autoHdr(i), (cur, hdr) => ({ ...cur, hdr }));
@@ -1195,7 +1225,7 @@ export function Develop(p: Props) {
   const autoByType = async () => {
     if (id == null) return;
     try {
-      const [type, err] = await api.photoType(id);
+      const [type, err] = await waitFor("Finding the photo type", () => api.photoType(id));
       await autoProfile(type, `${type} (by photo type)`);
       if (err) setError(`The AI could not tell the photo type, so its keywords did: ${err}`);
     } catch (e) {
@@ -1207,12 +1237,14 @@ export function Develop(p: Props) {
     if (id == null) return;
     await flush();
     setError(null);
-    try {
-      const d = await api.removeSelection(id, i);
-      if (idRef.current === id) (setDev(d), setMaskSel(null), refreshHistory(id));
-    } catch (e) {
-      setError(`Remove: ${e}`);
-    }
+    await waitFor("Removing", async () => {
+      try {
+        const d = await api.removeSelection(id, i);
+        if (idRef.current === id) (setDev(d), setMaskSel(null), refreshHistory(id));
+      } catch (e) {
+        setError(`Remove: ${e}`);
+      }
+    });
   };
 
   const swatch = T && swatchSel != null ? T.point_color[swatchSel] : null;
@@ -1783,6 +1815,26 @@ export function Develop(p: Props) {
               </div>
               <p className="text-xs font-semibold text-neutral-200 mb-1">Demosaicing RAW Buffer…</p>
               <p className="text-[10px] text-neutral-400 font-mono">32-bit Rec.2020 floating-point pipeline</p>
+            </div>
+          )}
+          {working && !loading && (
+            <div className="absolute inset-0 z-30 flex items-center justify-center bg-neutral-950/35 select-none" aria-live="polite">
+              <div className="flex items-center gap-2.5 rounded-xl border border-neutral-700/80 bg-neutral-900/90 px-4 py-2.5 shadow-xl backdrop-blur-md">
+                <svg className="h-4 w-4 animate-spin text-sky-400" viewBox="0 0 24 24" fill="none">
+                  <circle className="opacity-20" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2.5" />
+                  <path className="opacity-90" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                </svg>
+                <span className="text-xs font-medium text-neutral-100">{working}…</span>
+              </div>
+            </div>
+          )}
+          {slow && !working && !loading && (
+            <div className="pointer-events-none absolute right-3 top-3 z-30 flex items-center gap-1.5 rounded-full border border-white/10 bg-neutral-900/85 px-2.5 py-1 text-[10px] text-neutral-200 shadow-md backdrop-blur-md" aria-live="polite">
+              <svg className="h-3 w-3 animate-spin text-sky-400" viewBox="0 0 24 24" fill="none">
+                <circle className="opacity-20" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" />
+                <path className="opacity-90" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+              </svg>
+              Rendering…
             </div>
           )}
           {error && (
