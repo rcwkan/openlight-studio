@@ -449,3 +449,40 @@ input[type="range"].ol-range::-webkit-slider-thumb {
 .theme-accent-subtle {
   background-color: var(--theme-accent-subtle);
 }
+
+/* Edited photo badge: high-visibility adjustment indicator */
+.badge-edited {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 1.5px 5.5px;
+  font-size: 10px;
+  font-weight: 700;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  line-height: 1;
+  border-radius: 4px;
+  background-color: rgba(245, 158, 11, 0.22);
+  color: #fbbf24;
+  border: 1px solid rgba(245, 158, 11, 0.5);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  user-select: none;
+  letter-spacing: -0.02em;
+}
+
+:root[data-theme="light"] .badge-edited,
+[data-theme="light"] .badge-edited {
+  background-color: #fef3c7;
+  color: #92400e;
+  border: 1px solid #f59e0b;
+  box-shadow: 0 1px 2px rgba(217, 119, 6, 0.2);
+}
+
+@media (prefers-color-scheme: light) {
+  :root[data-theme="system"] .badge-edited {
+    background-color: #fef3c7;
+    color: #92400e;
+    border: 1px solid #f59e0b;
+    box-shadow: 0 1px 2px rgba(217, 119, 6, 0.2);
+  }
+}

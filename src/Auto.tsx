@@ -32,6 +32,7 @@ export function AutoTab(p: {
   tone: () => Promise<void>;
   levels: () => Promise<void>;
   ca: () => Promise<void>;
+  hdr?: () => Promise<void>;
   upright: (mode: string) => Promise<void>;
   /** level a tilted horizon (Upright Level) as its own step; ✦ AI fine tune runs it first */
   level: () => Promise<void>;
@@ -93,6 +94,7 @@ export function AutoTab(p: {
           {run("tone", "Tone", p.tone, "Exposure, contrast, highlights, shadows, whites and blacks")}
           {run("levels", "Levels", p.levels, "Each channel's black and white point (Pro › Levels)")}
           {run("ca", "Chromatic aberration", p.ca, "Line up the colour fringes along edges (Advanced › Lens corrections)")}
+          {p.hdr && run("hdr", "HDR toning", p.hdr, "Optimize HDR toning for scene dynamic range (Pro › HDR toning)")}
         </div>
       </Panel>
 

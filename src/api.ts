@@ -383,6 +383,8 @@ export const api = {
   autoWhiteBalance: (id: number) => invoke<Develop["white_balance"]>("auto_white_balance", { id }),
   /** under develop's white balance */
   autoTone: (id: number, develop: Develop) => invoke<Develop["basic_tone"]>("auto_tone", { id, develop }),
+  /** Auto HDR toning from image dynamic range analysis */
+  autoHdr: (id: number) => invoke<Develop["hdr"]>("auto_hdr", { id }),
   /** Heal away the AI-selected objects of selection `mask` and drop it. Commits one history step. */
   removeSelection: (id: number, mask: number) => invoke<Develop>("remove_selection", { id, mask }),
   save: (id: number, develop: Develop, label: string) => invoke<Develop>("save_develop", { id, develop, label }),

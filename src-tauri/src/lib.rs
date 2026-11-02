@@ -572,6 +572,12 @@ fn auto_tone(core: St, id: i64, develop: Develop) -> Result<develop::BasicTone, 
     Ok(develop::auto_tone(&*core.proxy(&core.photo(id)?.path)?, &develop.white_balance))
 }
 
+/// Auto HDR toning parameters for the photo proxy.
+#[tauri::command(async)]
+fn auto_hdr(core: St, id: i64) -> Result<develop::Hdr, String> {
+    Ok(develop::auto_hdr(&*core.proxy(&core.photo(id)?.path)?))
+}
+
 /// Removes the objects in selection `mask` (its AI outlines), each healed from a matching nearby area,
 /// and drops the selection; one history step.
 #[tauri::command(async)]
@@ -934,6 +940,7 @@ pub fn run() {
             photo_type,
             auto_white_balance,
             auto_tone,
+            auto_hdr,
             remove_selection,
             save_develop,
             get_history,
