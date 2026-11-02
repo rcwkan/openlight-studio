@@ -12,6 +12,8 @@ node_modules
 dist
 dist-ssr
 dist-packages/
+dist-release/
+.wrangler/
 *.deb
 *.dmg
 *.local
