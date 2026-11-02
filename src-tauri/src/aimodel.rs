@@ -60,7 +60,7 @@ const MODELS: &[Spec] = &[
             ("scunet_color_real_psnr.onnx.data", 73_138_176, "98825ea1210b641c71e5f052f582c70c49fd44b35387ebe2c034268c17df3feb"),
         ],
         min_vram_mb: 3000,
-        rank: 30,
+        rank: if cfg!(target_os = "macos") { 5 } else { 30 }, // CoreML cannot run its attention layers: 9 GB of RAM per 256 px tile on the CPU
         multiple: 64,
         dims: Some(["batch", "height", "width"]),
         gpu: true,
@@ -78,7 +78,7 @@ const MODELS: &[Spec] = &[
             ("scunet_color_real_gan.onnx.data", 73_138_176, "1e8d582046abf4a773215445c248d0f54751a57d69d2a2312ec59f1150256b79"),
         ],
         min_vram_mb: 3000,
-        rank: 20,
+        rank: if cfg!(target_os = "macos") { 4 } else { 20 },
         multiple: 64,
         dims: Some(["batch", "height", "width"]),
         gpu: true,
@@ -95,7 +95,7 @@ const MODELS: &[Spec] = &[
         min_vram_mb: 1500,
         rank: 10,
         multiple: 32,
-        dims: None,
+        dims: Some(["", "h", "w"]),
         gpu: true,
         unzip: false,
     },
@@ -161,6 +161,49 @@ pub struct Hardware {
     pub device: String,
 }
 
+/// ONNX Runtime execution provider: DirectML on Windows, CoreML (GPU + Neural Engine) on Apple Silicon.
+#[cfg(target_os = "macos")]
+pub const ACCEL_NAME: &str = "CoreML: GPU + Neural Engine";
+#[cfg(not(target_os = "macos"))]
+pub const ACCEL_NAME: &str = "DirectML";
+
+#[cfg(target_os = "macos")]
+pub fn accel(key: &str) -> ort::ep::ExecutionProviderDispatch {
+    use ort::ep::coreml::{ComputeUnits, ModelFormat};
+    // OPENLIGHT_COREML=all|ane|gpu|cpu picks the compute units (default: all)
+    let units = match std::env::var("OPENLIGHT_COREML").as_deref() {
+        Ok("ane") => ComputeUnits::CPUAndNeuralEngine,
+        Ok("gpu") => ComputeUnits::CPUAndGPU,
+        Ok("cpu") => ComputeUnits::CPUOnly,
+        _ => ComputeUnits::All,
+    };
+    // the compiled model is cached, so only the first run pays the CoreML compile. CoreML keys the cache on the
+    // model alone, so each input shape needs its own folder or it reuses a stale one ("output_features has no value")
+    let cache = crate::data_dir().join("coreml-cache").join(key);
+    ep::CoreML::default()
+        .with_model_format(ModelFormat::MLProgram)
+        .with_compute_units(units)
+        .with_static_input_shapes(true)
+        .with_model_cache_dir(cache.to_string_lossy())
+        .build()
+}
+#[cfg(not(target_os = "macos"))]
+pub fn accel(_key: &str) -> ort::ep::ExecutionProviderDispatch {
+    ep::DirectML::default().build()
+}
+
+/// Apple Silicon shares one memory pool between CPU, GPU and Neural Engine, so system RAM is the model budget.
+#[cfg(target_os = "macos")]
+fn unified_memory_mb() -> Option<u32> {
+    let o = Command::new("sysctl").args(["-n", "hw.memsize"]).output().ok()?;
+    let bytes: u64 = String::from_utf8_lossy(&o.stdout).trim().parse().ok()?;
+    Some((bytes / 1_048_576) as u32)
+}
+#[cfg(not(target_os = "macos"))]
+fn unified_memory_mb() -> Option<u32> {
+    None
+}
+
 /// The GPU's name and memory. Memory comes from `nvidia-smi` (NVIDIA); other vendors report none, which
 /// the recommendation treats as a small GPU.
 pub fn hardware() -> Hardware {
@@ -173,8 +216,8 @@ pub fn hardware() -> Hardware {
         })
         .unzip();
     let gpu = name.or_else(crate::gpu::detect);
-    let device = if gpu.is_some() { "GPU (DirectML)".to_string() } else { "CPU".to_string() };
-    Hardware { gpu, vram_mb: vram.flatten(), device }
+    let device = if gpu.is_some() { format!("GPU ({ACCEL_NAME})") } else { "CPU".to_string() };
+    Hardware { gpu, vram_mb: vram.flatten().or_else(unified_memory_mb), device }
 }
 
 /// Tile edge for the GPU memory. Bigger tiles have fewer seams, but DirectML slows down 20x and returns
@@ -374,15 +417,27 @@ fn open_session(path: &Path, dims: Option<[&str; 3]>, tile: usize, gpu: bool) ->
     // DirectML needs sequential execution and no memory-pattern reuse; without a usable GPU it falls back to the CPU
     let b = Session::builder(env).map_err(|e| fail(e.to_string()))?;
     // OPENLIGHT_AI_CPU=1 skips the GPU (to tell a GPU-driver problem from a model problem)
-    let b = if !gpu || std::env::var_os("OPENLIGHT_AI_CPU").is_some() { b } else { b.with_execution_providers([ep::DirectML::default().build()]).map_err(|e| fail(e.to_string()))? };
+    let b = if !gpu || std::env::var_os("OPENLIGHT_AI_CPU").is_some() { b } else { b.with_execution_providers([accel(&format!("{}-{tile}", path.file_stem().and_then(|f| f.to_str()).unwrap_or("model")))]).map_err(|e| fail(e.to_string()))? };
     let b = b.with_memory_pattern(false).map_err(|e| fail(e.to_string()))?;
+    // on Apple Silicon the efficiency cores straggle statically-split work: use the performance cores only
+    let b = match perf_cores() { Some(n) => b.with_intra_threads(n).map_err(|e| fail(e.to_string()))?, None => b };
     let mut b = b.with_parallel_execution(false).map_err(|e| fail(e.to_string()))?;
     if let Some([batch, height, width]) = dims {
-        for (name, size) in [(batch, 1), (height, tile as i64), (width, tile as i64)] {
+        for (name, size) in [(batch, 1), (height, tile as i64), (width, tile as i64)].into_iter().filter(|(n, _)| !n.is_empty()) {
             b = b.with_dimension_override(name, size).map_err(|e| fail(e.to_string()))?;
         }
     }
     b.commit_from_file(path).map_err(|e| fail(e.to_string()))
+}
+
+#[cfg(target_os = "macos")]
+fn perf_cores() -> Option<usize> {
+    let o = Command::new("sysctl").args(["-n", "hw.perflevel0.physicalcpu"]).output().ok()?;
+    String::from_utf8_lossy(&o.stdout).trim().parse().ok().filter(|&n| n > 0)
+}
+#[cfg(not(target_os = "macos"))]
+fn perf_cores() -> Option<usize> {
+    None
 }
 
 /// Periodic reflection of `i` into 0..n.
@@ -829,3 +884,4 @@ sd15-inpaint: mean error in the hole {err:.3} (was {:.3}) in {:?}", 0.95 - 0.45,
         eprintln!("\n{id} downloaded, verified and unpacked in {:?}", t0.elapsed());
     }
 }
+

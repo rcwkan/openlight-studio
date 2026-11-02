@@ -4,7 +4,7 @@
 //! ponytail: SD 1.5 only (512 px, 4-channel latents); SD 2 / SDXL need a different text encoder and scale.
 
 use half::f16;
-use ort::{ep, environment::Environment, session::Session, value::Tensor};
+use ort::{environment::Environment, session::Session, value::Tensor};
 use regex::Regex;
 use std::{collections::HashMap, fs, path::Path, sync::OnceLock};
 
@@ -152,7 +152,7 @@ pub struct Sd {
 fn open(env: &Environment, path: &Path, fixed: &[(&str, i64)]) -> Result<Session, String> {
     let fail = |e: String| format!("could not load {}: {e}", path.display());
     let b = Session::builder(env).map_err(|e| fail(e.to_string()))?;
-    let b = b.with_execution_providers([ep::DirectML::default().build()]).map_err(|e| fail(e.to_string()))?;
+    let b = b.with_execution_providers([crate::aimodel::accel(&format!("{}-{}", path.file_stem().and_then(|f| f.to_str()).unwrap_or("sd"), fixed.iter().map(|(_, v)| v.to_string()).collect::<Vec<_>>().join("x")))]).map_err(|e| fail(e.to_string()))?;
     let b = b.with_memory_pattern(false).map_err(|e| fail(e.to_string()))?;
     let mut b = b.with_parallel_execution(false).map_err(|e| fail(e.to_string()))?;
     // fixed input shapes keep DirectML from crashing on dynamic ones

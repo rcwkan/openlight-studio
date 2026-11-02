@@ -1,6 +1,6 @@
 [package]
 name = "openlight-studio"
-version = "0.2.0"
+version = "0.2.1"
 description = "OpenLight Studio: non-destructive RAW processor and DAM with a built-in MCP server"
 authors = ["OpenLight Studio contributors"]
 license = "MIT"
@@ -39,11 +39,16 @@ ring = "0.17"
 wgpu = "30.0.1"
 pollster = "1.0.1"
 bytemuck = { version = "1.25.2", features = ["derive"] }
-ort = { version = "=2.0.0-rc.15", features = ["directml", "half"] }
+ort = { version = "=2.0.0-rc.15", features = ["half"] }
 half = "2.7.1"
 regex = "1.13.1"
 zip = { version = "9.2.2", default-features = false, features = ["deflate"] }
 
+[target.'cfg(windows)'.dependencies]
+ort = { version = "=2.0.0-rc.15", features = ["directml", "half"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+ort = { version = "=2.0.0-rc.15", features = ["coreml", "half"] }
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]
