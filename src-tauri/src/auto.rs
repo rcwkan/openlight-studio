@@ -4,7 +4,7 @@
 //! returns a summary with a row per photo (or per group of duplicates) for the UI.
 
 use crate::{
-    Core, ai,
+    Core, ai, aimodel,
     catalog::{self, Culling, Photo},
     develop::{self, Develop, LocalAdjust, Mask, MaskComponent, es},
     enhance, mcp, remote,
@@ -168,9 +168,18 @@ pub struct EnhanceSettings {
     pub scale: f32,
     pub sharpen: f32,
     pub max_megapixels: f32,
-    /// builtin | command (an external AI engine such as Real-ESRGAN, see `command`)
+    /// builtin | ai (a downloaded denoise model) | command (an external AI engine such as Real-ESRGAN, see `command`)
     pub engine: String,
     pub command: String,
+    /// The AI denoise model (see aimodel.rs) and how much of its result is blended in, 0-100; used by engine "ai".
+    pub ai_model: String,
+    pub ai_strength: f32,
+    /// Object removal (engine "ai", an inpaint or generate model): the brush strokes painted over the object, snapped
+    /// to its edges, and how many pixels the hole grows. Empty: no removal.
+    pub remove_strokes: Vec<crate::brush::Stroke>,
+    pub remove_grow: f32,
+    /// What to paint in (generative fill only; empty: whatever fits the surroundings).
+    pub remove_prompt: String,
     /// auto (32-bit float for RAW files, else 16-bit) | float | tiff16
     pub format: String,
     /// Where the new files go; empty: next to the original (Pictures/OpenLight Enhanced for remote photos).
@@ -191,6 +200,11 @@ impl Default for EnhanceSettings {
             max_megapixels: 48.0,
             engine: "builtin".into(),
             command: "realesrgan-ncnn-vulkan -i {{INPUT}} -o {{OUTPUT}} -s {{SCALE}}".into(),
+            ai_model: String::new(),
+            ai_strength: 80.0,
+            remove_strokes: vec![],
+            remove_grow: 6.0,
+            remove_prompt: String::new(),
             format: "auto".into(),
             folder: String::new(),
             copy_edits: true,
@@ -1328,7 +1342,8 @@ fn add_master(core: &Arc<Core>, p: &Photo, out: &Path, size: (usize, usize), d: 
 }
 
 pub fn enhance(core: &Arc<Core>, ids: &[i64], s: &EnhanceSettings, job: &Job) -> Result<Value, String> {
-    if !s.denoise && !s.super_resolution {
+    let removing = s.engine == "ai" && !s.remove_strokes.is_empty();
+    if !s.denoise && !s.super_resolution && !removing {
         return Err("choose Denoise, Super Resolution or both".into());
     }
     let photos = masters(core, ids)?;
@@ -1355,11 +1370,35 @@ pub fn enhance(core: &Arc<Core>, ids: &[i64], s: &EnhanceSettings, job: &Job) ->
                     .and_then(|_| develop::load(&output, None));
                 let _ = fs::remove_dir_all(&dir);
                 r?
+            } else if s.engine == "ai" {
+                let img = if removing {
+                    // the selection the user confirmed, found again on the same preview frame, then at full size
+                    let proxy = core.proxy(&p.path)?;
+                    let alpha = crate::brush::snap(&proxy, &s.remove_strokes)?;
+                    let hole = aimodel::hole_from_alpha(&alpha, proxy.w, proxy.h, img.w, img.h).ok_or("nothing is selected to remove")?;
+                    job.progress("Removing the object", 0, 1);
+                    aimodel::inpaint(&core.dir, &s.ai_model, img, &hole, s.remove_grow.clamp(0.0, 40.0).round() as usize, &s.remove_prompt, &|done, total| {
+                        job.progress("Filling in", done, total);
+                        !job.cancelled()
+                    })?
+                } else {
+                    img
+                };
+                let img = if s.denoise {
+                    let vram = aimodel::hardware().vram_mb;
+                    aimodel::denoise(&core.dir, &s.ai_model, img, s.ai_strength, vram, &|done, total| {
+                        job.progress("AI denoising", done, total);
+                        !job.cancelled()
+                    })?
+                } else {
+                    img
+                };
+                if scaled { enhance::upscale(img, scale, s.sharpen) } else { img }
             } else {
                 let img = if s.denoise { enhance::denoise(img, s.strength, s.detail, s.color) } else { img };
                 if scaled { enhance::upscale(img, scale, s.sharpen) } else { img }
             };
-            let out = enhanced_path(&enhanced_dir(&s.folder, p)?, p, &format!("-Enhanced{}{}", if s.denoise { "-NR" } else { "" }, if scaled { "-SR" } else { "" }));
+            let out = enhanced_path(&enhanced_dir(&s.folder, p)?, p, &format!("-Enhanced{}{}{}", if s.denoise { "-NR" } else { "" }, if scaled { "-SR" } else { "" }, if removing { "-Removed" } else { "" }));
             let float = s.format == "float" || (s.format == "auto" && develop::is_raw(&file));
             if float {
                 develop::export_linear(&img, &out)?;

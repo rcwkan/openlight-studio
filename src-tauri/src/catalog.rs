@@ -146,8 +146,9 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<Photo> {
 #[derive(Deserialize, Default, Debug)]
 #[serde(default)]
 pub struct Filter {
-    /// Folder and its subfolders.
+    /// Folder and its subfolders (only the folder itself with `flat`).
     pub folder: Option<String>,
+    pub flat: bool,
     /// Every word must match filename, camera, lens or keywords.
     pub text: Option<String>,
     /// Any word may match (keyword fallback for semantic queries).
@@ -188,7 +189,10 @@ pub fn flag_value(s: &str) -> Result<i64, String> {
 pub fn query(c: &Connection, f: &Filter) -> Result<Vec<Photo>, String> {
     let mut sql = format!("SELECT {COLS} FROM photos WHERE 1=1");
     let mut args: Vec<Sql> = vec![];
-    if let Some(folder) = &f.folder {
+    if let (Some(folder), true) = (&f.folder, f.flat) {
+        sql += " AND folder = ?";
+        args.push(folder.clone().into());
+    } else if let Some(folder) = &f.folder {
         let prefix = format!("{folder}{MAIN_SEPARATOR}");
         sql += " AND (folder = ? OR substr(folder, 1, ?) = ?)";
         args.extend([folder.clone().into(), (prefix.chars().count() as i64).into(), prefix.into()]);
@@ -710,8 +714,8 @@ fn read_exif(path: &Path) -> Meta {
 
 pub const THUMB: u32 = 400;
 
-/// Thumbnail plus the (oriented) pixel size of the decoded source. For RAW files the
-/// size comes from the embedded full-size preview.
+/// Thumbnail plus the (oriented) pixel size of the decoded source. For RAW files the thumbnail
+/// comes from the embedded preview, the size from the RAW header (the preview is smaller).
 fn make_thumb(path: &Path, orientation: u8) -> Result<(DynamicImage, u32, u32), String> {
     let img = if develop::is_raw(path) {
         match develop::raw_preview(path) {
@@ -726,7 +730,8 @@ fn make_thumb(path: &Path, orientation: u8) -> Result<(DynamicImage, u32, u32), 
     } else {
         develop::displayable(develop::decode_std(path)?)
     };
-    Ok((img.thumbnail(THUMB, THUMB), img.width(), img.height()))
+    let (w, h) = if develop::is_raw(path) { develop::raw_size(path).unwrap_or((img.width(), img.height())) } else { (img.width(), img.height()) };
+    Ok((img.thumbnail(THUMB, THUMB), w, h))
 }
 
 pub fn to_dynamic(img: &develop::Img) -> DynamicImage {
@@ -740,7 +745,7 @@ pub fn write_jpeg(path: &Path, img: &DynamicImage) -> Result<(), String> {
     img.to_rgb8().write_with_encoder(image::codecs::jpeg::JpegEncoder::new_with_quality(file, 82)).map_err(es)
 }
 
-fn scan(dir: &Path, out: &mut Vec<PathBuf>) {
+fn scan(dir: &Path, out: &mut Vec<PathBuf>, deep: bool) {
     let Ok(entries) = fs::read_dir(dir) else { return };
     for e in entries.flatten() {
         let p = e.path();
@@ -748,7 +753,9 @@ fn scan(dir: &Path, out: &mut Vec<PathBuf>) {
             continue;
         }
         if p.is_dir() {
-            scan(&p, out);
+            if deep {
+                scan(&p, out, deep);
+            }
         } else if develop::is_supported(&p) {
             out.push(p);
         }
@@ -758,8 +765,33 @@ fn scan(dir: &Path, out: &mut Vec<PathBuf>) {
 /// Classic catalog import: files stay where they are. Returns the new photos' ids.
 pub fn import(core: &Core, folder: &Path, progress: &(dyn Fn(usize, usize) + Sync)) -> Result<Vec<i64>, String> {
     let mut files = vec![];
-    scan(folder, &mut files);
+    scan(folder, &mut files, true);
     import_files(core, files, progress)
+}
+
+/// Like `import`, but only the photos directly in `folder`: browsing opens one folder level at a time.
+pub fn import_shallow(core: &Core, folder: &Path, progress: &(dyn Fn(usize, usize) + Sync)) -> Result<Vec<i64>, String> {
+    let mut files = vec![];
+    scan(folder, &mut files, false);
+    import_files(core, files, progress)
+}
+
+/// What opening `folder` would show: its subfolders and how many photos are directly in it.
+pub fn browse(folder: &Path) -> Result<(Vec<String>, usize), String> {
+    let (mut dirs, mut images) = (vec![], 0);
+    for e in fs::read_dir(folder).map_err(es)?.flatten() {
+        let p = e.path();
+        if e.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
+        if p.is_dir() {
+            dirs.push(p.to_string_lossy().into_owned());
+        } else if develop::is_supported(&p) {
+            images += 1;
+        }
+    }
+    dirs.sort_by_key(|d| d.to_lowercase());
+    Ok((dirs, images))
 }
 
 /// Import these files (those already in the catalog are skipped); returns the new photos' ids.
@@ -771,48 +803,69 @@ pub fn import_files(core: &Core, mut files: Vec<PathBuf>, progress: &(dyn Fn(usi
         rows.collect::<Result<_, _>>().map_err(es)?
     };
     files.retain(|p| !existing.contains(&*p.to_string_lossy()));
-    let metas: Vec<(PathBuf, Meta, Develop)> = files
-        .into_par_iter()
-        .map(|p| {
-            let m = read_exif(&p);
-            let d = read_sidecar(&p).unwrap_or_default();
-            (p, m, d)
-        })
-        .collect();
-    let mut added: Vec<(i64, PathBuf, u8)> = vec![];
-    {
-        let mut c = core.db();
-        let tx = c.transaction().map_err(es)?;
-        for (p, m, d) in &metas {
-            let folder = p.parent().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
-            let name = p.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
-            if let Some(id) = add_photo(&tx, &p.to_string_lossy(), &folder, &name, m, d)? {
-                added.push((id, p.clone(), m.orientation));
-            }
-        }
-        tx.commit().map_err(es)?;
-    }
-    let total = added.len();
+    files.sort();
+    // Photos are added a few at a time, each batch complete (row, thumbnail, size) before the next
+    // starts, so the grid fills and can be worked in while the rest is still being read.
+    // ponytail: 16 threads because reading a network share is waiting, not computing; make it a setting if a NAS needs fewer
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(16).build().map_err(es)?;
+    let total = files.len();
     let done = AtomicUsize::new(0);
-    let dims: Vec<(i64, u32, u32)> = added
-        .par_iter()
-        .filter_map(|(id, p, o)| {
-            let r = make_thumb(p, *o).and_then(|(t, w, h)| write_jpeg(&core.thumb_path(*id), &t).map(|_| (w, h)));
-            progress(done.fetch_add(1, Ordering::Relaxed) + 1, total);
-            match r {
-                Ok((w, h)) => Some((*id, w, h)),
-                Err(e) => {
-                    eprintln!("thumbnail {}: {e}", p.display());
-                    None
+    let mut ids = vec![];
+    let mut rest = &files[..];
+    let mut size = 8;
+    while !rest.is_empty() {
+        let (batch, tail) = rest.split_at(size.min(rest.len()));
+        rest = tail;
+        size = 32;
+        let metas: Vec<(PathBuf, Meta, Develop)> = pool.install(|| {
+            batch
+                .par_iter()
+                .map(|p| {
+                    let m = read_exif(p);
+                    let d = read_sidecar(p).unwrap_or_default();
+                    (p.clone(), m, d)
+                })
+                .collect()
+        });
+        let mut added: Vec<(i64, PathBuf, u8)> = vec![];
+        {
+            let mut c = core.db();
+            let tx = c.transaction().map_err(es)?;
+            for (p, m, d) in &metas {
+                let folder = p.parent().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
+                let name = p.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
+                if let Some(id) = add_photo(&tx, &p.to_string_lossy(), &folder, &name, m, d)? {
+                    added.push((id, p.clone(), m.orientation));
                 }
             }
-        })
-        .collect();
-    let c = core.db();
-    for (id, w, h) in dims {
-        c.execute("UPDATE photos SET width = ?, height = ? WHERE id = ?", params![w, h, id]).map_err(es)?;
+            tx.commit().map_err(es)?;
+        }
+        let dims: Vec<(i64, u32, u32)> = pool.install(|| {
+            added
+                .par_iter()
+                .filter_map(|(id, p, o)| {
+                    let r = make_thumb(p, *o).and_then(|(t, w, h)| write_jpeg(&core.thumb_path(*id), &t).map(|_| (w, h)));
+                    progress(done.fetch_add(1, Ordering::Relaxed) + 1, total);
+                    match r {
+                        Ok((w, h)) => Some((*id, w, h)),
+                        Err(e) => {
+                            eprintln!("thumbnail {}: {e}", p.display());
+                            None
+                        }
+                    }
+                })
+                .collect()
+        });
+        {
+            let c = core.db();
+            for (id, w, h) in dims {
+                c.execute("UPDATE photos SET width = ?, height = ? WHERE id = ?", params![w, h, id]).map_err(es)?;
+            }
+        }
+        ids.extend(added.into_iter().map(|a| a.0));
+        core.emit("catalog-changed", serde_json::json!({}));
     }
-    Ok(added.into_iter().map(|a| a.0).collect())
+    Ok(ids)
 }
 
 #[cfg(test)]
