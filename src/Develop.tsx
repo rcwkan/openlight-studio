@@ -1,5 +1,5 @@
 import { listen } from "@tauri-apps/api/event";
-import { Fragment, ReactNode, useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AdvancedTab } from "./Advanced";
 import { Log } from "./Agent";
 import { AiTab } from "./AiDenoise";
@@ -20,7 +20,10 @@ export interface AiTaskState {
   userClosedDetails?: boolean;
 }
 
-type RTab = "adjust" | "selections" | "advanced" | "pro" | "ai" | "auto";
+type RTab = "adjust" | "advanced" | "pro" | "ai" | "auto";
+
+export type CompareMode = "off" | "side-by-side" | "split";
+export type CompareOrientation = "horizontal" | "vertical";
 
 interface PhotoSessionCache {
   dev: Dev;
@@ -33,6 +36,9 @@ interface PhotoSessionCache {
   rtab: RTab;
   before: boolean;
   overlay: boolean;
+  compareMode?: CompareMode;
+  compareOrientation?: CompareOrientation;
+  splitPos?: number;
 }
 
 type Props = {
@@ -160,6 +166,9 @@ export function Develop(p: Props) {
   const [hist, setHist] = useState<Uint32Array[] | null>(null);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [before, setBefore] = useState(false);
+  const [compareMode, setCompareMode] = useState<CompareMode>("off");
+  const [compareOrientation, setCompareOrientation] = useState<CompareOrientation>("horizontal");
+  const [splitPos, setSplitPos] = useState(50);
   const [tool, setTool] = useState<Tool>("none");
   const [aspect, setAspect] = useState<number | null>(null);
   const [maskSel, setMaskSel] = useState<number | null>(null);
@@ -189,7 +198,13 @@ export function Develop(p: Props) {
   const [saveSuccessMsg, setSaveSuccessMsg] = useState("");
   const panStart = useRef<{ x: number; y: number; px: number; py: number; id: number; moved: boolean } | null>(null);
   const suppressClick = useRef(false);
-  const canvas = useRef<HTMLCanvasElement>(null);
+  const canvas = useRef<HTMLCanvasElement | null>(null);
+  const canvasBefore = useRef<HTMLCanvasElement | null>(null);
+  const lastRenderRef = useRef<Rendered | null>(null);
+  const beforeRenderRef = useRef<Rendered | null>(null);
+  const beforeJobIdRef = useRef<number | null>(null);
+  const [beforeLoading, setBeforeLoading] = useState(false);
+  const isDraggingSplit = useRef(false);
   const wrap = useRef<HTMLDivElement>(null);
   const boxRef = useRef<HTMLDivElement>(null);
   const sessionCache = useRef<Record<number, PhotoSessionCache>>({});
@@ -219,9 +234,12 @@ export function Develop(p: Props) {
         rtab,
         before,
         overlay,
+        compareMode,
+        compareOrientation,
+        splitPos,
       };
     }
-  }, [id, dev, history, maskSel, compSel, swatchSel, zoom, pan, rtab, before, overlay]);
+  }, [id, dev, history, maskSel, compSel, swatchSel, zoom, pan, rtab, before, overlay, compareMode, compareOrientation, splitPos]);
 
   const refreshHistory = useCallback(async (pid: number) => {
     const h = await api.history(pid);
@@ -267,6 +285,9 @@ export function Develop(p: Props) {
       setRtab(cached.rtab);
       setBefore(cached.before);
       setOverlay(cached.overlay);
+      setCompareMode(cached.compareMode ?? "off");
+      setCompareOrientation(cached.compareOrientation ?? "horizontal");
+      if (cached.splitPos != null) setSplitPos(cached.splitPos);
       setTool("none");
       setLoading(false);
     } else {
@@ -277,6 +298,9 @@ export function Develop(p: Props) {
       setTool("none");
       setZoom(1);
       setPan({ x: 0, y: 0 });
+      setCompareMode("off");
+      setCompareOrientation("horizontal");
+      setSplitPos(50);
     }
     flush().then(() =>
       api.getDevelop(id).then((d) => {
@@ -386,6 +410,7 @@ export function Develop(p: Props) {
   const job = useRef<{ id: number; d: Dev; skip: boolean; overlay: number | null; full: boolean; proof: Proof | null } | null>(null);
   const busy = useRef(false);
   const draw = (r: Rendered, hires = false) => {
+    lastRenderRef.current = r;
     const c = canvas.current;
     if (!c) return;
     if (c.width !== r.image.width || c.height !== r.image.height) {
@@ -397,9 +422,63 @@ export function Develop(p: Props) {
     c.getContext("2d")!.putImageData(r.image, 0, 0);
     setHist(r.hist);
   };
+
+  const drawBefore = useCallback((r: Rendered) => {
+    const cb = canvasBefore.current;
+    if (!cb) return;
+    if (cb.width !== r.image.width || cb.height !== r.image.height) {
+      cb.width = r.image.width;
+      cb.height = r.image.height;
+    }
+    cb.getContext("2d")!.putImageData(r.image, 0, 0);
+  }, []);
+
+  const setCanvasRef = useCallback((el: HTMLCanvasElement | null) => {
+    canvas.current = el;
+    if (el && lastRenderRef.current) {
+      const r = lastRenderRef.current;
+      if (el.width !== r.image.width || el.height !== r.image.height) {
+        el.width = r.image.width;
+        el.height = r.image.height;
+      }
+      el.getContext("2d")!.putImageData(r.image, 0, 0);
+    }
+  }, []);
+
+  const setCanvasBeforeRef = useCallback((el: HTMLCanvasElement | null) => {
+    canvasBefore.current = el;
+    if (el && beforeRenderRef.current) {
+      const r = beforeRenderRef.current;
+      if (el.width !== r.image.width || el.height !== r.image.height) {
+        el.width = r.image.width;
+        el.height = r.image.height;
+      }
+      el.getContext("2d")!.putImageData(r.image, 0, 0);
+    }
+  }, []);
+
+  // a tuning step in progress: its label shows over the photo until the photo is drawn with its result;
+  // `slow`: a render has taken over 250 ms (e.g. dragging HDR toning), shown as a small badge
+  const [working, setWorking] = useState<string | null>(null);
+  const [slow, setSlow] = useState(false);
+  const settle = useRef(false);
+  const waitFor = async <T,>(label: string, f: () => Promise<T>): Promise<T> => {
+    setWorking(label);
+    try {
+      return await f();
+    } finally {
+      settle.current = true;
+      // the step's render starts once React applies it; if nothing changed, no render comes
+      setTimeout(() => {
+        if (!busy.current && settle.current) (settle.current = false, setWorking(null));
+      }, 50);
+    }
+  };
+
   const pump = useCallback(async () => {
     if (busy.current) return;
     busy.current = true;
+    const slowTimer = setTimeout(() => setSlow(true), 250);
     while (job.current) {
       const j = job.current;
       job.current = null;
@@ -411,7 +490,10 @@ export function Develop(p: Props) {
       }
     }
     busy.current = false;
+    clearTimeout(slowTimer);
+    setSlow(false);
     setLoading(false);
+    if (settle.current) (settle.current = false, setWorking(null));
   }, []);
 
   const mask = dev && maskSel != null ? dev.masks[maskSel] : null;
@@ -428,7 +510,74 @@ export function Develop(p: Props) {
     const view = showBefore ? null : { gamut: proof.gamut, clipping: proof.clipping, spots };
     job.current = { id, d: showBefore ? p.defaults : dev, skip: skipCrop && !showBefore, overlay: overlay && !showBefore ? maskSel : null, full: fullFrame, proof: view };
     pump();
-  }, [id, dev, showBefore, skipCrop, fullFrame, overlay, maskSel, proof.gamut, proof.clipping, spots, p.defaults, pump]);
+  }, [id, dev, showBefore, skipCrop, fullFrame, overlay, maskSel, proof.gamut, proof.clipping, spots, p.defaults, compareMode, pump]);
+
+  useEffect(() => {
+    if (id != null && beforeJobIdRef.current !== id) {
+      beforeRenderRef.current = null;
+      beforeJobIdRef.current = null;
+      lastRenderRef.current = null;
+    }
+  }, [id]);
+
+  useEffect(() => {
+    if (compareMode === "off" || id == null) return;
+    let cancelled = false;
+
+    // Keep geometric framing (crop, rotation, transform, lens) aligned with current dev state
+    const geomDefaults: Dev = {
+      ...structuredClone(p.defaults),
+      crop: dev ? dev.crop : p.defaults.crop,
+      image_rotation: dev ? dev.image_rotation : p.defaults.image_rotation,
+      transform: dev ? dev.transform : p.defaults.transform,
+      lens: dev ? dev.lens : p.defaults.lens,
+    };
+
+    if (beforeJobIdRef.current === id && beforeRenderRef.current) {
+      drawBefore(beforeRenderRef.current);
+      return;
+    }
+
+    setBeforeLoading(true);
+    api
+      .render(id, geomDefaults, skipCrop, null, fullFrame, null)
+      .then((r) => {
+        if (cancelled) return;
+        beforeRenderRef.current = r;
+        beforeJobIdRef.current = id;
+        drawBefore(r);
+      })
+      .catch((e) => console.error("Before render failed:", e))
+      .finally(() => {
+        if (!cancelled) setBeforeLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [compareMode, id, p.defaults, skipCrop, fullFrame, drawBefore, dev?.crop, dev?.image_rotation, dev?.transform, dev?.lens]);
+
+  useEffect(() => {
+    if (lastRenderRef.current && canvas.current) {
+      const el = canvas.current;
+      const r = lastRenderRef.current;
+      if (el.width !== r.image.width || el.height !== r.image.height) {
+        el.width = r.image.width;
+        el.height = r.image.height;
+      }
+      el.getContext("2d")!.putImageData(r.image, 0, 0);
+    }
+    if (compareMode !== "off" && beforeRenderRef.current && canvasBefore.current) {
+      drawBefore(beforeRenderRef.current);
+    }
+  }, [compareMode, compareOrientation, drawBefore]);
+
+  const isRaw = useMemo(() => {
+    if (!p.active?.filename) return false;
+    return /\.(nef|cr2|cr3|arw|dng|orf|rw2|raw|pef|raf|3fr|mef|nrw|ptx|srw|x3f)$/i.test(p.active.filename);
+  }, [p.active?.filename]);
+  const beforeBadgeText = isRaw ? "Before (RAW)" : "Before (Original)";
+  const afterBadgeText = "After (Graded)";
 
   // the snapped object, tinted red over the photo
   useEffect(() => {
@@ -498,7 +647,12 @@ export function Develop(p: Props) {
     ro.observe(el);
     return () => ro.disconnect();
   }, [id, isVisible]);
-  const fitScale = Math.min((box.w - 24) / imgSize.w, (box.h - 24) / imgSize.h, 1.5);
+
+  const fitScale = compareMode === "side-by-side"
+    ? compareOrientation === "horizontal"
+      ? Math.min((box.w - 48) / (imgSize.w * 2), (box.h - 24) / imgSize.h, 1.5)
+      : Math.min((box.w - 24) / imgSize.w, (box.h - 48) / (imgSize.h * 2), 1.5)
+    : Math.min((box.w - 24) / imgSize.w, (box.h - 24) / imgSize.h, 1.5);
   const fillRatio = fitScale > 0 ? Math.max(box.w / (imgSize.w * fitScale), box.h / (imgSize.h * fitScale), 1) : 1;
   fitScaleRef.current = fitScale;
   const scale = fitScale * zoom;
@@ -512,15 +666,47 @@ export function Develop(p: Props) {
 
   const clampPan = useCallback(
     (px: number, py: number, z = zoom, bw = box.w, bh = box.h) => {
-      const fs = Math.min((bw - 24) / imgSize.w, (bh - 24) / imgSize.h, 1.5);
-      const w = Math.max(1, imgSize.w * fs * z);
-      const h = Math.max(1, imgSize.h * fs * z);
-      const maxX = Math.max((bw - 48) * 0.45, (w - bw) / 2 + 48);
-      const maxY = Math.max((bh - 48) * 0.45, (h - bh) / 2 + 48);
+      const fs = fitScale;
+      const isSide = compareMode === "side-by-side";
+      const totalW = isSide && compareOrientation === "horizontal" ? imgSize.w * 2 * fs * z + 12 : imgSize.w * fs * z;
+      const totalH = isSide && compareOrientation === "vertical" ? imgSize.h * 2 * fs * z + 12 : imgSize.h * fs * z;
+      const maxX = Math.max((bw - 48) * 0.45, (totalW - bw) / 2 + 48);
+      const maxY = Math.max((bh - 48) * 0.45, (totalH - bh) / 2 + 48);
       return { x: clamp(px, -maxX, maxX), y: clamp(py, -maxY, maxY) };
     },
-    [zoom, box.w, box.h, imgSize.w, imgSize.h],
+    [zoom, box.w, box.h, imgSize.w, imgSize.h, fitScale, compareMode, compareOrientation],
   );
+
+  const startSplitDrag = (e: React.PointerEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+    isDraggingSplit.current = true;
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+  };
+  const onSplitPointerMove = (e: React.PointerEvent) => {
+    if (!isDraggingSplit.current || !wrap.current) return;
+    const rect = wrap.current.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+    if (compareOrientation === "horizontal") {
+      const pos = clamp(((e.clientX - rect.left) / rect.width) * 100, 1, 99);
+      setSplitPos(Math.round(pos * 10) / 10);
+    } else {
+      const pos = clamp(((e.clientY - rect.top) / rect.height) * 100, 1, 99);
+      setSplitPos(Math.round(pos * 10) / 10);
+    }
+  };
+  const endSplitDrag = (e: React.PointerEvent) => {
+    if (isDraggingSplit.current) {
+      isDraggingSplit.current = false;
+      try {
+        (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+      } catch (_) {}
+    }
+  };
+
+  const cycleCompareOrientation = useCallback(() => {
+    setCompareOrientation((prev) => (prev === "horizontal" ? "vertical" : "horizontal"));
+  }, []);
 
   useEffect(() => {
     setPan((prev) => (prev.x === 0 && prev.y === 0 ? prev : clampPan(prev.x, prev.y, zoom)));
@@ -690,12 +876,14 @@ export function Develop(p: Props) {
   const upright = async (mode: string, d: Dev | null = dev) => {
     if (id == null || !d) return;
     setError(null);
-    try {
-      const t = await api.upright(id, d, mode);
-      if (idRef.current === id && devRef.current) change({ ...devRef.current, transform: t }, `Upright: ${mode}`);
-    } catch (e) {
-      setError(`Upright: ${e}`);
-    }
+    await waitFor(mode === "level" ? "Straightening" : `Upright: ${mode}`, async () => {
+      try {
+        const t = await api.upright(id, d, mode);
+        if (idRef.current === id && devRef.current) change({ ...devRef.current, transform: t }, `Upright: ${mode}`);
+      } catch (e) {
+        setError(`Upright: ${e}`);
+      }
+    });
   };
   // ✦ AI fine tune levels the horizon first (Upright Level), as its own step; not when the photo has a
   // straighten, Upright, rotate or perspective of its own, no straight edges, or a tilt under 0.25°
@@ -713,19 +901,22 @@ export function Develop(p: Props) {
   const autoCa = async () => {
     if (id == null) return;
     setError(null);
-    try {
-      const [rc, by] = await api.autoCa(id);
-      const cur = devRef.current;
-      if (idRef.current === id && cur) change({ ...cur, lens: { ...cur.lens, ca_red_cyan: rc, ca_blue_yellow: by } }, "Auto chromatic aberration");
-    } catch (e) {
-      setError(`Chromatic aberration: ${e}`);
-    }
+    await waitFor("Chromatic aberration", async () => {
+      try {
+        const [rc, by] = await api.autoCa(id);
+        const cur = devRef.current;
+        if (idRef.current === id && cur) change({ ...cur, lens: { ...cur.lens, ca_red_cyan: rc, ca_blue_yellow: by } }, "Auto chromatic aberration");
+      } catch (e) {
+        setError(`Chromatic aberration: ${e}`);
+      }
+    });
   };
   // Pro: Photoshop's Auto Levels (each channel's black / white point, 0.1% clipped), measured
   // on a render without the current levels so pressing it again does not undo it
   const autoLevels = async () => {
     if (id == null || !dev) return;
     setError(null);
+    await waitFor("Auto levels", async () => {
     try {
       const { hist: h } = await api.render(id, { ...dev, levels: p.defaults.levels }, false, null);
       const cur = devRef.current;
@@ -741,6 +932,7 @@ export function Develop(p: Props) {
     } catch (e) {
       setError(`Auto levels: ${e}`);
     }
+    });
   };
   // Spot removal: the engine picks a matching source area and commits the heal
   const healSpot = async (x: number, y: number) => {
@@ -814,7 +1006,7 @@ export function Develop(p: Props) {
   };
   const switchTab = (t: typeof rtab) => {
     setRtab(t);
-    if (t === "advanced" || t === "auto") setMaskSel(null); // these panels edit the whole photo
+    if (t === "advanced") setMaskSel(null); // these panels edit the whole photo (Auto's own do too, and it lists the selections)
     if (tool === "guides" || tool === "spot" || tool === "remove") setTool("none");
     if (t !== "ai") clearBrush();
   };
@@ -863,7 +1055,7 @@ export function Develop(p: Props) {
     );
   };
 
-  const keys = useRef<(e: KeyboardEvent) => void>(() => {});
+  const keys = useRef<(e: KeyboardEvent) => void>(() => { });
   keys.current = (e) => {
     if (!isVisible) return;
     const mod = e.metaKey || e.ctrlKey;
@@ -888,6 +1080,23 @@ export function Develop(p: Props) {
       const dy = e.key === "ArrowUp" ? step : e.key === "ArrowDown" ? -step : 0;
       setPan((p0) => clampPan(p0.x + dx, p0.y + dy));
     } else if (e.key === "\\") setBefore((b) => !b);
+    else if (e.key.toLowerCase() === "y") {
+      if (e.altKey || e.metaKey) {
+        e.preventDefault();
+        cycleCompareOrientation();
+      } else {
+        e.preventDefault();
+        setCompareMode((m) => (m === "side-by-side" ? "off" : "side-by-side"));
+      }
+    } else if (e.key.toLowerCase() === "u") {
+      if (e.altKey || e.metaKey) {
+        e.preventDefault();
+        cycleCompareOrientation();
+      } else {
+        e.preventDefault();
+        setCompareMode((m) => (m === "split" ? "off" : "split"));
+      }
+    }
     else if (e.key.toLowerCase() === "r") setTool((t) => (t === "crop" ? "none" : "crop"));
     else if (e.key.toLowerCase() === "s") setTool((t) => (t === "select" ? "none" : "select"));
     else if (e.key.toLowerCase() === "o" && maskSel != null) setOverlay((o) => !o);
@@ -937,19 +1146,19 @@ export function Develop(p: Props) {
   };
   const slider =
     (root: Dev | null, write: (d: Dev, label: string) => void) =>
-    (label: string, path: Path, min: number, max: number, extra: Partial<Parameters<typeof Slider>[0]> = {}) =>
-      root && (
-        <Slider
-          key={path.join(".")}
-          label={label}
-          value={getPath(root, path) as number}
-          def={(getPath(p.defaults, path) as number | undefined) ?? 0}
-          min={min}
-          max={max}
-          onChange={(v) => write(setPath(root, path, v), label)}
-          {...extra}
-        />
-      );
+      (label: string, path: Path, min: number, max: number, extra: Partial<Parameters<typeof Slider>[0]> = {}) =>
+        root && (
+          <Slider
+            key={path.join(".")}
+            label={label}
+            value={getPath(root, path) as number}
+            def={(getPath(p.defaults, path) as number | undefined) ?? 0}
+            min={min}
+            max={max}
+            onChange={(v) => write(setPath(root, path, v), label)}
+            {...extra}
+          />
+        );
   const S = slider(T, edit);
   const reset = (key: keyof Dev, label: string) => (
     <button className="text-[10px] font-normal normal-case text-neutral-500 hover:text-neutral-200" onClick={() => T && edit({ ...T, [key]: structuredClone(p.defaults[key]) }, `Reset ${label}`)}>
@@ -1118,31 +1327,131 @@ export function Develop(p: Props) {
   const measured = async <R,>(label: string, get: (id: number, cur: Dev) => Promise<R>, put: (cur: Dev, r: R) => Dev) => {
     if (id == null || !devRef.current) return;
     setError(null);
-    try {
-      const r = await get(id, devRef.current);
-      const cur = devRef.current;
-      if (idRef.current === id && cur) change(put(cur, r), label);
-    } catch (e) {
-      setError(`${label}: ${e}`);
-    }
+    await waitFor(label, async () => {
+      try {
+        const r = await get(id, devRef.current!);
+        const cur = devRef.current;
+        if (idRef.current === id && cur) change(put(cur, r), label);
+      } catch (e) {
+        setError(`${label}: ${e}`);
+      }
+    });
   };
   const autoTone = () => measured("Auto tone", api.autoTone, (cur, basic_tone) => ({ ...cur, basic_tone }));
+  const autoHdr = () => measured("Auto HDR toning", (i) => api.autoHdr(i), (cur, hdr) => ({ ...cur, hdr }));
   const autoWb = () => measured("Auto white balance", api.autoWhiteBalance, (cur, white_balance) => ({ ...cur, white_balance }));
   const autoProfile = (profile: string, label: string) => measured(`Auto: ${label}`, (i, cur) => api.autoDevelop(i, cur, profile), (_, d) => d);
+  // Auto › by photo type: the AI (or, failing that, the photo's keywords) picks the profile
+  const autoByType = async () => {
+    if (id == null) return;
+    try {
+      const [type, err] = await waitFor("Finding the photo type", () => api.photoType(id));
+      await autoProfile(type, `${type} (by photo type)`);
+      if (err) setError(`The AI could not tell the photo type, so its keywords did: ${err}`);
+    } catch (e) {
+      setError(`Auto by photo type: ${e}`);
+    }
+  };
   // Auto › remove: the engine heals the selection's objects away and commits the step
   const removeSelection = async (i: number) => {
     if (id == null) return;
     await flush();
     setError(null);
-    try {
-      const d = await api.removeSelection(id, i);
-      if (idRef.current === id) (setDev(d), setMaskSel(null), refreshHistory(id));
-    } catch (e) {
-      setError(`Remove: ${e}`);
-    }
+    await waitFor("Removing", async () => {
+      try {
+        const d = await api.removeSelection(id, i);
+        if (idRef.current === id) (setDev(d), setMaskSel(null), refreshHistory(id));
+      } catch (e) {
+        setError(`Remove: ${e}`);
+      }
+    });
   };
 
   const swatch = T && swatchSel != null ? T.point_color[swatchSel] : null;
+
+  const renderOverlays = () => (
+    <>
+      {tool === "guides" && dev && !showBefore && (
+        <svg viewBox="0 0 1 1" preserveAspectRatio="none" className="pointer-events-none absolute inset-0 h-full w-full" style={{ filter: "drop-shadow(0 0 1px #000)" }}>
+          {[...dev.transform.guides, ...(draft ? [draft] : [])].map((g, i) => (
+            <line key={i} x1={g[0][0]} y1={g[0][1]} x2={g[1][0]} y2={g[1][1]} stroke={i < dev.transform.guides.length ? "#fbbf24" : "white"} strokeWidth={2} vectorEffect="non-scaling-stroke" />
+          ))}
+        </svg>
+      )}
+      {snap && !showBefore && <canvas ref={snapCanvas} className="pointer-events-none absolute inset-0 h-full w-full" />}
+      {!showBefore && (strokes.length > 0 || live) && (!snap || live) && <canvas ref={brushCanvas} className="pointer-events-none absolute inset-0 h-full w-full opacity-60" />}
+      {tool === "remove" && cursor && !showBefore && (
+        <span
+          className="pointer-events-none absolute rounded-full border-2 border-white/90 bg-red-500/15 shadow"
+          style={{ left: cursor.x, top: cursor.y, width: 2 * brush * disp.w, height: 2 * brush * disp.w, transform: "translate(-50%, -50%)" }}
+        />
+      )}
+      {tool === "spot" && dev && !showBefore && (
+        <svg viewBox="0 0 1 1" preserveAspectRatio="none" className="pointer-events-none absolute inset-0 h-full w-full" style={{ filter: "drop-shadow(0 0 1px #000)" }}>
+          {dev.retouch.map((r, i) => (
+            <g key={i} fill="none">
+              <polygon points={r.points.map((q) => q.join(",")).join(" ")} stroke="white" strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
+              <polygon points={r.points.map((q) => `${q[0] + r.source[0]},${q[1] + r.source[1]}`).join(" ")} stroke="#7dd3fc" strokeDasharray="3 3" vectorEffect="non-scaling-stroke" />
+            </g>
+          ))}
+        </svg>
+      )}
+      {picking && (
+        <span
+          className="pointer-events-none absolute h-10 w-10 -translate-x-1/2 -translate-y-1/2 animate-ping rounded-full border-2 border-violet-300"
+          style={{ left: pct(picking.x), top: pct(picking.y) }}
+        />
+      )}
+      {tool === "crop" && dev && !showBefore && (
+        <div
+          data-no-pan
+          className="absolute cursor-move border border-white/80"
+          style={{ left: pct(dev.crop.x), top: pct(dev.crop.y), width: pct(dev.crop.w), height: pct(dev.crop.h), boxShadow: "0 0 0 9999px rgba(0,0,0,.55)" }}
+          onPointerDown={(e) => ((cropStart.current = { ...dev.crop }), cropDrag("move")(e))}
+        >
+          <div className="pointer-events-none absolute inset-0" style={{ backgroundImage: "linear-gradient(90deg,transparent 33%,rgba(255,255,255,.25) 33%,rgba(255,255,255,.25) 33.4%,transparent 33.4%,transparent 66.4%,rgba(255,255,255,.25) 66.4%,rgba(255,255,255,.25) 66.8%,transparent 66.8%),linear-gradient(transparent 33%,rgba(255,255,255,.25) 33%,rgba(255,255,255,.25) 33.4%,transparent 33.4%,transparent 66.4%,rgba(255,255,255,.25) 66.4%,rgba(255,255,255,.25) 66.8%,transparent 66.8%)" }} />
+          {["nw", "ne", "sw", "se"].map((m) => (
+            <div
+              key={m}
+              data-no-pan
+              className="absolute h-3 w-3 border-2 border-white bg-neutral-900"
+              style={{ left: m.includes("w") ? -6 : undefined, right: m.includes("e") ? -6 : undefined, top: m.includes("n") ? -6 : undefined, bottom: m.includes("s") ? -6 : undefined, cursor: `${m}-resize` }}
+              onPointerDown={(e) => ((cropStart.current = { ...dev.crop }), cropDrag(m)(e))}
+            />
+          ))}
+        </div>
+      )}
+      {mask && handlesOn && !showBefore && tool !== "crop" && (
+        <svg className="pointer-events-none absolute inset-0 h-full w-full overflow-visible" style={{ filter: "drop-shadow(0 0 1px #000)" }}>
+          {mask.components.map((c, ci) =>
+            c.type === "linear_gradient" ? (
+              <line key={ci} x1={pct(c.start[0])} y1={pct(c.start[1])} x2={pct(c.end[0])} y2={pct(c.end[1])} stroke="white" strokeDasharray="4 3" />
+            ) : c.type === "radial_gradient" ? (
+              <ellipse key={ci} cx={pct(c.center[0])} cy={pct(c.center[1])} rx={pct(c.radius[0])} ry={pct(c.radius[1])} fill="none" stroke="white" strokeDasharray="4 3" />
+            ) : null,
+          )}
+        </svg>
+      )}
+      {mask &&
+        handlesOn &&
+        !showBefore &&
+        tool !== "crop" &&
+        mask.components.map((c, ci) =>
+          c.type === "linear_gradient" ? (
+            <Fragment key={ci}>
+              <div data-no-pan className={`${dot} bg-sky-500/80`} title="Full effect" style={{ left: pct(c.start[0]), top: pct(c.start[1]) }} onPointerDown={grab(ci, compDrag(ci, "start"))} />
+              <div data-no-pan className={`${dot} bg-neutral-900/80`} title="No effect" style={{ left: pct(c.end[0]), top: pct(c.end[1]) }} onPointerDown={grab(ci, compDrag(ci, "end"))} />
+            </Fragment>
+          ) : c.type === "radial_gradient" ? (
+            <Fragment key={ci}>
+              <div data-no-pan className={`${dot} bg-sky-500/80`} style={{ left: pct(c.center[0]), top: pct(c.center[1]) }} onPointerDown={grab(ci, compDrag(ci, "center"))} />
+              <div data-no-pan className={`${dot} bg-neutral-900/80`} style={{ left: pct(c.center[0] + c.radius[0]), top: pct(c.center[1]) }} onPointerDown={grab(ci, compDrag(ci, "radius", 0))} />
+              <div data-no-pan className={`${dot} bg-neutral-900/80`} style={{ left: pct(c.center[0] + c.radius[1]), top: pct(c.center[1]) }} onPointerDown={grab(ci, compDrag(ci, "radius", 1))} />
+            </Fragment>
+          ) : null,
+        )}
+    </>
+  );
 
   return (
     <div className="flex min-h-0 flex-1">
@@ -1229,13 +1538,12 @@ export function Develop(p: Props) {
                       }
                     }}
                     title={`${wp.filename}${wp.copy_name ? ` (${wp.copy_name})` : ""}${isBusy ? ` — AI working (${task.elapsed.toFixed(1)}s)` : ""}`}
-                    className={`group flex shrink-0 cursor-pointer items-center gap-1.5 rounded-md border px-2 py-1 transition-all select-none ${
-                      isCur
+                    className={`group flex shrink-0 cursor-pointer items-center gap-1.5 rounded-md border px-2 py-1 transition-all select-none ${isCur
                         ? "border-sky-500/80 bg-neutral-800 text-white shadow-xs ring-1 ring-sky-500/30"
                         : isBusy
-                        ? "border-violet-700/70 bg-violet-950/30 text-violet-200 hover:bg-violet-950/50"
-                        : "border-neutral-800 bg-neutral-900/80 text-neutral-400 hover:border-neutral-700 hover:bg-neutral-800/60 hover:text-neutral-200"
-                    }`}
+                          ? "border-violet-700/70 bg-violet-950/30 text-violet-200 hover:bg-violet-950/50"
+                          : "border-neutral-800 bg-neutral-900/80 text-neutral-400 hover:border-neutral-700 hover:bg-neutral-800/60 hover:text-neutral-200"
+                      }`}
                   >
                     <img
                       src={thumbUrl(wp)}
@@ -1254,15 +1562,14 @@ export function Develop(p: Props) {
                       </span>
                     ) : hasResult ? (
                       <span
-                        className={`rounded-full px-1 text-[9px] font-bold ${
-                          task.result!.ok ? "bg-emerald-950/90 text-emerald-400" : "bg-red-950/90 text-red-400"
-                        }`}
+                        className={`rounded-full px-1 text-[9px] font-bold ${task.result!.ok ? "bg-emerald-950/90 text-emerald-400" : "bg-red-950/90 text-red-400"
+                          }`}
                         title={task.result!.ok ? `AI finished in ${task.elapsed.toFixed(1)}s` : `AI error: ${task.result!.text}`}
                       >
                         {task.result!.ok ? "✦✓" : "✦!"}
                       </span>
                     ) : wp.edited ? (
-                      <span className="text-[9px] font-semibold text-amber-400" title="Edited">
+                      <span className="badge-edited text-[9px] px-1 py-0.2" title="Edited photo (adjustments applied)">
                         ±
                       </span>
                     ) : null}
@@ -1354,9 +1661,76 @@ export function Develop(p: Props) {
             <Btn active={tool === "select"} onClick={() => setTool(tool === "select" ? "none" : "select")} title="AI Select (S): click objects to select them with the AI; then every panel tunes only the selection">
               ✦ Select
             </Btn>
-            <Btn active={before} onClick={() => setBefore(!before)} title="Before / after (\)">
+            <Btn
+              active={before && compareMode === "off"}
+              onClick={() => {
+                if (compareMode !== "off") setCompareMode("off");
+                setBefore(!before);
+              }}
+              title="Before / after toggle (\)"
+            >
               Before
             </Btn>
+            <div className="flex items-center rounded border border-neutral-700/80 bg-neutral-800/80 p-0.5">
+              <button
+                className={`flex items-center gap-1 rounded px-2 py-0.5 text-xs font-medium transition ${
+                  compareMode === "side-by-side"
+                    ? "bg-sky-600 text-white shadow-xs"
+                    : "text-neutral-300 hover:bg-neutral-700 hover:text-white"
+                }`}
+                onClick={() => setCompareMode((m) => (m === "side-by-side" ? "off" : "side-by-side"))}
+                title="Side-by-side Before & After comparison (Y)"
+              >
+                <span>⧉</span>
+                <span>Side by Side</span>
+              </button>
+              <button
+                className={`flex items-center gap-1 rounded px-2 py-0.5 text-xs font-medium transition ${
+                  compareMode === "split"
+                    ? "bg-sky-600 text-white shadow-xs"
+                    : "text-neutral-300 hover:bg-neutral-700 hover:text-white"
+                }`}
+                onClick={() => setCompareMode((m) => (m === "split" ? "off" : "split"))}
+                title="Interactive split-view wipe Before & After (U)"
+              >
+                <span>◧</span>
+                <span>Split View</span>
+              </button>
+              {compareMode !== "off" && (
+                <div className="ml-1 flex items-center gap-0.5 border-l border-neutral-700 pl-1">
+                  <button
+                    className={`rounded px-1.5 py-0.5 text-xs transition ${
+                      compareOrientation === "horizontal"
+                        ? "bg-neutral-700 text-sky-400 font-semibold"
+                        : "text-neutral-400 hover:text-white"
+                    }`}
+                    onClick={() => setCompareOrientation("horizontal")}
+                    title={
+                      compareMode === "side-by-side"
+                        ? "Side-by-side: Left & Right (⌥Y)"
+                        : "Split View: Vertical wipe line (⌥Y)"
+                    }
+                  >
+                    ⬌ {compareMode === "side-by-side" ? "Side" : "Vertical"}
+                  </button>
+                  <button
+                    className={`rounded px-1.5 py-0.5 text-xs transition ${
+                      compareOrientation === "vertical"
+                        ? "bg-neutral-700 text-sky-400 font-semibold"
+                        : "text-neutral-400 hover:text-white"
+                    }`}
+                    onClick={() => setCompareOrientation("vertical")}
+                    title={
+                      compareMode === "side-by-side"
+                        ? "Side-by-side: Top & Bottom (⌥Y)"
+                        : "Split View: Horizontal wipe line (⌥Y)"
+                    }
+                  >
+                    ⬍ {compareMode === "side-by-side" ? "Stack" : "Horizontal"}
+                  </button>
+                </div>
+              )}
+            </div>
             <Btn active={tool === "crop"} onClick={() => setTool(tool === "crop" ? "none" : "crop")} title="Crop & straighten (R)">
               Crop
             </Btn>
@@ -1382,105 +1756,230 @@ export function Develop(p: Props) {
           onLostPointerCapture={onBoxLostCapture}
           onDoubleClick={onBoxDoubleClick}
           style={{ WebkitUserSelect: "none", userSelect: "none", touchAction: "none" }}
-          className={`checker relative flex min-h-0 flex-1 items-center justify-center overflow-hidden outline-none focus-visible:ring-1 focus-visible:ring-sky-500/60 ${
-            dragging ? "cursor-grabbing" : spaceHeld || tool === "none" ? "cursor-grab" : ""
-          }`}
+          className={`checker relative flex min-h-0 flex-1 items-center justify-center overflow-hidden outline-none focus-visible:ring-1 focus-visible:ring-sky-500/60 ${dragging ? "cursor-grabbing" : spaceHeld || tool === "none" ? "cursor-grab" : ""
+            }`}
         >
-          <div ref={wrap} className="relative shrink-0 overflow-hidden shadow-2xl" style={{ width: disp.w, height: disp.h, transform: `translate(${pan.x}px, ${pan.y}px)` }}>
-            <canvas
-              ref={canvas}
-              onClick={onCanvasClick}
-              onPointerMove={tool === "remove" ? (e) => setCursor({ x: e.nativeEvent.offsetX, y: e.nativeEvent.offsetY }) : undefined}
-              onPointerLeave={() => setCursor(null)}
-              onPointerDown={tool === "guides" && !showBefore && !spaceHeld ? drawGuide : tool === "remove" && !showBefore && !spaceHeld ? paintStroke : undefined}
-              className={`block h-full w-full ${
-                picking ? "cursor-wait" : dragging ? "cursor-grabbing" : spaceHeld ? "cursor-grab" : tool !== "none" && tool !== "crop" ? "cursor-crosshair" : ""
+          {compareMode === "side-by-side" ? (
+            <div
+              ref={wrap}
+              className={`relative shrink-0 flex items-center justify-center gap-3 ${
+                compareOrientation === "horizontal" ? "flex-row" : "flex-col"
               }`}
-            />
-            {tool === "guides" && dev && !showBefore && (
-              <svg viewBox="0 0 1 1" preserveAspectRatio="none" className="pointer-events-none absolute inset-0 h-full w-full" style={{ filter: "drop-shadow(0 0 1px #000)" }}>
-                {[...dev.transform.guides, ...(draft ? [draft] : [])].map((g, i) => (
-                  <line key={i} x1={g[0][0]} y1={g[0][1]} x2={g[1][0]} y2={g[1][1]} stroke={i < dev.transform.guides.length ? "#fbbf24" : "white"} strokeWidth={2} vectorEffect="non-scaling-stroke" />
-                ))}
-              </svg>
-            )}
-            {snap && !showBefore && <canvas ref={snapCanvas} className="pointer-events-none absolute inset-0 h-full w-full" />}
-            {!showBefore && (strokes.length > 0 || live) && (!snap || live) && <canvas ref={brushCanvas} className="pointer-events-none absolute inset-0 h-full w-full opacity-60" />}
-            {tool === "remove" && cursor && !showBefore && (
-              <span
-                className="pointer-events-none absolute rounded-full border-2 border-white/90 bg-red-500/15 shadow"
-                style={{ left: cursor.x, top: cursor.y, width: 2 * brush * disp.w, height: 2 * brush * disp.w, transform: "translate(-50%, -50%)" }}
-              />
-            )}
-            {tool === "spot" && dev && !showBefore && (
-              <svg viewBox="0 0 1 1" preserveAspectRatio="none" className="pointer-events-none absolute inset-0 h-full w-full" style={{ filter: "drop-shadow(0 0 1px #000)" }}>
-                {dev.retouch.map((r, i) => (
-                  <g key={i} fill="none">
-                    <polygon points={r.points.map((q) => q.join(",")).join(" ")} stroke="white" strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
-                    <polygon points={r.points.map((q) => `${q[0] + r.source[0]},${q[1] + r.source[1]}`).join(" ")} stroke="#7dd3fc" strokeDasharray="3 3" vectorEffect="non-scaling-stroke" />
-                  </g>
-                ))}
-              </svg>
-            )}
-            {picking && (
-              <span
-                className="pointer-events-none absolute h-10 w-10 -translate-x-1/2 -translate-y-1/2 animate-ping rounded-full border-2 border-violet-300"
-                style={{ left: pct(picking.x), top: pct(picking.y) }}
-              />
-            )}
-            {tool === "crop" && dev && !showBefore && (
+              style={{ transform: `translate(${pan.x}px, ${pan.y}px)` }}
+            >
+              {/* Before Pane */}
               <div
-                data-no-pan
-                className="absolute cursor-move border border-white/80"
-                style={{ left: pct(dev.crop.x), top: pct(dev.crop.y), width: pct(dev.crop.w), height: pct(dev.crop.h), boxShadow: "0 0 0 9999px rgba(0,0,0,.55)" }}
-                onPointerDown={(e) => ((cropStart.current = { ...dev.crop }), cropDrag("move")(e))}
+                className="relative shrink-0 overflow-hidden shadow-2xl border border-neutral-800/80 rounded-xs bg-neutral-950"
+                style={{ width: disp.w, height: disp.h }}
               >
-                <div className="pointer-events-none absolute inset-0" style={{ backgroundImage: "linear-gradient(90deg,transparent 33%,rgba(255,255,255,.25) 33%,rgba(255,255,255,.25) 33.4%,transparent 33.4%,transparent 66.4%,rgba(255,255,255,.25) 66.4%,rgba(255,255,255,.25) 66.8%,transparent 66.8%),linear-gradient(transparent 33%,rgba(255,255,255,.25) 33%,rgba(255,255,255,.25) 33.4%,transparent 33.4%,transparent 66.4%,rgba(255,255,255,.25) 66.4%,rgba(255,255,255,.25) 66.8%,transparent 66.8%)" }} />
-                {["nw", "ne", "sw", "se"].map((m) => (
-                  <div
-                    key={m}
-                    data-no-pan
-                    className="absolute h-3 w-3 border-2 border-white bg-neutral-900"
-                    style={{ left: m.includes("w") ? -6 : undefined, right: m.includes("e") ? -6 : undefined, top: m.includes("n") ? -6 : undefined, bottom: m.includes("s") ? -6 : undefined, cursor: `${m}-resize` }}
-                    onPointerDown={(e) => ((cropStart.current = { ...dev.crop }), cropDrag(m)(e))}
-                  />
-                ))}
-              </div>
-            )}
-            {mask && handlesOn && !showBefore && tool !== "crop" && (
-              <svg className="pointer-events-none absolute inset-0 h-full w-full overflow-visible" style={{ filter: "drop-shadow(0 0 1px #000)" }}>
-                {mask.components.map((c, ci) =>
-                  c.type === "linear_gradient" ? (
-                    <line key={ci} x1={pct(c.start[0])} y1={pct(c.start[1])} x2={pct(c.end[0])} y2={pct(c.end[1])} stroke="white" strokeDasharray="4 3" />
-                  ) : c.type === "radial_gradient" ? (
-                    <ellipse key={ci} cx={pct(c.center[0])} cy={pct(c.center[1])} rx={pct(c.radius[0])} ry={pct(c.radius[1])} fill="none" stroke="white" strokeDasharray="4 3" />
-                  ) : null,
+                <canvas ref={setCanvasBeforeRef} className="block h-full w-full pointer-events-none" />
+                <div className="absolute left-2.5 top-2.5 select-none rounded bg-neutral-900/80 px-2.5 py-1 font-mono text-[11px] font-medium text-neutral-200 backdrop-blur-md border border-white/10 shadow-md pointer-events-none">
+                  {beforeBadgeText}
+                </div>
+                {beforeLoading && (
+                  <div className="absolute inset-0 flex items-center justify-center bg-neutral-950/50">
+                    <div className="h-5 w-5 animate-spin rounded-full border-2 border-sky-400 border-t-transparent" />
+                  </div>
                 )}
-              </svg>
-            )}
-            {mask &&
-              handlesOn &&
-              !showBefore &&
-              tool !== "crop" &&
-              mask.components.map((c, ci) =>
-                c.type === "linear_gradient" ? (
-                  <Fragment key={ci}>
-                    <div data-no-pan className={`${dot} bg-sky-500/80`} title="Full effect" style={{ left: pct(c.start[0]), top: pct(c.start[1]) }} onPointerDown={grab(ci, compDrag(ci, "start"))} />
-                    <div data-no-pan className={`${dot} bg-neutral-900/80`} title="No effect" style={{ left: pct(c.end[0]), top: pct(c.end[1]) }} onPointerDown={grab(ci, compDrag(ci, "end"))} />
-                  </Fragment>
-                ) : c.type === "radial_gradient" ? (
-                  <Fragment key={ci}>
-                    <div data-no-pan className={`${dot} bg-sky-500/80`} style={{ left: pct(c.center[0]), top: pct(c.center[1]) }} onPointerDown={grab(ci, compDrag(ci, "center"))} />
-                    <div data-no-pan className={`${dot} bg-neutral-900/80`} style={{ left: pct(c.center[0] + c.radius[0]), top: pct(c.center[1]) }} onPointerDown={grab(ci, compDrag(ci, "radius", 0))} />
-                    <div data-no-pan className={`${dot} bg-neutral-900/80`} style={{ left: pct(c.center[0]), top: pct(c.center[1] + c.radius[1]) }} onPointerDown={grab(ci, compDrag(ci, "radius", 1))} />
-                  </Fragment>
-                ) : null,
+              </div>
+
+              {/* After Pane */}
+              <div
+                className="relative shrink-0 overflow-hidden shadow-2xl border border-neutral-800/80 rounded-xs bg-neutral-950"
+                style={{ width: disp.w, height: disp.h }}
+              >
+                <canvas
+                  ref={setCanvasRef}
+                  onClick={onCanvasClick}
+                  onPointerMove={tool === "remove" ? (e) => setCursor({ x: e.nativeEvent.offsetX, y: e.nativeEvent.offsetY }) : undefined}
+                onPointerLeave={() => setCursor(null)}
+                onPointerDown={tool === "guides" && !showBefore && !spaceHeld ? drawGuide : tool === "remove" && !showBefore && !spaceHeld ? paintStroke : undefined}
+                  className={`block h-full w-full ${
+                    picking ? "cursor-wait" : dragging ? "cursor-grabbing" : spaceHeld ? "cursor-grab" : tool !== "none" && tool !== "crop" ? "cursor-crosshair" : ""
+                  }`}
+                />
+                <div className="absolute left-2.5 top-2.5 select-none rounded bg-neutral-900/80 px-2.5 py-1 font-mono text-[11px] font-medium text-neutral-200 backdrop-blur-md border border-white/10 shadow-md pointer-events-none">
+                  {afterBadgeText}
+                </div>
+                {renderOverlays()}
+              </div>
+            </div>
+          ) : compareMode === "split" ? (
+            <div
+              ref={wrap}
+              className="relative shrink-0 overflow-hidden shadow-2xl border border-neutral-800/80 rounded-xs bg-neutral-950"
+              style={{ width: disp.w, height: disp.h, transform: `translate(${pan.x}px, ${pan.y}px)` }}
+            >
+              {/* After Canvas (Full) */}
+              <canvas
+                ref={setCanvasRef}
+                onClick={onCanvasClick}
+                onPointerMove={tool === "remove" ? (e) => setCursor({ x: e.nativeEvent.offsetX, y: e.nativeEvent.offsetY }) : undefined}
+                onPointerLeave={() => setCursor(null)}
+                onPointerDown={tool === "guides" && !showBefore && !spaceHeld ? drawGuide : tool === "remove" && !showBefore && !spaceHeld ? paintStroke : undefined}
+                className={`block h-full w-full ${
+                  picking ? "cursor-wait" : dragging ? "cursor-grabbing" : spaceHeld ? "cursor-grab" : tool !== "none" && tool !== "crop" ? "cursor-crosshair" : ""
+                }`}
+              />
+              {renderOverlays()}
+
+              {/* Before Canvas (Clipped) */}
+              <canvas
+                ref={setCanvasBeforeRef}
+                className="absolute inset-0 block h-full w-full pointer-events-none"
+                style={{
+                  clipPath:
+                    compareOrientation === "horizontal"
+                      ? `polygon(0 0, ${splitPos}% 0, ${splitPos}% 100%, 0 100%)`
+                      : `polygon(0 0, 100% 0, 100% ${splitPos}%, 0 ${splitPos}%)`,
+                }}
+              />
+
+              {/* Draggable Divider with circular white handle matching user reference */}
+              {compareOrientation === "horizontal" ? (
+                <div
+                  data-no-pan
+                  className="absolute top-0 bottom-0 w-10 -translate-x-1/2 cursor-ew-resize z-20 group flex items-center justify-center select-none"
+                  style={{ left: `${splitPos}%` }}
+                  onPointerDown={startSplitDrag}
+                  onPointerMove={onSplitPointerMove}
+                  onPointerUp={endSplitDrag}
+                  onPointerCancel={endSplitDrag}
+                  onDoubleClick={(e) => {
+                    e.stopPropagation();
+                    setSplitPos(50);
+                  }}
+                  title="Drag to compare · Double-click to center (50%)"
+                >
+                  <div className="h-full w-[2px] bg-white shadow-[0_0_8px_rgba(0,0,0,0.7)]" />
+                  <div className="absolute flex h-8 w-8 items-center justify-center rounded-full bg-white shadow-[0_2px_10px_rgba(0,0,0,0.45)] border border-neutral-200/90 transition-transform active:scale-95 group-hover:scale-105">
+                    <svg className="h-4 w-4 text-neutral-900" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="m8 7-5 5 5 5" />
+                      <path d="m16 7 5 5-5 5" />
+                      <path d="M3 12h18" />
+                    </svg>
+                  </div>
+                </div>
+              ) : (
+                <div
+                  data-no-pan
+                  className="absolute left-0 right-0 h-10 -translate-y-1/2 cursor-ns-resize z-20 group flex items-center justify-center select-none"
+                  style={{ top: `${splitPos}%` }}
+                  onPointerDown={startSplitDrag}
+                  onPointerMove={onSplitPointerMove}
+                  onPointerUp={endSplitDrag}
+                  onPointerCancel={endSplitDrag}
+                  onDoubleClick={(e) => {
+                    e.stopPropagation();
+                    setSplitPos(50);
+                  }}
+                  title="Drag to compare · Double-click to center (50%)"
+                >
+                  <div className="w-full h-[2px] bg-white shadow-[0_0_8px_rgba(0,0,0,0.7)]" />
+                  <div className="absolute flex h-8 w-8 items-center justify-center rounded-full bg-white shadow-[0_2px_10px_rgba(0,0,0,0.45)] border border-neutral-200/90 transition-transform active:scale-95 group-hover:scale-105">
+                    <svg className="h-4 w-4 text-neutral-900" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="m7 8 5-5 5 5" />
+                      <path d="m7 16 5 5 5-5" />
+                      <path d="M12 3v18" />
+                    </svg>
+                  </div>
+                </div>
               )}
-          </div>
-          {(loading || error) && (
-            <div className="absolute inset-x-0 top-3 mx-auto w-fit rounded bg-neutral-900/90 px-3 py-1.5 text-[11px] text-neutral-300">{error ? <span className="text-red-400">{error}</span> : "Loading…"}</div>
+
+              {/* Badges matching user reference image */}
+              <div
+                className="absolute left-3 top-3 select-none rounded bg-neutral-900/80 px-2.5 py-1 font-mono text-[11px] font-medium text-neutral-200 backdrop-blur-md border border-white/10 shadow-md pointer-events-none tracking-wide"
+                style={{
+                  opacity:
+                    (compareOrientation === "horizontal" && splitPos < 10) ||
+                    (compareOrientation === "vertical" && splitPos < 10)
+                      ? 0.25
+                      : 1,
+                  transition: "opacity 0.15s ease",
+                }}
+              >
+                {beforeBadgeText}
+              </div>
+              <div
+                className={`absolute select-none rounded bg-neutral-900/80 px-2.5 py-1 font-mono text-[11px] font-medium text-neutral-200 backdrop-blur-md border border-white/10 shadow-md pointer-events-none tracking-wide ${
+                  compareOrientation === "horizontal" ? "right-3 top-3" : "right-3 bottom-3"
+                }`}
+                style={{
+                  opacity:
+                    (compareOrientation === "horizontal" && splitPos > 90) ||
+                    (compareOrientation === "vertical" && splitPos > 90)
+                      ? 0.25
+                      : 1,
+                  transition: "opacity 0.15s ease",
+                }}
+              >
+                {afterBadgeText}
+              </div>
+              {beforeLoading && (
+                <div className="absolute inset-0 flex items-center justify-center bg-neutral-950/50 pointer-events-none">
+                  <div className="h-5 w-5 animate-spin rounded-full border-2 border-sky-400 border-t-transparent" />
+                </div>
+              )}
+            </div>
+          ) : (
+            <div
+              ref={wrap}
+              className="relative shrink-0 overflow-hidden shadow-2xl"
+              style={{ width: disp.w, height: disp.h, transform: `translate(${pan.x}px, ${pan.y}px)` }}
+            >
+              <canvas
+                ref={setCanvasRef}
+                onClick={onCanvasClick}
+                onPointerMove={tool === "remove" ? (e) => setCursor({ x: e.nativeEvent.offsetX, y: e.nativeEvent.offsetY }) : undefined}
+                onPointerLeave={() => setCursor(null)}
+                onPointerDown={tool === "guides" && !showBefore && !spaceHeld ? drawGuide : tool === "remove" && !showBefore && !spaceHeld ? paintStroke : undefined}
+                className={`block h-full w-full ${
+                  picking ? "cursor-wait" : dragging ? "cursor-grabbing" : spaceHeld ? "cursor-grab" : tool !== "none" && tool !== "crop" ? "cursor-crosshair" : ""
+                }`}
+              />
+              {renderOverlays()}
+            </div>
           )}
-          {showBefore && <div className="absolute left-3 top-3 rounded bg-neutral-900/80 px-2 py-1 text-[11px]">Before</div>}
+          {loading && (
+            <div className="absolute inset-0 z-30 flex flex-col items-center justify-center bg-neutral-950/80 backdrop-blur-xs select-none">
+              <div className="relative mb-3 flex h-14 w-14 items-center justify-center rounded-2xl bg-neutral-900 border border-neutral-800 shadow-xl">
+                <svg className="h-7 w-7 animate-spin text-sky-400" viewBox="0 0 24 24" fill="none">
+                  <circle className="opacity-20" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2.5" />
+                  <path className="opacity-90" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                </svg>
+              </div>
+              <p className="text-xs font-semibold text-neutral-200 mb-1">Demosaicing RAW Buffer…</p>
+              <p className="text-[10px] text-neutral-400 font-mono">32-bit Rec.2020 floating-point pipeline</p>
+            </div>
+          )}
+          {working && !loading && (
+            <div className="absolute inset-0 z-30 flex items-center justify-center bg-neutral-950/35 select-none" aria-live="polite">
+              <div className="flex items-center gap-2.5 rounded-xl border border-neutral-700/80 bg-neutral-900/90 px-4 py-2.5 shadow-xl backdrop-blur-md">
+                <svg className="h-4 w-4 animate-spin text-sky-400" viewBox="0 0 24 24" fill="none">
+                  <circle className="opacity-20" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2.5" />
+                  <path className="opacity-90" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                </svg>
+                <span className="text-xs font-medium text-neutral-100">{working}…</span>
+              </div>
+            </div>
+          )}
+          {slow && !working && !loading && (
+            <div className="pointer-events-none absolute right-3 top-3 z-30 flex items-center gap-1.5 rounded-full border border-white/10 bg-neutral-900/85 px-2.5 py-1 text-[10px] text-neutral-200 shadow-md backdrop-blur-md" aria-live="polite">
+              <svg className="h-3 w-3 animate-spin text-sky-400" viewBox="0 0 24 24" fill="none">
+                <circle className="opacity-20" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" />
+                <path className="opacity-90" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+              </svg>
+              Rendering…
+            </div>
+          )}
+          {error && (
+            <div className="absolute inset-x-0 top-3 mx-auto z-30 w-fit rounded bg-red-950/90 border border-red-800/80 px-3 py-1.5 text-[11px] text-red-200 shadow-lg">{error}</div>
+          )}
+          {compareMode === "off" && showBefore && (
+            <div className="absolute left-3 top-3 select-none rounded bg-neutral-900/80 px-2.5 py-1 font-mono text-[11px] font-medium text-neutral-200 backdrop-blur-md border border-white/10 shadow-md pointer-events-none">
+              {beforeBadgeText}
+            </div>
+          )}
 
           {/* Floating viewport HUD: zoom, pan/fit, orientation, photo navigation, and hold-to-compare */}
           <div
@@ -1590,7 +2089,7 @@ export function Develop(p: Props) {
             </button>
             <span className="mx-0.5 h-3.5 w-px bg-neutral-700" />
             <button
-              className={`rounded px-2 py-0.5 text-[10px] ${showBefore ? "bg-amber-600 text-white" : "text-neutral-300 hover:bg-neutral-800 hover:text-white"}`}
+              className={`rounded px-2 py-0.5 text-[10px] ${showBefore && compareMode === "off" ? "bg-amber-600 text-white" : "text-neutral-300 hover:bg-neutral-800 hover:text-white"}`}
               onPointerDown={() => setPeekingBefore(true)}
               onPointerUp={() => setPeekingBefore(false)}
               onPointerLeave={() => setPeekingBefore(false)}
@@ -1599,6 +2098,36 @@ export function Develop(p: Props) {
             >
               Hold: Before
             </button>
+            <span className="mx-0.5 h-3.5 w-px bg-neutral-700" />
+            <button
+              className={`rounded px-2 py-0.5 text-[10px] font-medium transition ${
+                compareMode === "side-by-side" ? "bg-sky-600 text-white shadow-xs" : "text-neutral-300 hover:bg-neutral-800 hover:text-white"
+              }`}
+              onClick={() => setCompareMode((m) => (m === "side-by-side" ? "off" : "side-by-side"))}
+              title="Toggle side-by-side Before / After comparison (Y)"
+            >
+              ⧉ Side by Side
+            </button>
+            <button
+              className={`rounded px-2 py-0.5 text-[10px] font-medium transition ${
+                compareMode === "split" ? "bg-sky-600 text-white shadow-xs" : "text-neutral-300 hover:bg-neutral-800 hover:text-white"
+              }`}
+              onClick={() => setCompareMode((m) => (m === "split" ? "off" : "split"))}
+              title="Toggle interactive split-view Before / After wipe (U)"
+            >
+              ◧ Split View
+            </button>
+            {compareMode !== "off" && (
+              <button
+                className="rounded px-1.5 py-0.5 text-[10px] text-sky-300 hover:bg-neutral-800 hover:text-white font-medium"
+                onClick={cycleCompareOrientation}
+                title={`Orientation: ${compareOrientation}. Click or ⌥Y to toggle`}
+              >
+                {compareOrientation === "horizontal"
+                  ? "⬌ Horizontal"
+                  : "⬍ Vertical"}
+              </button>
+            )}
           </div>
         </div>
 
@@ -1640,17 +2169,16 @@ export function Develop(p: Props) {
                 key={ph.id}
                 onClick={() => p.setActive(ph.id)}
                 title={`${ph.filename}${isWorking ? " (Open in Working Images)" : ""}${phBusy ? " — AI working…" : ""}`}
-                className={`relative h-full shrink-0 cursor-pointer rounded-sm ${
-                  ph.id === id
+                className={`relative h-full shrink-0 cursor-pointer rounded-sm ${ph.id === id
                     ? "ring-2 ring-sky-500"
                     : phBusy
-                    ? "ring-2 ring-violet-500"
-                    : isWorking
-                    ? "opacity-95 ring-1 ring-sky-500/50"
-                    : p.selected.includes(ph.id)
-                    ? "opacity-90 ring-1 ring-neutral-400"
-                    : "opacity-60 hover:opacity-100"
-                }`}
+                      ? "ring-2 ring-violet-500"
+                      : isWorking
+                        ? "opacity-95 ring-1 ring-sky-500/50"
+                        : p.selected.includes(ph.id)
+                          ? "opacity-90 ring-1 ring-neutral-400"
+                          : "opacity-60 hover:opacity-100"
+                  }`}
               >
                 <img
                   src={thumbUrl(ph)}
@@ -1715,7 +2243,7 @@ export function Develop(p: Props) {
         )}
         <div className="border-b border-neutral-800 px-3 py-2">
           <Seg
-            options={[["adjust", "Adjust"], ["selections", dev?.masks.length ? `Selections (${dev.masks.length})` : "Selections"], ["advanced", "Advanced"], ["pro", "Pro"], ["ai", "AI"], ["auto", "Auto"]]}
+            options={[["adjust", "Adjust"], ["advanced", "Advanced"], ["pro", "Pro"], ["ai", "AI"], ["auto", dev?.masks.length ? `Auto (${dev.masks.length})` : "Auto"]]}
             value={rtab}
             onChange={switchTab}
           />
@@ -1736,16 +2264,18 @@ export function Develop(p: Props) {
             setSpotSize={setSpotSize}
           />
         )}
-        {dev && T && rtab === "pro" && <ProTab dev={T} edit={edit} S={S} reset={reset} whole={!mask} autoLevels={autoLevels} />}
+        {dev && T && rtab === "pro" && <ProTab dev={T} edit={edit} S={S} reset={reset} whole={!mask} autoLevels={autoLevels} autoHdr={autoHdr} hist={hist?.[3]} />}
         {rtab === "ai" && <AiTab photoId={id} settings={p.settings} drawing={tool === "remove"} onDraw={() => (tool === "remove" ? setTool("none") : (clearBrush(), setTool("remove")))} selection={snap ? strokes : null} brush={brush} setBrush={setBrush} onClear={clearBrush} onOpenModels={() => p.onOpenModels?.()} onOpenPhoto={(n) => p.onOpenPhoto?.(n)} />}
         {dev && rtab === "auto" && (
           <AutoTab
             dev={dev}
             profile={autoProfile}
+            byType={autoByType}
             whiteBalance={autoWb}
             tone={autoTone}
             levels={autoLevels}
             ca={autoCa}
+            hdr={autoHdr}
             upright={upright}
             level={levelHorizon}
             remove={removeSelection}
@@ -1754,7 +2284,7 @@ export function Develop(p: Props) {
             aiPrompt={id != null ? p.aiTasks[id]?.prompt : undefined}
           />
         )}
-        {dev && rtab === "selections" && (
+        {dev && rtab === "auto" && (
           <SelectionsTab
             dev={dev}
             change={change}
@@ -1786,8 +2316,38 @@ export function Develop(p: Props) {
                 </span>
               }
             >
-              <div className="mb-2">
+              <div className="mb-2 flex items-center justify-between gap-1">
                 <Seg options={[["Color", "Color"], ["Monochrome", "B&W"]]} value={T.profile.toLowerCase() === "monochrome" ? "Monochrome" : "Color"} onChange={(v) => edit({ ...T, profile: v }, "Profile")} />
+                {!mask && (
+                  <div className="flex items-center gap-1">
+                    <button
+                      className={`rounded px-2 py-0.5 text-[10px] font-medium transition ${
+                        dev.hdr.enabled
+                          ? "bg-amber-600 text-white shadow-xs"
+                          : "border border-neutral-700 text-neutral-400 hover:border-neutral-500 hover:text-neutral-200"
+                      }`}
+                      onClick={() => {
+                        if (!dev.hdr.enabled) {
+                          autoHdr();
+                        } else {
+                          edit({ ...dev, hdr: { ...dev.hdr, enabled: false } }, "Disable HDR toning");
+                        }
+                      }}
+                      title={dev.hdr.enabled ? "HDR toning is active. Click to disable" : "Enable Auto HDR toning"}
+                    >
+                      HDR{dev.hdr.enabled ? " ON" : ""}
+                    </button>
+                    {dev.hdr.enabled && (
+                      <button
+                        className="text-[10px] text-neutral-500 hover:text-neutral-300"
+                        onClick={() => edit({ ...dev, hdr: structuredClone(p.defaults.hdr) }, "Reset HDR toning")}
+                        title="Reset HDR toning to default"
+                      >
+                        reset
+                      </button>
+                    )}
+                  </div>
+                )}
               </div>
               {S("Temp", ["white_balance", "temperature_k"], 2000, 50000, { log: true, track: "track-temp" })}
               {S("Tint", ["white_balance", "tint"], -150, 150, { track: "track-tint" })}
@@ -2039,7 +2599,7 @@ export function Develop(p: Props) {
   );
 }
 
-/** Stored selections (masks). Each AI-selected object is its own selection that can be selected
+/** Stored selections (masks), listed in the Auto tab. Each AI-selected object is its own selection that can be selected
  *  to finetune in Adjust, unselected, toggled on/off or deleted without a new AI run. */
 function SelectionsTab({
   dev,
@@ -2463,9 +3023,8 @@ function AiBar({
 
       {result && (
         <div
-          className={`mt-2 max-h-32 overflow-y-auto whitespace-pre-wrap rounded border p-2.5 font-sans text-[11px] leading-relaxed ${
-            result.ok ? "border-neutral-700 bg-neutral-800/90 text-neutral-200" : "border-red-900/60 bg-red-950/20 text-red-300"
-          }`}
+          className={`mt-2 max-h-32 overflow-y-auto whitespace-pre-wrap rounded border p-2.5 font-sans text-[11px] leading-relaxed ${result.ok ? "border-neutral-700 bg-neutral-800/90 text-neutral-200" : "border-red-900/60 bg-red-950/20 text-red-300"
+            }`}
         >
           <div className="flex items-start justify-between gap-2">
             <div className="flex-1 select-text">

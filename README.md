@@ -6,10 +6,10 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Release](https://img.shields.io/badge/Release-v0.1.0--beta-success.svg)](https://github.com/rcwkan/openlight-studio/releases)
-[![Website](https://img.shields.io/badge/Website-openlight--studio.pages.dev-25c6d8.svg)](https://openlight-studio.pages.dev)
+[![Website](https://img.shields.io/badge/Website-openlight.makecade.com-25c6d8.svg)](https://openlight.makecade.com/)
 [![Platforms](https://img.shields.io/badge/Platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg)](https://github.com/rcwkan/openlight-studio/releases)
 
-[**Download App**](#-download--installation) · [**User Guide**](#-user-guide--key-features) · [**AI & Agents**](#-ai--agent-integration) · [**Developer Guide**](#-developer--contributor-guide) · [**Website**](https://openlight-studio.pages.dev)
+[**Download App**](#-download--installation) · [**User Guide**](#-user-guide--key-features) · [**AI & Agents**](#-ai--agent-integration) · [**Developer Guide**](#-developer--contributor-guide) · [**Website**](https://openlight.makecade.com/)
 
 </div>
 
@@ -85,9 +85,10 @@ The **Pro** tab provides advanced adjustments applied non-destructively on top o
 Open the **Auto** bar on the right side of the Library to run background batch operations:
 - **Auto Catalog & Culling**: Measures edge-width subject sharpness, highlights/shadows clipping, and noise; automatically detects bursts, selects the sharpest frame, and tags rejects.
 - **Auto Horizon Levelling**: Detects tilted horizons and levels images as dedicated history steps.
-- **Auto Look Profiles**: One-click professional color profiling (Natural, Vivid, Portrait, Landscape, Film, Moody, B&W).
+- **Auto Look Profiles**: One-click professional color profiling (Natural, Vivid, Portrait, Landscape, Street, Food, Architecture, Night, Nature, Film, Moody, B&W), or picked per photo by type with the AI.
 - **Find Blurred Subjects & Duplicates**: Flag missed-focus or motion-blurred shots; identify duplicate and visually similar photos by perceptual hash.
 - **Wavelet Denoise & Super Resolution**: Enhance images with multi-scale wavelet denoising and 1.5–4× enlargement into clean 32-bit float master TIFFs.
+- **HDR Merge & HDR Toning**: Merge exposure brackets (aligned, deghosted) into a 32-bit float master; tone-map any photo with local adaptation and detail control in Pro.
 
 ---
 

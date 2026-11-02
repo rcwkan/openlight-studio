@@ -43,6 +43,7 @@ export default function App() {
   const [developId, setDevelopId] = useState<number | null>(null);
   const [workingPhotosMap, setWorkingPhotosMap] = useState<Record<number, Photo>>({});
   const [aiTasks, setAiTasks] = useState<Record<number, AiTaskState>>({});
+  const [initialLoading, setInitialLoading] = useState(true);
 
   const reload = useCallback(async () => {
     const [ps, fs, bc] = await Promise.all([
@@ -82,16 +83,25 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    api.appInfo().then((i) => (setThumbsDir(i.thumbs_dir), setInfo(i)));
-    api.settings().then((s) => {
-      setSettings(s);
-      if (s.theme) {
-        applyTheme(s.theme);
-      } else {
-        applyTheme(getStoredTheme());
+    let mounted = true;
+    Promise.all([
+      api.appInfo().then((i) => (setThumbsDir(i.thumbs_dir), setInfo(i))),
+      api.settings().then((s) => {
+        setSettings(s);
+        if (s.theme) {
+          applyTheme(s.theme);
+        } else {
+          applyTheme(getStoredTheme());
+        }
+      }),
+      api.defaultDevelop().then(setDefaults),
+      reloadRef.current(),
+    ]).finally(() => {
+      if (mounted) {
+        setTimeout(() => setInitialLoading(false), 200);
       }
     });
-    api.defaultDevelop().then(setDefaults);
+
     const subs = [
       listen("catalog-changed", () => reloadRef.current()),
       listen<{ id: number }>("thumb-changed", async (e) => {
@@ -651,6 +661,33 @@ export default function App() {
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
   }, []);
+
+  if (initialLoading) {
+    return (
+      <div className="flex h-screen w-screen flex-col items-center justify-center bg-neutral-950 text-neutral-100 select-none">
+        <div className="relative mb-6 flex h-20 w-20 items-center justify-center rounded-3xl bg-neutral-900 border border-neutral-800 shadow-2xl">
+          <div className="absolute inset-0 rounded-3xl bg-cyan-500/10 blur-xl animate-pulse" />
+          <img
+            src="/icon.png"
+            alt="OpenLight Studio"
+            className="h-10 w-10 rounded-xl object-cover shadow-lg relative z-10"
+          />
+          <svg className="absolute -inset-1.5 h-23 w-23 animate-spin text-cyan-400" viewBox="0 0 24 24" fill="none">
+            <circle className="opacity-10" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2" />
+            <path className="opacity-90" fill="currentColor" d="M4 12a8 8 0 018-8v3a5 5 0 00-5 5H4z" />
+          </svg>
+        </div>
+        <h1 className="text-lg font-semibold tracking-tight text-white mb-1.5">OpenLight Studio</h1>
+        <div className="flex items-center gap-2 text-xs text-neutral-400 font-mono mb-4">
+          <span className="inline-block h-1.5 w-1.5 rounded-full bg-cyan-400 animate-ping" />
+          <span>Starting 32-bit floating-point engine &amp; catalog…</span>
+        </div>
+        <div className="h-1 w-48 overflow-hidden rounded-full bg-neutral-800">
+          <div className="h-full w-1/3 rounded-full bg-gradient-to-r from-cyan-500 to-sky-400 animate-[pulse_1.5s_ease-in-out_infinite]" />
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-full flex-col">

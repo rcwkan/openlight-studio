@@ -1,5 +1,5 @@
-//! Auto functions (spec §3.1.2, §3.4): Catalog & Culling, Non-destructive Editing, AI Masking, Denoise &
-//! Super Resolution, Find blurred subjects and Find duplicates. Each has advanced settings (kept in
+//! Auto functions (spec §3.1.2, §3.4, §3.5): Catalog & Culling, Non-destructive Editing, AI Masking, Denoise &
+//! Super Resolution, HDR Merge, Find blurred subjects and Find duplicates. Each has advanced settings (kept in
 //! `Settings::auto`), runs over a list of photos as a cancellable job with `job-progress` events, and
 //! returns a summary with a row per photo (or per group of duplicates) for the UI.
 
@@ -26,7 +26,7 @@ use std::{
     time::Duration,
 };
 
-pub const FUNCTIONS: &[&str] = &["cull", "edit", "mask", "enhance", "blur", "duplicates"];
+pub const FUNCTIONS: &[&str] = &["cull", "edit", "mask", "enhance", "hdr", "blur", "duplicates"];
 /// Fewer edges than this and a frame (fog, a plain sky) is not judged sharp or blurred.
 const MIN_EDGES: u32 = 50;
 /// Bump when the analysis changes, so cached measurements are taken again.
@@ -94,7 +94,7 @@ impl Default for CullSettings {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct EditSettings {
-    /// develop::PROFILES
+    /// develop::PROFILES, or "type": each photo's own type (photo_type_of)
     pub profile: String,
     /// 0-100: how far toward the auto result.
     pub strength: f32,
@@ -111,6 +111,9 @@ pub struct EditSettings {
     pub skip_edited: bool,
     /// Edit a new virtual copy instead of the photo.
     pub virtual_copy: bool,
+    /// With the look "type": ask the AI provider what each photo shows (one request per photo); off, or
+    /// when it fails, the photo's keywords and measurements decide.
+    pub ai_type: bool,
 }
 impl Default for EditSettings {
     fn default() -> Self {
@@ -125,6 +128,7 @@ impl Default for EditSettings {
             noise_reduction: true,
             skip_edited: true,
             virtual_copy: false,
+            ai_type: true,
         }
     }
 }
@@ -208,6 +212,28 @@ impl Default for EnhanceSettings {
     }
 }
 
+/// HDR Merge.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct HdrSettings {
+    /// brackets (photos taken within `bracket_seconds` of each other, one merge each) | all (one merge)
+    pub grouping: String,
+    pub bracket_seconds: f32,
+    /// Line up handheld frames.
+    pub align: bool,
+    /// off | low | medium | high: what moved between frames comes from the middle exposure alone.
+    pub deghost: String,
+    /// The new photo starts with auto white balance, tone and HDR toning (Merge exposures, fitted to its range).
+    pub auto_tone: bool,
+    /// Where the new files go; empty: next to the photos (Pictures/OpenLight Enhanced for remote ones).
+    pub folder: String,
+}
+impl Default for HdrSettings {
+    fn default() -> Self {
+        Self { grouping: "brackets".into(), bracket_seconds: 3.0, align: true, deghost: "low".into(), auto_tone: true, folder: String::new() }
+    }
+}
+
 /// Find blurred main subjects.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
@@ -279,6 +305,7 @@ pub struct AutoSettings {
     pub edit: EditSettings,
     pub mask: MaskSettings,
     pub enhance: EnhanceSettings,
+    pub hdr: HdrSettings,
     pub blur: BlurSettings,
     pub duplicates: DuplicateSettings,
     pub on_import: OnImport,
@@ -353,9 +380,10 @@ pub fn run(core: &Arc<Core>, function: &str, ids: &[i64], settings: &Value, job:
     }
     let mut out = match function {
         "cull" => cull(core, ids, &with(&auto.cull, settings)?, &provider, job)?,
-        "edit" => edit(core, ids, &with(&auto.edit, settings)?, job)?,
+        "edit" => edit(core, ids, &with(&auto.edit, settings)?, &provider, job)?,
         "mask" => masks(core, ids, &with(&auto.mask, settings)?, &provider, job)?,
         "enhance" => enhance(core, ids, &with(&auto.enhance, settings)?, job)?,
+        "hdr" => hdr(core, ids, &with(&auto.hdr, settings)?, job)?,
         "blur" => find_blurred(core, ids, &with(&auto.blur, settings)?, &provider, job)?,
         "duplicates" => find_duplicates(core, ids, &with(&auto.duplicates, settings)?, job)?,
         f => return Err(format!("unknown auto function '{f}' (use {})", FUNCTIONS.join(", "))),
@@ -1026,10 +1054,60 @@ fn blend(from: &Develop, to: &Develop, t: f32) -> Develop {
     d
 }
 
-pub fn edit(core: &Arc<Core>, ids: &[i64], s: &EditSettings, job: &Job) -> Result<Value, String> {
+/// Photo types and the words (in a keyword) that point to them; ties go to the type listed first.
+const TYPES: &[(&str, &[&str])] = &[
+    ("night", &["night", "nighttime", "neon", "city lights", "star", "milky way", "astrophotography", "aurora", "moon", "firework", "dark"]),
+    ("food", &["food", "dish", "meal", "plate", "dessert", "cake", "coffee", "drink", "cocktail", "breakfast", "lunch", "dinner", "fruit", "bread", "pizza", "salad", "burger", "pasta", "wine", "restaurant"]),
+    ("portrait", &["portrait", "person", "people", "man", "men", "woman", "women", "girl", "boy", "child", "children", "face", "selfie", "model", "fashion", "bride", "couple", "smile", "headshot", "family"]),
+    ("nature", &["macro", "flower", "insect", "bee", "butterfly", "leaf", "leaves", "plant", "mushroom", "bird", "wildlife", "animal", "dog", "cat", "petal", "moss", "dew", "garden"]),
+    ("architecture", &["architecture", "building", "skyscraper", "interior", "facade", "bridge", "church", "cathedral", "tower", "staircase", "stairs", "house", "museum", "room", "ceiling", "cityscape", "skyline"]),
+    ("street", &["street", "city", "urban", "crowd", "road", "traffic", "alley", "sidewalk", "pedestrian", "market", "car", "subway", "downtown", "taxi"]),
+    ("landscape", &["landscape", "mountain", "lake", "sea", "ocean", "beach", "sunset", "sunrise", "sky", "forest", "desert", "valley", "river", "waterfall", "field", "hill", "coast", "snow", "cloud", "aerial", "horizon", "nature", "wave", "island"]),
+];
+
+/// The develop profile for a photo described by `keywords` (most telling first, as the AI lists them): black
+/// and white outright, else the type most keywords point to (the first counts double), else natural.
+/// ponytail: word lists; an image classifier would read scenes no keyword names.
+pub fn photo_type(keywords: &[String]) -> &'static str {
+    let keys: Vec<String> = keywords.iter().map(|k| k.to_lowercase()).collect();
+    let hits = |k: &str, t: &str| {
+        if t.contains(' ') {
+            k.contains(t)
+        } else {
+            k.split(|c: char| !c.is_alphanumeric()).any(|w| w == t || w.strip_suffix('s') == Some(t) || w.strip_suffix("es") == Some(t))
+        }
+    };
+    if keys.iter().any(|k| hits(k, "black and white") || hits(k, "monochrome")) {
+        return "bw";
+    }
+    let score = |words: &[&str]| keys.iter().enumerate().filter(|(_, k)| words.iter().any(|t| hits(k, t))).map(|(i, _)| if i == 0 { 2 } else { 1 }).sum::<usize>();
+    TYPES.iter().rev().map(|(t, w)| (*t, score(w))).max_by_key(|x| x.1).filter(|x| x.1 > 0).map_or("natural", |x| x.0)
+}
+
+/// `p`'s photo type (photo_type) from the AI provider's description when `ask` (else, or when it fails,
+/// without it), its catalog keywords and two measured cues: no colour, a dark frame. The error is the AI's.
+pub fn photo_type_of(core: &Arc<Core>, p: &Photo, provider: &str, ask: bool) -> (&'static str, Option<String>) {
+    let (mut k, err) = match ask.then(|| ai::describe(core, p.id, provider)) {
+        Some(Ok(words)) => (words, None),
+        Some(Err(e)) => (vec![], Some(e)),
+        None => (vec![], None),
+    };
+    k.extend(p.keywords.split(',').map(|w| w.trim().to_string()));
+    if let Ok(m) = measure(core, p, "fast", None) {
+        if m.colorfulness < 8.0 {
+            k.push("black and white".into());
+        }
+        if m.p50 < 0.15 {
+            k.push("dark".into());
+        }
+    }
+    (photo_type(&k), err)
+}
+
+pub fn edit(core: &Arc<Core>, ids: &[i64], s: &EditSettings, provider: &str, job: &Job) -> Result<Value, String> {
     let photos = catalog::photos(&core.db(), ids)?;
     let n = photos.len();
-    let (mut rows, mut edited) = (vec![], 0);
+    let (mut rows, mut edited, mut ai_errors) = (vec![], 0, 0);
     for (k, p) in photos.iter().enumerate() {
         if job.cancelled() {
             break;
@@ -1050,8 +1128,19 @@ pub fn edit(core: &Arc<Core>, ids: &[i64], s: &EditSettings, job: &Job) -> Resul
             if s.tone {
                 d.basic_tone = develop::auto_tone(&img, &d.white_balance);
             }
+            let mut profile = s.profile.clone();
             if s.look {
-                d = develop::look_on(&d, &s.profile)?;
+                if profile == "type" {
+                    // AI typing stops after 3 failures, like AI keywords
+                    let (t, err) = photo_type_of(core, p, provider, s.ai_type && ai_errors < 3);
+                    if let Some(e) = err {
+                        ai_errors += 1;
+                        notes.push(format!("AI: {e}"));
+                    }
+                    notes.push(format!("{t} look"));
+                    profile = t.into();
+                }
+                d = develop::look_on(&d, &profile)?;
             }
             if s.upright != "off" {
                 match develop::upright(&img, &d, &s.upright) {
@@ -1075,7 +1164,7 @@ pub fn edit(core: &Arc<Core>, ids: &[i64], s: &EditSettings, job: &Job) -> Resul
             if d == cur {
                 return Ok(json!({ "id": target, "status": "unchanged", "note": notes.join("; ") }));
             }
-            core.commit(target, &d, &format!("Auto edit: {}", s.profile))?;
+            core.commit(target, &d, &format!("Auto edit: {profile}"))?;
             Ok(json!({ "id": target, "status": "edited", "note": notes.join("; ") }))
         })();
         let mut row = res.unwrap_or_else(|e| json!({ "status": "failed", "note": e }));
@@ -1194,10 +1283,10 @@ pub fn masks(core: &Arc<Core>, ids: &[i64], s: &MaskSettings, provider: &str, jo
 // AI Denoise & Super Resolution (Enhance)
 // ---------------------------------------------------------------------------
 
-/// A name `stem-Enhanced-NR-SR.tif` in `dir` that is not taken.
-fn enhanced_path(dir: &Path, p: &Photo, denoised: bool, scaled: bool, removed: bool) -> PathBuf {
+/// A name `stem<suffix>.tif` (e.g. -Enhanced-NR-SR, -HDR) in `dir` that is not taken.
+fn enhanced_path(dir: &Path, p: &Photo, suffix: &str) -> PathBuf {
     let stem = Path::new(&p.filename).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "photo".into());
-    let stem = format!("{stem}-Enhanced{}{}{}", if denoised { "-NR" } else { "" }, if scaled { "-SR" } else { "" }, if removed { "-Removed" } else { "" });
+    let stem = format!("{stem}{suffix}");
     let mut out = dir.join(format!("{stem}.tif"));
     let mut k = 1;
     while out.exists() {
@@ -1207,11 +1296,11 @@ fn enhanced_path(dir: &Path, p: &Photo, denoised: bool, scaled: bool, removed: b
     out
 }
 
-/// Where Enhance writes: the chosen folder, else next to a local original if that folder is writable,
+/// Where Enhance and HDR Merge write: `folder`, else next to a local original if that folder is writable,
 /// else Pictures/OpenLight Enhanced.
-fn enhanced_dir(s: &EnhanceSettings, p: &Photo) -> Result<PathBuf, String> {
-    let dir = if !s.folder.trim().is_empty() {
-        PathBuf::from(s.folder.trim())
+fn enhanced_dir(folder: &str, p: &Photo) -> Result<PathBuf, String> {
+    let dir = if !folder.trim().is_empty() {
+        PathBuf::from(folder.trim())
     } else {
         let next_to = Path::new(&p.path).parent().filter(|d| remote::immich_id(&p.path).is_none() && d.is_dir());
         match next_to.filter(|d| fs::metadata(d).is_ok_and(|m| !m.permissions().readonly())) {
@@ -1221,6 +1310,35 @@ fn enhanced_dir(s: &EnhanceSettings, p: &Photo) -> Result<PathBuf, String> {
     };
     fs::create_dir_all(&dir).map_err(|e| format!("cannot write to {}: {e}", dir.display()))?;
     Ok(dir)
+}
+
+/// Catalogs `out`, made from `p` at `size`, as a new master with `p`'s capture data, edits `d` and the
+/// keyword `tag`; with `keep`, also `p`'s rating, flag, label and keywords.
+fn add_master(core: &Arc<Core>, p: &Photo, out: &Path, size: (usize, usize), d: &Develop, tag: &str, keep: bool) -> Result<i64, String> {
+    let meta = catalog::Meta {
+        captured_at: p.captured_at.clone(),
+        camera: p.camera.clone(),
+        lens: p.lens.clone(),
+        iso: p.iso,
+        aperture: p.aperture,
+        shutter: p.shutter.clone(),
+        focal_length: p.focal_length,
+        orientation: 1,
+    };
+    let path = out.to_string_lossy().to_string();
+    let folder = out.parent().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
+    let name = out.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
+    let id = catalog::add_photo(&core.db(), &path, &folder, &name, &meta, d)?.ok_or("the new file is already in the catalog")?;
+    {
+        let db = core.db();
+        db.execute("UPDATE photos SET width = ?, height = ? WHERE id = ?", (size.0 as i64, size.1 as i64, id)).map_err(es)?;
+        let words = catalog::merge_keywords(if keep { &p.keywords } else { "" }, &[tag.to_string()]);
+        let label = if keep { Some(if p.color_label.is_empty() { "none".to_string() } else { p.color_label.clone() }) } else { None };
+        let flag = if keep { Some(catalog::flag_name(p.flag).to_string()) } else { None };
+        catalog::update(&db, &[id], &Culling { rating: keep.then_some(p.rating), flag, color_label: label, keywords: Some(words) })?;
+    }
+    core.refresh(id, d)?;
+    Ok(id)
 }
 
 pub fn enhance(core: &Arc<Core>, ids: &[i64], s: &EnhanceSettings, job: &Job) -> Result<Value, String> {
@@ -1280,42 +1398,20 @@ pub fn enhance(core: &Arc<Core>, ids: &[i64], s: &EnhanceSettings, job: &Job) ->
                 let img = if s.denoise { enhance::denoise(img, s.strength, s.detail, s.color) } else { img };
                 if scaled { enhance::upscale(img, scale, s.sharpen) } else { img }
             };
-            let out = enhanced_path(&enhanced_dir(s, p)?, p, s.denoise, scaled, removing);
+            let out = enhanced_path(&enhanced_dir(&s.folder, p)?, p, &format!("-Enhanced{}{}{}", if s.denoise { "-NR" } else { "" }, if scaled { "-SR" } else { "" }, if removing { "-Removed" } else { "" }));
             let float = s.format == "float" || (s.format == "auto" && develop::is_raw(&file));
             if float {
                 develop::export_linear(&img, &out)?;
             } else {
                 develop::export(&img, &out, "TIFF_16", "sRGB", 100, None)?;
             }
-            // the new master: capture data, and the original's edits, rating and keywords
-            let meta = catalog::Meta {
-                captured_at: p.captured_at.clone(),
-                camera: p.camera.clone(),
-                lens: p.lens.clone(),
-                iso: p.iso,
-                aperture: p.aperture,
-                shutter: p.shutter.clone(),
-                focal_length: p.focal_length,
-                orientation: 1,
-            };
+            // the new master: the original's edits, rating and keywords
             let mut d = if s.copy_edits { core.develop(p.id)? } else { Develop::default() };
             if s.denoise {
                 (d.detail.luminance_noise_reduction, d.detail.color_noise_reduction) = (0.0, 0.0);
             }
-            let path = out.to_string_lossy().to_string();
-            let folder = out.parent().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
-            let name = out.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
-            let id = catalog::add_photo(&core.db(), &path, &folder, &name, &meta, &d)?.ok_or("the new file is already in the catalog")?;
-            {
-                let db = core.db();
-                db.execute("UPDATE photos SET width = ?, height = ? WHERE id = ?", (img.w as i64, img.h as i64, id)).map_err(es)?;
-                let words = catalog::merge_keywords(if s.copy_edits { &p.keywords } else { "" }, &["enhanced".to_string()]);
-                let label = if s.copy_edits { Some(if p.color_label.is_empty() { "none".to_string() } else { p.color_label.clone() }) } else { None };
-                let flag = if s.copy_edits { Some(catalog::flag_name(p.flag).to_string()) } else { None };
-                catalog::update(&db, &[id], &Culling { rating: s.copy_edits.then_some(p.rating), flag, color_label: label, keywords: Some(words) })?;
-            }
-            core.refresh(id, &d)?;
-            Ok(json!({ "new_id": id, "output": path, "size": format!("{w0} × {h0} → {} × {}", img.w, img.h) }))
+            let id = add_master(core, p, &out, (img.w, img.h), &d, "enhanced", s.copy_edits)?;
+            Ok(json!({ "new_id": id, "output": out.to_string_lossy(), "size": format!("{w0} × {h0} → {} × {}", img.w, img.h) }))
         })();
         let mut row = res.unwrap_or_else(|e| json!({ "error": e }));
         made += row.get("new_id").is_some() as usize;
@@ -1325,6 +1421,79 @@ pub fn enhance(core: &Arc<Core>, ids: &[i64], s: &EnhanceSettings, job: &Job) ->
     }
     core.emit("catalog-changed", json!({}));
     Ok(json!({ "total": n, "made": made, "rows": rows }))
+}
+
+// ---------------------------------------------------------------------------
+// HDR Merge
+// ---------------------------------------------------------------------------
+
+/// Photos in capture order, split where more than `bracket_seconds` pass between two (a photo without a
+/// capture time stands alone); "all": one group.
+fn brackets<'a>(photos: &'a [Photo], s: &HdrSettings) -> Vec<Vec<&'a Photo>> {
+    if s.grouping == "all" {
+        return vec![photos.iter().collect()];
+    }
+    let (mut out, mut last): (Vec<Vec<&Photo>>, Option<i64>) = (vec![], None);
+    for p in photos {
+        let t = p.captured_at.as_deref().and_then(seconds);
+        match (last, t, out.last_mut()) {
+            (Some(a), Some(b), Some(g)) if (b - a) as f32 <= s.bracket_seconds => g.push(p),
+            _ => out.push(vec![p]),
+        }
+        last = t;
+    }
+    out
+}
+
+/// Merge each exposure bracket among `ids` into a new 32-bit float master (…-HDR.tif) next to them.
+pub fn hdr(core: &Arc<Core>, ids: &[i64], s: &HdrSettings, job: &Job) -> Result<Value, String> {
+    let mut photos = masters(core, ids)?;
+    photos.sort_by_key(|p| (p.captured_at.as_deref().and_then(seconds), p.filename.clone()));
+    let groups = brackets(&photos, s);
+    let deghost = match s.deghost.as_str() {
+        "low" => 1.0,
+        "medium" => 0.5,
+        "high" => 0.25,
+        _ => 0.0,
+    };
+    let n = groups.len();
+    let (mut rows, mut made) = (vec![], 0);
+    for (k, g) in groups.iter().enumerate() {
+        if job.cancelled() {
+            break;
+        }
+        job.progress("Merging to HDR", k, n);
+        let res = (|| -> Result<Value, String> {
+            if g.len() < 2 {
+                return Err(format!("no bracket: nothing else was taken within {} s", s.bracket_seconds));
+            }
+            let frames = g.iter().map(|p| core.decode(&core.local_file(&p.path)?, None)).collect::<Result<Vec<_>, _>>()?;
+            let m = enhance::merge_hdr(frames, s.align, deghost)?;
+            let (lo, hi) = m.ev.iter().fold((0f32, 0f32), |(a, b), &e| (a.min(e), b.max(e)));
+            if hi - lo < 0.5 {
+                return Err("the photos have the same exposure: a burst, not a bracket".into());
+            }
+            let p = g[m.reference];
+            let out = enhanced_path(&enhanced_dir(&s.folder, p)?, p, "-HDR");
+            develop::export_linear(&m.img, &out)?;
+            let mut d = if s.auto_tone { develop::auto(&m.img, &Develop::default(), "natural")? } else { Develop::default() };
+            if s.auto_tone {
+                d.hdr = develop::auto_hdr(&m.img);
+            }
+            let id = add_master(core, p, &out, (m.img.w, m.img.h), &d, "hdr", false)?;
+            let evs: Vec<String> = m.ev.iter().map(|e| format!("{e:+.1}")).collect();
+            let moved = m.shift.iter().map(|s| s.0.abs().max(s.1.abs())).max().unwrap_or(0);
+            Ok(json!({ "new_id": id, "output": out.to_string_lossy(), "frames": g.len(), "evs": format!("{} EV", evs.join(", ")), "aligned_px": moved }))
+        })();
+        let mut row = res.unwrap_or_else(|e| json!({ "error": e }));
+        made += row.get("new_id").is_some() as usize;
+        row["id"] = json!(g[0].id);
+        row["ids"] = json!(g.iter().map(|p| p.id).collect::<Vec<_>>());
+        row["file"] = json!(g.iter().map(|p| file_name(p)).collect::<Vec<_>>().join(", "));
+        rows.push(row);
+    }
+    core.emit("catalog-changed", json!({}));
+    Ok(json!({ "total": photos.len(), "brackets": groups.iter().filter(|g| g.len() > 1).count(), "made": made, "rows": rows }))
 }
 
 #[cfg(test)]
@@ -1364,6 +1533,25 @@ mod tests {
         // older settings files without the new fields still load
         let a: AutoSettings = serde_json::from_value(json!({ "cull": { "stars": false } })).unwrap();
         assert!(!a.cull.stars && a.cull.keywords && a.edit == EditSettings::default());
+    }
+
+    #[test]
+    fn photo_types_map_to_profiles() {
+        let t = |k: &[&str]| photo_type(&k.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(t(&["mountain", "lake", "sunrise"]), "landscape");
+        assert_eq!(t(&["woman", "beach", "sunset"]), "portrait", "the first keyword counts double, ties go to the earlier type");
+        assert_eq!(t(&["street", "people", "city"]), "street");
+        assert_eq!(t(&["Pasta", "plate", "restaurant"]), "food");
+        assert_eq!(t(&["skyscraper", "glass facade"]), "architecture");
+        assert_eq!(t(&["city lights", "neon", "street"]), "night");
+        assert_eq!(t(&["bee", "flowers", "garden"]), "nature");
+        assert_eq!(t(&["portrait", "black and white"]), "bw");
+        assert_eq!(t(&["2024", "may", "horizontal", "cathedrals"]), "architecture");
+        assert_eq!(t(&["2024", "may", "horizontal"]), "natural");
+        for (ty, _) in TYPES {
+            assert!(develop::PROFILES.contains(ty), "{ty} is not a profile");
+            assert!(develop::look_on(&Develop::default(), ty).unwrap() != Develop::default(), "{ty} has no look");
+        }
     }
 
     fn photo(id: i64, w: i64, h: i64, captured: &str) -> Photo {
@@ -1452,6 +1640,8 @@ mod tests {
         assert_eq!(r["edited"], 1, "{r}");
         assert!(core.develop(sharp.id).unwrap() != Develop::default());
         assert_eq!(run(&core, "edit", &[sharp.id], &json!({}), &job).unwrap()["rows"][0]["status"], "skipped");
+        let r = run(&core, "edit", &[soft.id], &json!({ "profile": "type", "ai_type": false }), &job).unwrap();
+        assert!(r["rows"][0]["note"].as_str().unwrap().ends_with("natural look"), "{r}");
 
         let r = run(&core, "mask", &[sharp.id], &json!({ "targets": ["sky"], "adjust": 50 }), &job).unwrap();
         assert_eq!(r["masks"], 1, "{r}");
@@ -1468,6 +1658,21 @@ mod tests {
         assert!(p.keywords.contains("enhanced"));
         let back = develop::load(&out, None).unwrap();
         assert_eq!((back.w, back.h), (1200, 800));
+        // a two-shot bracket, 2 stops apart, a second after each other
+        let bracket = photos.join("bracket");
+        fs::create_dir_all(&bracket).unwrap();
+        let sharp_scene = scene(0.0, 0);
+        for (name, k) in [("under.jpg", 0.4f32), ("over.jpg", 1.6)] {
+            let img = image::RgbImage::from_fn(w, h, |x, y| image::Rgb(sharp_scene.get_pixel(x, y).0.map(|c| (c as f32 * k).min(255.0) as u8)));
+            img.save(bracket.join(name)).unwrap();
+        }
+        let shots = catalog::import(&core, &bracket, &|_, _| {}).unwrap();
+        let r = run(&core, "hdr", &shots, &json!({ "grouping": "all" }), &job).unwrap();
+        let new = r["rows"][0]["new_id"].as_i64().unwrap_or_else(|| panic!("{r}"));
+        let p = core.photo(new).unwrap();
+        assert!(p.filename.ends_with("-HDR.tif") && p.keywords.contains("hdr") && (p.width, p.height) == (600, 400), "{p:?}");
+        assert!(core.develop(new).unwrap().hdr.enabled, "the merge starts tone-mapped");
+        assert!(run(&core, "hdr", &[shots[0]], &json!({}), &job).unwrap()["rows"][0]["error"].as_str().unwrap().contains("no bracket"));
         drop(job);
         assert!(core.jobs.lock().unwrap().is_empty());
         let _ = fs::remove_dir_all(&dir);

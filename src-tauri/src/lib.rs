@@ -586,6 +586,15 @@ fn auto_develop(core: St, id: i64, develop: Develop, profile: String) -> Result<
     develop::auto(&*core.proxy(&core.photo(id)?.path)?, &develop, &profile)
 }
 
+/// The profile for what photo `id` shows (auto::photo_type_of), asking the active AI provider; with the
+/// AI's error when it could not, and the type came from the photo's keywords and measurements alone.
+#[tauri::command(async)]
+fn photo_type(core: St, id: i64) -> Result<(String, Option<String>), String> {
+    let provider = core.settings.lock().unwrap().active_provider.clone();
+    let (t, err) = auto::photo_type_of(core.inner(), &core.photo(id)?, &provider, true);
+    Ok((t.into(), err))
+}
+
 #[tauri::command(async)]
 fn auto_white_balance(core: St, id: i64) -> Result<develop::WhiteBalance, String> {
     Ok(develop::auto_wb(&*core.proxy(&core.photo(id)?.path)?))
@@ -595,6 +604,12 @@ fn auto_white_balance(core: St, id: i64) -> Result<develop::WhiteBalance, String
 #[tauri::command(async)]
 fn auto_tone(core: St, id: i64, develop: Develop) -> Result<develop::BasicTone, String> {
     Ok(develop::auto_tone(&*core.proxy(&core.photo(id)?.path)?, &develop.white_balance))
+}
+
+/// Auto HDR toning parameters for the photo proxy.
+#[tauri::command(async)]
+fn auto_hdr(core: St, id: i64) -> Result<develop::Hdr, String> {
+    Ok(develop::auto_hdr(&*core.proxy(&core.photo(id)?.path)?))
 }
 
 /// Removes the objects in selection `mask` (its AI outlines), each healed from a matching nearby area,
@@ -1011,8 +1026,10 @@ pub fn run() {
             auto_ca,
             heal_spot,
             auto_develop,
+            photo_type,
             auto_white_balance,
             auto_tone,
+            auto_hdr,
             remove_selection,
             save_develop,
             get_history,

@@ -1111,7 +1111,7 @@ export function Cell({
         <img src={thumbUrl(photo)} loading="lazy" draggable={false} className="max-h-full max-w-full object-contain shadow-md" alt="" />
         
         {/* Quick action overlay buttons on hover */}
-        <div className="absolute inset-0 flex items-center justify-center gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity bg-black/45 backdrop-blur-[1px] rounded pointer-events-none">
+        <div className="absolute inset-0 flex items-center justify-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity bg-black/50 backdrop-blur-xs rounded pointer-events-none">
           <button
             type="button"
             onClick={(e) => {
@@ -1119,10 +1119,10 @@ export function Cell({
               if (onView) onView();
               else onOpen();
             }}
-            className="pointer-events-auto flex items-center gap-1 rounded bg-neutral-900/95 hover:bg-neutral-800 text-white px-2 py-1 text-[10px] font-semibold border border-neutral-700 shadow-md cursor-pointer transition-colors"
+            className="pointer-events-auto flex items-center gap-1.5 rounded-md bg-white hover:bg-slate-100 text-slate-900 px-2.5 py-1 text-[11px] font-semibold border border-white/90 shadow-lg cursor-pointer transition-all active:scale-95"
             title="Open in Photo Viewer (ACDSee folder image view - V)"
           >
-            <svg className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <svg className="h-3.5 w-3.5 text-slate-700" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
               <rect x="3" y="3" width="18" height="18" rx="2" />
               <circle cx="8.5" cy="8.5" r="1.5" />
               <polyline points="21 15 16 10 5 21" />
@@ -1135,10 +1135,10 @@ export function Cell({
               e.stopPropagation();
               onOpen();
             }}
-            className="pointer-events-auto flex items-center gap-1 rounded bg-[var(--theme-accent,#0ea5e9)] hover:bg-[var(--theme-accent-hover,#0284c7)] text-[var(--theme-accent-contrast,#ffffff)] px-2 py-1 text-[10px] font-semibold shadow-md cursor-pointer transition-colors"
+            className="pointer-events-auto flex items-center gap-1.5 rounded-md bg-[var(--theme-accent,#0ea5e9)] hover:bg-[var(--theme-accent-hover,#0284c7)] text-[var(--theme-accent-contrast,#ffffff)] px-2.5 py-1 text-[11px] font-semibold shadow-lg cursor-pointer transition-all active:scale-95"
             title="Open in Develop module (D)"
           >
-            <Icon d="M12 20h9 M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" className="h-3 w-3" />
+            <Icon d="M12 20h9 M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" className="h-3.5 w-3.5" />
             <span>Develop</span>
           </button>
         </div>
@@ -1176,8 +1176,8 @@ export function Cell({
           )}
           {photo.edited && (
             <span
-              className="rounded bg-neutral-700/80 px-1 py-0.2 text-[9px] font-medium text-amber-300"
-              title="Edited photo"
+              className="badge-edited"
+              title="Edited photo (adjustments applied)"
             >
               ±
             </span>

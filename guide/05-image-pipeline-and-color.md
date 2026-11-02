@@ -47,7 +47,7 @@ flowchart TD
     Stage5["5. Boolean Mask Coverage Calculation & Local Adjustments"]
     Stage6["6. Curves, 8-Band Mixer, Point Color 3D HSL, 3-Way Grading"]
     Stage7["7. Detail: Luminance NR, Color NR, Edge Sharpening"]
-    Stage7a["7a. Photoshop Pro Adjustments (Levels, Selective Color, Filters)"]
+    Stage7a["7a. Photoshop Pro Adjustments (HDR Toning, Levels, Selective Color, Filters)"]
     Stage8["8. Mask Tuning (Recursive Secondary Develop on Mask Coverage)"]
     Stage9["9. Geometry (Distortion, Upright, Straighten, Crop) & Post-Crop Effects"]
 
@@ -100,6 +100,7 @@ flowchart TD
 ### Stage 7 & 7a: Detail & Photoshop Pro Adjustments
 * **Noise Reduction**: Bilateral edge-preserving filtering on luminance, and median filtering on chrominance channels.
 * **Sharpening**: Unsharp masking with user-specified radius and edge masking.
+* **HDR Toning**: *Merge exposures* (the default) simulates an exposure bracket from the photo (2–9 shots, 0.5–4 EV apart, each clipped like a camera's) and merges it by exposure fusion (Mertens, Kautz & Van Reeth): per-pixel weights for well-exposedness, local contrast and saturation, blended in a Laplacian pyramid so no seams show. Shots beyond the photo's own range are dropped, and *Natural* blends the coarse pyramid levels toward the photo's own tones (extended Reinhard), since fusion alone favours mid grey: it would grey a bright sky and glow along strong edges. HDR Merge of real brackets starts its result with the same method, fitted to the merged range. Photoshop's four methods are there too, on log luminance. *Local adaptation*: a self-guided filter splits an edge-aware base (Radius, Edge strength, optional second Smooth-edges pass against halos) from the detail; the base range is compressed around the photo's key and shifted (Shadows, Highlights) and the detail scaled back in (Detail). *Equalize histogram* maps each brightness by its rank; *Exposure and gamma* is global; *Highlight compression* is Reinhard's roll-off to white. Then Exposure, Gamma (around white), Fine detail (1–2 px texture), the Toning curve on display brightness (drawn over the live histogram) and Vibrance / Saturation; every step changes luminance only, so hues stay.
 * **Photoshop Adjustments**: Applies Levels (black/gamma/white input and output remapping), Hue/Saturation/Lightness, Selective Color CMYK offsets, and Channel Mixer.
 
 ### Stage 9: Geometry, Post-Crop Vignette & Film Grain
@@ -124,3 +125,24 @@ To maintain 60fps interactivity during slider adjustments on commodity CPUs, Ope
 
 Because both modes execute the **exact same Rust code path**, developers and AI agents are guaranteed that what is previewed on screen is identical to the exported master image.
 
+
+---
+
+## 4. Photo-Type Auto Tuning
+
+**✦ By photo type** (Develop › Auto) and the *By photo type* look in Auto › Non-destructive Editing first tell what a photo shows, then apply that type's profile on top of the measured white balance and tone (`develop::auto` / `look_on`). `auto::photo_type_of` asks the active AI provider for keywords (`ai::describe`), adds the photo's catalog keywords and two measured cues (no colour → B&W, a dark median → night), and `auto::photo_type` maps them to a profile; without an AI the keywords and cues decide alone.
+
+The profiles follow the looks that are common on Unsplash for each kind of photo:
+
+| Type | White balance | Tone & curve | Colour (HSL, grading) | Presence & effects |
+|---|---|---|---|---|
+| Landscape | as measured | contrast +, highlights −25, shadows + | deeper blues, greens toward yellow and calmer, aqua toward blue, warm highlights | clarity, dehaze, vibrance + |
+| Portrait | warmer (+200 K) | soft contrast, faded black (curve lift) | calmer red/orange, brighter orange (skin), muted greens | texture and clarity −, light vibrance |
+| Street | as measured | punchy midtones, matte black | muted (saturation −15), teal shadows / warm highlights | clarity +, vignette, light grain |
+| Food | warmer (+150 K) | bright, open shadows | richer reds, oranges, greens; cool blues calmed | texture +, vibrance + |
+| Architecture | cooler (−150 K) | contrast +, even (highlights −, shadows +, whites +) | muted yellows/greens/blues, lighter (pastel) sky | clarity and texture + |
+| Night | cooler (−400 K) | neon held back (highlights −30), deep blacks | greens to aqua, yellows to orange; teal shadows / warm highlights | clarity, vibrance + |
+| Nature & macro | warmer (+100 K) | gentle | lush yellows and greens | vibrance +30, texture +, soft vignette |
+| B&W | — | contrast + | Monochrome | clarity + |
+
+Unmatched photos get *Natural*. The keyword lists live in `auto::TYPES`; `photo_types_map_to_profiles` checks the mapping.

@@ -49,8 +49,25 @@ export function PhotoViewer({
   const [flipH, setFlipH] = useState(false);
   const [flipV, setFlipV] = useState(false);
 
-  // Toggles and modes
-  const [showInfo, setShowInfo] = useState(true);
+  // Toggles and modes (info HUD popup is hidden by default)
+  const [showInfo, setShowInfo] = useState(() => {
+    try {
+      const stored = localStorage.getItem("openlight_viewer_show_info");
+      return stored === "true"; // defaults to false
+    } catch {
+      return false;
+    }
+  });
+
+  const toggleInfo = useCallback((val?: boolean) => {
+    setShowInfo((prev) => {
+      const next = typeof val === "boolean" ? val : !prev;
+      try {
+        localStorage.setItem("openlight_viewer_show_info", String(next));
+      } catch {}
+      return next;
+    });
+  }, []);
   const [showFilmstrip, setShowFilmstrip] = useState(true);
   const [slideshow, setSlideshow] = useState(false);
   const [slideshowInterval] = useState(3000); // 3 seconds
@@ -339,7 +356,7 @@ export function PhotoViewer({
         rotateCCW();
       } else if (k === "i") {
         e.preventDefault();
-        setShowInfo((s) => !s);
+        toggleInfo();
       } else if (k === "f") {
         e.preventDefault();
         toggleFullscreen();
@@ -425,7 +442,7 @@ export function PhotoViewer({
               </span>
             )}
             {photo.edited && (
-              <span className="rounded bg-neutral-800 px-1 py-0.2 text-[9px] font-medium text-amber-300" title="Edited photo">
+              <span className="badge-edited" title="Edited photo (adjustments applied)">
                 ±
               </span>
             )}
@@ -626,7 +643,7 @@ export function PhotoViewer({
                 <span className="truncate">{photo.filename}</span>
               </div>
               <button
-                onClick={() => setShowInfo(false)}
+                onClick={() => toggleInfo(false)}
                 className="text-neutral-500 hover:text-white transition-colors"
                 title="Hide Info HUD (I)"
               >
@@ -828,7 +845,7 @@ export function PhotoViewer({
           <span className="text-neutral-600 px-0.5">|</span>
 
           <button
-            onClick={() => setShowInfo(!showInfo)}
+            onClick={() => toggleInfo()}
             className={`rounded px-2 py-1 text-xs font-medium border border-neutral-700/60 transition-colors ${
               showInfo ? "bg-neutral-700 text-white font-semibold" : "bg-neutral-800 text-neutral-400 hover:text-white"
             }`}

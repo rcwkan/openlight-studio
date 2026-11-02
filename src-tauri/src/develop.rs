@@ -50,6 +50,7 @@ pub struct Develop {
     pub selective_color: SelectiveColor,
     pub channel_mixer: ChannelMixer,
     pub gradient_map: GradientMap,
+    pub hdr: Hdr,
     pub filters: Filters,
     pub image_rotation: ImageRotation,
     pub crop: Crop,
@@ -415,6 +416,77 @@ impl Default for GradientMap {
     }
 }
 
+/// HDR Toning. `method`:
+/// - fusion (Merge exposures, the default): the photo as a simulated bracket of `frames` 2-9 (whole) exposures
+///   `ev_spacing` 0.5-4 stops apart around its own, each clipped like a camera's, merged by exposure fusion
+///   (Mertens, Kautz & Van Reeth): each pixel comes mostly from the frames where it is well exposed, detailed
+///   and colourful, weighted by `exposedness`, `contrast_weight` and `saturation_weight` 0-200 (100: equal).
+///   Shots beyond the photo's own range are left out. `natural` 0-100 takes the broad brightness (sky above
+///   ground) from the photo's own tones rolled off into white, so the merge adds detail without greying
+///   bright areas or glowing along edges.
+/// - local (Local Adaptation): the photo's log luminance splits into an edge-aware base (regions `radius`
+///   0-100 across, held at edges as firmly as `edge` 0-100; `smooth_edges` runs a second pass, fewer halos)
+///   and the detail on it. The base's range is squeezed by `compression` 0-100 around the photo's key and
+///   moved by `shadows` and `highlights` -100..100 (in stops of the base); the detail comes back at
+///   `detail` -100..300 % extra.
+/// - equalize (Equalize Histogram): each brightness goes where its rank puts it, filling the whole range.
+/// - gamma (Exposure and Gamma) and highlights (Highlight Compression, Reinhard's roll-off to white): global.
+/// Then, for every method: `exposure` (EV), `gamma` 0.1-3 (around white: above 1 opens the shadows),
+/// `fine_detail` -100..300 % (texture a pixel or two across), the toning `curve` ([x, y] 0-255 on display
+/// brightness), `vibrance` and `saturation` -100..100. Off unless `enabled`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct Hdr {
+    pub enabled: bool,
+    pub method: String,
+    pub frames: f32,
+    pub ev_spacing: f32,
+    pub exposedness: f32,
+    pub contrast_weight: f32,
+    pub saturation_weight: f32,
+    pub natural: f32,
+    pub radius: f32,
+    pub edge: f32,
+    pub smooth_edges: bool,
+    pub compression: f32,
+    pub exposure: f32,
+    pub gamma: f32,
+    pub detail: f32,
+    pub fine_detail: f32,
+    pub shadows: f32,
+    pub highlights: f32,
+    pub vibrance: f32,
+    pub saturation: f32,
+    pub curve: Vec<[f32; 2]>,
+}
+impl Default for Hdr {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            method: "fusion".into(),
+            frames: 3.0,
+            ev_spacing: 2.0,
+            exposedness: 100.0,
+            contrast_weight: 100.0,
+            saturation_weight: 100.0,
+            natural: 60.0,
+            radius: 30.0,
+            edge: 50.0,
+            smooth_edges: false,
+            compression: 50.0,
+            exposure: 0.0,
+            gamma: 1.0,
+            detail: 30.0,
+            fine_detail: 0.0,
+            shadows: 0.0,
+            highlights: 0.0,
+            vibrance: 0.0,
+            saturation: 0.0,
+            curve: vec![],
+        }
+    }
+}
+
 /// Gaussian blur 0-100 (sigma up to 2% of the long edge), invert, posterize levels (0 = off, 2-255)
 /// and threshold (0 = off, 1-255 luminance).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
@@ -714,6 +786,30 @@ impl Develop {
         cl(&mut g.amount, 0.0, 100.0);
         for v in g.shadows.iter_mut().chain(&mut g.highlights) {
             cl(v, 0.0, 1.0);
+        }
+        let x = &mut self.hdr;
+        for v in [&mut x.radius, &mut x.edge, &mut x.compression] {
+            cl(v, 0.0, 100.0);
+        }
+        cl(&mut x.exposure, -5.0, 5.0);
+        cl(&mut x.gamma, 0.1, 3.0);
+        cl(&mut x.detail, -100.0, 300.0);
+        cl(&mut x.fine_detail, -100.0, 300.0);
+        for v in [&mut x.shadows, &mut x.highlights, &mut x.vibrance, &mut x.saturation] {
+            cl(v, -100.0, 100.0);
+        }
+        if !["fusion", "local", "equalize", "gamma", "highlights"].contains(&x.method.as_str()) {
+            x.method = "fusion".into();
+        }
+        x.frames = x.frames.round().clamp(2.0, 9.0);
+        cl(&mut x.ev_spacing, 0.5, 4.0);
+        for v in [&mut x.exposedness, &mut x.contrast_weight, &mut x.saturation_weight] {
+            cl(v, 0.0, 200.0);
+        }
+        cl(&mut x.natural, 0.0, 100.0);
+        for p in x.curve.iter_mut() {
+            cl(&mut p[0], 0.0, 255.0);
+            cl(&mut p[1], 0.0, 255.0);
         }
         let f = &mut self.filters;
         cl(&mut f.blur, 0.0, 100.0);
@@ -1200,7 +1296,7 @@ fn tones(src: &[Px], w: usize, h: usize, d: &Develop, overlay: Option<usize>) ->
         && d.presence.dehaze == 0.0
         && d.presence.clarity == 0.0
         && d.presence.texture == 0.0;
-    let no_detail = d.detail.luminance_noise_reduction <= 0.0 && d.detail.color_noise_reduction <= 0.0 && d.detail.sharpening <= 0.0 && d.filters.blur <= 0.0;
+    let no_detail = d.detail.luminance_noise_reduction <= 0.0 && d.detail.color_noise_reduction <= 0.0 && d.detail.sharpening <= 0.0 && d.filters.blur <= 0.0 && !d.hdr.enabled; // HDR toning runs between detail and Pro, on the CPU
     let mut pro_gpu = false;
     // ponytail: light edits (tone/curves only) are faster on the CPU than the transfer to the GPU
     let heavy = color.active || (pro.active && no_detail);
@@ -1263,6 +1359,9 @@ fn tones(src: &[Px], w: usize, h: usize, d: &Develop, overlay: Option<usize>) ->
         sharpen(&mut px, w, h, &d.detail);
     }
     // 7b. Pro: Photoshop adjustments on the result (inside the mask, for a mask's tuning)
+    if d.hdr.enabled {
+        hdr(&mut px, w, h, &d.hdr);
+    }
     if d.filters.blur > 0.0 {
         let s = d.filters.blur / 100.0 * 0.02 * w.max(h) as f32;
         let ch: [Vec<f32>; 3] = std::array::from_fn(|c| blur(&px.iter().map(|p| p[c]).collect::<Vec<_>>(), w, h, s));
@@ -1392,6 +1491,230 @@ fn local_contrast(px: &mut [Px], w: usize, h: usize, clarity: f32, texture: f32)
         }
         let r = ((v0 + d).max(0.0) / v0).powi(2).min(8.0);
         *p = p.map(|c| c * r);
+    });
+}
+
+/// Self-guided filter (He et al.) of `v` over radius `r`: smooth except across steps larger than about √eps.
+fn self_guided(v: &[f32], w: usize, h: usize, r: f32, eps: f32) -> Vec<f32> {
+    let mean = blur(v, w, h, r);
+    let sq = blur(&v.iter().map(|x| x * x).collect::<Vec<f32>>(), w, h, r);
+    let a: Vec<f32> = sq.iter().zip(&mean).map(|(s, m)| (s - m * m).max(0.0)).map(|var| var / (var + eps)).collect();
+    let b: Vec<f32> = a.iter().zip(&mean).map(|(a, m)| m * (1.0 - a)).collect();
+    let (ma, mb) = (blur(&a, w, h, r), blur(&b, w, h, r));
+    (0..v.len()).map(|i| ma[i] * v[i] + mb[i]).collect()
+}
+
+/// A plane of a pyramid: values, width, height.
+type Plane = (Vec<f32>, usize, usize);
+
+/// Half size: blurred, then every other pixel.
+fn down(p: &Plane) -> Plane {
+    let (v, w, h) = (blur(&p.0, p.1, p.2, 1.0), p.1, p.2);
+    let (nw, nh) = (w.div_ceil(2), h.div_ceil(2));
+    ((0..nw * nh).map(|i| v[(i / nw * 2).min(h - 1) * w + (i % nw * 2).min(w - 1)]).collect(), nw, nh)
+}
+
+/// `p` stretched (bilinear) to `w` × `h`.
+fn up(p: &Plane, w: usize, h: usize) -> Vec<f32> {
+    let (v, pw, ph) = (&p.0, p.1, p.2);
+    (0..w * h)
+        .into_par_iter()
+        .map(|i| {
+            let (x, y) = (((i % w) as f32 + 0.5) / 2.0 - 0.5, ((i / w) as f32 + 0.5) / 2.0 - 0.5);
+            let (x0, y0) = (x.floor().max(0.0) as usize, y.floor().max(0.0) as usize);
+            let (x1, y1) = ((x0 + 1).min(pw - 1), (y0 + 1).min(ph - 1));
+            let (fx, fy) = ((x - x0 as f32).clamp(0.0, 1.0), (y - y0 as f32).clamp(0.0, 1.0));
+            let at = |x: usize, y: usize| v[y.min(ph - 1) * pw + x.min(pw - 1)];
+            (at(x0, y0) * (1.0 - fx) + at(x1, y0) * fx) * (1.0 - fy) + (at(x0, y1) * (1.0 - fx) + at(x1, y1) * fx) * fy
+        })
+        .collect()
+}
+
+fn gauss_pyramid(p: Plane, levels: usize) -> Vec<Plane> {
+    let mut g = vec![p];
+    while g.len() < levels {
+        let next = down(g.last().unwrap());
+        g.push(next);
+    }
+    g
+}
+
+/// Each level minus the next one up (its detail); the top keeps the coarse rest.
+fn laplace_pyramid(p: Plane, levels: usize) -> Vec<Plane> {
+    let g = gauss_pyramid(p, levels);
+    (0..g.len())
+        .map(|l| match g.get(l + 1) {
+            Some(n) => (g[l].0.iter().zip(up(n, g[l].1, g[l].2)).map(|(a, b)| a - b).collect(), g[l].1, g[l].2),
+            None => g[l].clone(),
+        })
+        .collect()
+}
+
+/// Exposure fusion of a simulated bracket (see Hdr): the frames are display values, each pixel's weight is
+/// its local contrast (Laplacian of grey), saturation (spread of R, G, B) and well-exposedness (closeness of
+/// each channel to mid grey) raised to the chosen powers, and the frames are blended level by level in a
+/// Laplacian pyramid so the seams between them do not show. Fusion favours mid grey, so on its own it greys
+/// a bright sky (the darkest shots show it best) and its coarse levels glow along strong edges: Natural
+/// blends those coarse levels toward the photo's own tones instead.
+fn fuse(px: &mut [Px], w: usize, h: usize, x: &Hdr) {
+    if px.is_empty() {
+        return;
+    }
+    let n = x.frames.round().clamp(2.0, 9.0) as usize;
+    // the photo's own range: no shot darker than it takes to hold the brightest highlights (0.1% kept
+    // below 0.85), none brighter than it takes to bring the deepest shadows (1%) up to mid grey
+    let mut lum: Vec<f32> = px.iter().step_by((px.len() / 40_000).max(1)).map(|p| luma(*p).max(1e-5)).collect();
+    lum.sort_by(f32::total_cmp);
+    let q = |f: f32| lum[((lum.len() - 1) as f32 * f) as usize];
+    let (lo, hi) = ((0.85 / q(0.999)).log2().min(0.0), (0.18 / q(0.01)).log2().max(0.0));
+    let mut evs: Vec<f32> = (0..n).map(|k| ((k as f32 - (n - 1) as f32 / 2.0) * x.ev_spacing).clamp(lo, hi)).collect();
+    evs.dedup_by(|a, b| (*a - *b).abs() < 0.25);
+    let frame = |ev: f32| -> Vec<Px> { px.par_iter().map(|p| p.map(|c| srgb_oetf((c * ev.exp2()).clamp(0.0, 1.0)))).collect() };
+    let (wc, ws, we) = (x.contrast_weight / 100.0, x.saturation_weight / 100.0, x.exposedness / 100.0);
+    let weight = |f: &[Px]| -> Vec<f32> {
+        let g: Vec<f32> = f.iter().map(|p| 0.25 * p[0] + 0.6 * p[1] + 0.15 * p[2]).collect();
+        (0..w * h)
+            .into_par_iter()
+            .map(|i| {
+                let (cx, cy) = ((i % w) as isize, (i / w) as isize);
+                let at = |dx: isize, dy: isize| g[(cy + dy).clamp(0, h as isize - 1) as usize * w + (cx + dx).clamp(0, w as isize - 1) as usize];
+                let c = (at(-1, 0) + at(1, 0) + at(0, -1) + at(0, 1) - 4.0 * g[i]).abs();
+                let p = f[i];
+                let m = (p[0] + p[1] + p[2]) / 3.0;
+                let s = ((p[0] - m).powi(2) + (p[1] - m).powi(2) + (p[2] - m).powi(2)).sqrt() / 3f32.sqrt();
+                let e: f32 = p.iter().map(|v| (-(v - 0.5).powi(2) / 0.08).exp()).product();
+                (c + 1e-3).powf(wc) * (s + 1e-3).powf(ws) * (e + 1e-4).powf(we)
+            })
+            .collect()
+    };
+    let frames: Vec<Vec<Px>> = evs.iter().map(|&ev| frame(ev)).collect();
+    let weights: Vec<Vec<f32>> = frames.iter().map(|f| weight(f)).collect();
+    let total: Vec<f32> = (0..w * h).into_par_iter().map(|i| weights.iter().map(|v| v[i]).sum::<f32>().max(1e-12)).collect();
+    // down to about 8 px: the coarsest levels decide the overall brightness, the finest the texture
+    let levels = ((w.min(h) as f32 / 8.0).log2().floor() as usize).max(1);
+    let mut acc: Option<[Vec<Plane>; 3]> = None;
+    for (f, wk) in frames.iter().zip(weights) {
+        let gw = gauss_pyramid((wk.iter().zip(&total).map(|(a, t)| a / t).collect(), w, h), levels);
+        let lp: [Vec<Plane>; 3] = std::array::from_fn(|c| laplace_pyramid((f.iter().map(|p| p[c]).collect(), w, h), levels));
+        let add = |a: &mut [Vec<Plane>; 3]| {
+            for c in 0..3 {
+                for (l, (lv, gv)) in lp[c].iter().zip(&gw).enumerate() {
+                    a[c][l].0.par_iter_mut().zip(&lv.0).zip(&gv.0).for_each(|((o, v), g)| *o += v * g);
+                }
+            }
+        };
+        match &mut acc {
+            Some(a) => add(a),
+            None => {
+                let mut a = std::array::from_fn(|c| lp[c].iter().map(|p| (vec![0.0; p.0.len()], p.1, p.2)).collect());
+                add(&mut a);
+                acc = Some(a);
+            }
+        }
+    }
+    let Some(mut acc) = acc else { return };
+    // Natural: the coarse levels (overall brightness, large shapes) lean toward the photo's own tones,
+    // rolled off into white (extended Reinhard) and kept a little inside black and white
+    let k = x.natural / 100.0;
+    if k > 0.0 && levels > 2 {
+        let white = q(0.999).max(1.0);
+        let guide: Vec<Px> = px
+            .par_iter()
+            .map(|p| {
+                let l = luma(*p).max(1e-6);
+                let d = l * (1.0 + l / (white * white)) / (1.0 + l);
+                p.map(|c| 0.04 + 0.9 * srgb_oetf((c * d / l).clamp(0.0, 1.0)))
+            })
+            .collect();
+        let top = (levels - 1) as f32;
+        for (c, pyr) in acc.iter_mut().enumerate() {
+            let lg = laplace_pyramid((guide.iter().map(|p| p[c]).collect(), w, h), levels);
+            for (l, (a, g)) in pyr.iter_mut().zip(&lg).enumerate() {
+                let t = k * smooth(0.3 * top, 0.75 * top, l as f32);
+                if t > 0.0 {
+                    a.0.par_iter_mut().zip(&g.0).for_each(|(o, v)| *o += t * (v - *o));
+                }
+            }
+        }
+    }
+    let ch: [Vec<f32>; 3] = acc.map(|pyr| {
+        let mut r = pyr.last().unwrap().clone();
+        for p in pyr.iter().rev().skip(1) {
+            r = (up(&r, p.1, p.2).iter().zip(&p.0).map(|(a, b)| a + b).collect(), p.1, p.2);
+        }
+        r.0
+    });
+    px.par_iter_mut().enumerate().for_each(|(i, p)| *p = [0, 1, 2].map(|c| srgb_eotf(ch[c][i].clamp(0.0, 1.0))));
+}
+
+/// HDR Toning (see Hdr), on log2 luminance: the method gives each pixel its new brightness, the global
+/// stages follow, and each pixel takes the luminance ratio (hue kept), then vibrance/saturation.
+fn hdr(px: &mut [Px], w: usize, h: usize, x: &Hdr) {
+    if x.method == "fusion" {
+        fuse(px, w, h, x);
+    }
+    let l: Vec<f32> = px.par_iter().map(|p| luma(*p).max(1e-5).log2()).collect();
+    let n = l.len().max(1) as f32;
+    let mut out: Vec<f32> = match x.method.as_str() {
+        "equalize" => {
+            // rank in a 1024-bin histogram of the log range, onto display brightness
+            let (lo, hi) = l.iter().fold((f32::MAX, f32::MIN), |(a, b), &v| (a.min(v), b.max(v)));
+            let bin = |v: f32| (((v - lo) / (hi - lo).max(1e-3) * 1023.0) as usize).min(1023);
+            let mut cdf = [0f32; 1024];
+            l.iter().for_each(|&v| cdf[bin(v)] += 1.0);
+            for i in 1..1024 {
+                cdf[i] += cdf[i - 1];
+            }
+            l.par_iter().map(|&v| srgb_eotf((cdf[bin(v)] / n).clamp(1e-3, 1.0)).log2()).collect()
+        }
+        "fusion" | "gamma" => l.clone(),
+        "highlights" => {
+            let white = l.iter().fold(0f32, |m, &v| m.max(v)).exp2().max(1.0);
+            l.par_iter().map(|&v| {
+                let y = v.exp2();
+                (y * (1.0 + y / (white * white)) / (1.0 + y)).max(1e-5).log2()
+            }).collect()
+        }
+        _ => {
+            let r = w.max(h) as f32 * (0.002 + 0.05 * x.radius / 100.0);
+            // edge 0: barely edge-aware (a wide glow); 100: halts at a 1/4-stop step
+            let eps = (4.0 * (1.0 - x.edge / 100.0) + 0.0625).powi(2) / 16.0;
+            let mut base = self_guided(&l, w, h, r, eps);
+            if x.smooth_edges {
+                base = self_guided(&base, w, h, r, eps);
+            }
+            let key = base.iter().sum::<f32>() / n;
+            let (c, k) = (1.0 - 0.8 * x.compression / 100.0, 1.0 + x.detail / 100.0);
+            (0..l.len()).into_par_iter().map(|i| {
+                let t = base[i] - key;
+                let lift = 2.0 * x.shadows / 100.0 * smooth(0.0, 3.0, -t) + 2.0 * x.highlights / 100.0 * smooth(0.0, 3.0, t);
+                key + t * c + lift + (l[i] - base[i]) * k
+            }).collect()
+        }
+    };
+    if x.fine_detail != 0.0 {
+        let fine = blur(&l, w, h, (w.max(h) as f32 / 1600.0).max(1.0));
+        out.par_iter_mut().enumerate().for_each(|(i, o)| *o += (l[i] - fine[i]) * x.fine_detail / 100.0);
+    }
+    let curve = Spline::new(&x.curve);
+    let (sat, vib) = (x.saturation / 100.0, x.vibrance / 100.0);
+    px.par_iter_mut().enumerate().for_each(|(i, p)| {
+        let mut o = (out[i] + x.exposure) / x.gamma;
+        if let Some(s) = &curve {
+            // on display brightness; above white the curve's end ratio carries on
+            let v = srgb_oetf(o.exp2().min(1.0));
+            o += (srgb_eotf(s.eval(v).clamp(0.0, 1.0)).max(1e-5) / srgb_eotf(v).max(1e-5)).log2();
+        }
+        let g = (o - l[i]).exp2().min(64.0);
+        let q = p.map(|v| v.max(0.0) * g);
+        if sat == 0.0 && vib == 0.0 {
+            *p = q;
+            return;
+        }
+        let (y, hi) = (luma(q), q[0].max(q[1]).max(q[2]));
+        let s = if hi > 1e-6 { 1.0 - q[0].min(q[1]).min(q[2]) / hi } else { 0.0 };
+        let m = (1.0 + sat + vib * (1.0 - s)).max(0.0);
+        *p = q.map(|v| (y + (v - y) * m).max(0.0));
     });
 }
 
@@ -3087,20 +3410,34 @@ pub fn estimate_ca(img: &Img) -> [f32; 2] {
 // ---------------------------------------------------------------------------
 
 /// Profiles the Auto tab tunes to: auto white balance and tone, then a look.
-pub const PROFILES: &[&str] = &["natural", "neutral", "vivid", "portrait", "landscape", "bw", "film", "moody"];
+/// The photo-type ones (portrait … night) follow the looks common on Unsplash for that kind of photo; the
+/// Auto tab picks one per photo from what it shows (auto::photo_type).
+pub const PROFILES: &[&str] = &[
+    "natural", "neutral", "vivid", "portrait", "landscape", "bw", "film", "moody", "street", "food", "architecture", "night", "nature",
+];
 
-/// A profile's look on top of the auto result: numbers add to it, everything else is set.
+/// A profile's look on top of the auto result: numbers add to it, everything else is set. Colour mixer
+/// bands: red, orange, yellow, green, aqua, blue, purple, magenta.
 fn look(profile: &str) -> Option<Value> {
     Some(match profile {
         "natural" => json!({ "presence": { "vibrance": 10 } }),
         "neutral" => json!({ "basic_tone": { "contrast": -20, "highlights": -15, "shadows": 15 }, "presence": { "vibrance": -10 } }),
         "vivid" => json!({ "basic_tone": { "contrast": 15 }, "presence": { "clarity": 10, "vibrance": 35, "saturation": 5 } }),
+        // warm and soft: smooth skin, calm orange/red, quieter greens behind, a slightly faded black
         "portrait" => json!({
             "white_balance": { "temperature_k": 200 },
             "basic_tone": { "exposure": 0.1, "contrast": -5, "highlights": -10, "shadows": 10 },
-            "presence": { "texture": -15, "clarity": -10, "vibrance": 5 }
+            "presence": { "texture": -15, "clarity": -10, "vibrance": 5 },
+            "color_mixer": { "saturation": [-5, -8, 0, -15, 0, 0, 0, 0], "luminance": [0, 8, 0, 0, 0, 0, 0, 0] },
+            "tone_curve": { "point_luma": [[0, 10], [128, 130], [255, 252]] }
         }),
-        "landscape" => json!({ "basic_tone": { "contrast": 10, "highlights": -25, "shadows": 15 }, "presence": { "clarity": 15, "dehaze": 10, "vibrance": 25 } }),
+        // held-back skies, open shadows, deep blues, greens toward yellow, warm highlights
+        "landscape" => json!({
+            "basic_tone": { "contrast": 10, "highlights": -25, "shadows": 15 },
+            "presence": { "clarity": 15, "dehaze": 10, "vibrance": 25 },
+            "color_mixer": { "hue": [0, 0, 0, -8, 8, 0, 0, 0], "saturation": [0, 5, 0, -10, 0, 10, 0, 0], "luminance": [0, 0, 0, 0, 0, -10, 0, 0] },
+            "color_grading_3way": { "highlights": { "hue": 45, "sat": 8 } }
+        }),
         "bw" => json!({ "profile": "Monochrome", "basic_tone": { "contrast": 20 }, "presence": { "clarity": 10 } }),
         "film" => json!({
             "basic_tone": { "contrast": -10 },
@@ -3113,6 +3450,46 @@ fn look(profile: &str) -> Option<Value> {
             "basic_tone": { "exposure": -0.3, "contrast": 15, "highlights": -20 },
             "presence": { "clarity": 10, "dehaze": 5, "saturation": -20 },
             "effects": { "vignette": -25 }
+        }),
+        // muted, cinematic: punchy midtones, teal shadows, warm highlights, matte black, light grain
+        "street" => json!({
+            "basic_tone": { "contrast": 20, "highlights": -15, "shadows": 10 },
+            "presence": { "clarity": 15, "saturation": -15 },
+            "color_mixer": { "saturation": [0, 5, -10, -20, 0, -15, -10, -10] },
+            "tone_curve": { "point_luma": [[0, 15], [64, 60], [192, 198], [255, 248]] },
+            "color_grading_3way": { "shadows": { "hue": 200, "sat": 12 }, "highlights": { "hue": 40, "sat": 10 } },
+            "effects": { "vignette": -15 },
+            "grain": { "amount": 10 }
+        }),
+        // bright and warm: open shadows, rich reds/oranges/herb greens, cool window light calmed
+        "food" => json!({
+            "white_balance": { "temperature_k": 150 },
+            "basic_tone": { "exposure": 0.15, "contrast": 5, "highlights": -10, "shadows": 20 },
+            "presence": { "texture": 15, "clarity": 5, "vibrance": 20 },
+            "color_mixer": { "saturation": [10, 10, 5, 10, 0, -20, 0, 0] }
+        }),
+        // clean and cool: crisp lines, even tones, pastel skies, little colour
+        "architecture" => json!({
+            "white_balance": { "temperature_k": -150 },
+            "basic_tone": { "contrast": 15, "highlights": -20, "shadows": 20, "whites": 10 },
+            "presence": { "texture": 10, "clarity": 20, "saturation": -10 },
+            "color_mixer": { "saturation": [0, 0, -10, -15, 0, -10, 0, 0], "luminance": [0, 0, 0, 0, 0, 10, 0, 0] }
+        }),
+        // teal and orange city light: cooler, neon held back, greens to aqua, deep blacks
+        "night" => json!({
+            "white_balance": { "temperature_k": -400 },
+            "basic_tone": { "contrast": 15, "highlights": -30, "shadows": 10, "blacks": -10 },
+            "presence": { "clarity": 10, "dehaze": 5, "vibrance": 15 },
+            "color_mixer": { "hue": [0, 0, -10, 15, 0, 0, 0, 0], "saturation": [0, 5, 0, -20, 15, 15, 10, 10] },
+            "color_grading_3way": { "shadows": { "hue": 210, "sat": 15 }, "highlights": { "hue": 35, "sat": 10 } }
+        }),
+        // macro, flowers, wildlife: slightly warm, lush greens and yellows, fine detail, a soft vignette
+        "nature" => json!({
+            "white_balance": { "temperature_k": 100 },
+            "basic_tone": { "contrast": 5, "shadows": 10 },
+            "presence": { "texture": 10, "clarity": 5, "vibrance": 30 },
+            "color_mixer": { "hue": [0, 0, 0, -5, 0, 0, 0, 0], "saturation": [0, 0, 10, 5, 0, 0, 0, 0], "luminance": [0, 0, 0, 5, 0, 0, 0, 0] },
+            "effects": { "vignette": -15 }
         }),
         _ => return None,
     })
@@ -3240,6 +3617,70 @@ pub fn auto_tone(img: &Img, wb: &WhiteBalance) -> BasicTone {
     let after = pct(px.iter().map(|p| luma(tone.apply(p.map(|c| c * k))).max(0.0)).collect(), &[0.5])[0].max(1e-4);
     t.exposure = ((exposure + 0.8 * (med * k / after).log2()).clamp(-0.75, 2.0) * 20.0).round() / 20.0;
     t
+}
+
+/// Auto HDR toning: analyzes the image dynamic range, highlight clipping, and shadow depth to pick the
+/// simulated bracket for Merge exposures, and the local adaptation compression, edge strength, shadow lift
+/// and detail should the method be switched to it.
+pub fn auto_hdr(img: &Img) -> Hdr {
+    let px: Vec<Px> = subsample(img).copied().collect();
+    let pct = |mut v: Vec<f32>, qs: &[f32]| -> Vec<f32> {
+        v.sort_by(f32::total_cmp);
+        qs.iter().map(|q| v.get(((v.len().max(1) - 1) as f32 * q) as usize).copied().unwrap_or(0.0)).collect()
+    };
+    let lum: Vec<f32> = px.iter().map(|p| luma(*p).max(0.0)).collect();
+    let p = pct(lum.clone(), &[0.02, 0.10, 0.50, 0.90, 0.98]);
+    let (p02, p10, p90, p98) = (p[0], p[1], p[3], p[4]);
+
+    // Dynamic range estimation in stops
+    let dr = (p98.max(1e-3) / p02.max(1e-3)).log2().clamp(2.0, 14.0);
+
+    // Compression: squeeze range more if dynamic range is wide
+    let compression = (35.0 + (dr - 4.0) * 5.0).clamp(30.0, 75.0).round();
+
+    let radius = 35.0;
+    let edge = 50.0;
+
+    // Detail enhancement (brings back local contrast flattened by compression)
+    let detail = (25.0 + (compression - 30.0) * 0.4).clamp(20.0, 60.0).round();
+
+    // Shadows: lift shadows if dark end is compressed or deep
+    let shadows = if p10 < 0.10 {
+        ((0.10 - p10) / 0.10 * 35.0 + 15.0).clamp(10.0, 50.0).round()
+    } else {
+        15.0
+    };
+
+    // Highlights: pull down blown or hot highlights
+    let highlights = if p90 > 0.80 {
+        (-((p90 - 0.80) / 0.20 * 35.0 + 15.0)).clamp(-50.0, -10.0).round()
+    } else {
+        -15.0
+    };
+
+    // Merge exposures: a simulated bracket wide enough that each part of the scene's range is well exposed
+    // in one frame (a frame shows about 5 stops well); fusion balances the brightness itself
+    let frames = if dr > 10.0 { 5.0 } else { 3.0 };
+    let ev_spacing = (((dr - 5.0) / (frames - 1.0)).clamp(1.0, 3.0) * 2.0).round() / 2.0;
+
+    let vibrance = 15.0;
+    let saturation = 0.0;
+
+    Hdr {
+        enabled: true,
+        method: "fusion".into(),
+        frames,
+        ev_spacing,
+        radius,
+        edge,
+        compression,
+        detail,
+        shadows,
+        highlights,
+        vibrance,
+        saturation,
+        ..Default::default()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3752,6 +4193,78 @@ mod tests {
     }
 
     #[test]
+    fn hdr_toning_squeezes_the_range_and_keeps_detail() {
+        // a deep shadow half and a bright half, each with fine stripes
+        let (w, h) = (200, 100);
+        let px: Vec<Px> = (0..w * h).map(|i| [if i % w < w / 2 { 0.01 } else { 2.0 } * if (i % w) % 4 < 2 { 1.0 } else { 1.3 }; 3]).collect();
+        let src = Img { w, h, px };
+        let on = |method: &str| Hdr { enabled: true, method: method.into(), ..Default::default() };
+        let run = |x: Hdr| {
+            let mut px = src.px.clone();
+            hdr(&mut px, w, h, &x);
+            px
+        };
+        // mean log2 brightness of each half, and the stripes' contrast in the dark half (in stops)
+        let halves = |px: &[Px]| {
+            let side = |left: bool| (0..w * h).filter(|i| (i % w < w / 2) == left && (i % w) % (w / 2) > 20 && (i % w) % (w / 2) < 80).map(|i| luma(px[i]).log2()).sum::<f32>() / (60 * h) as f32;
+            (side(true), side(false), luma(px[w / 4 + 1]).log2() - luma(px[w / 4 + 3]).log2())
+        };
+        let (d0, b0, s0) = halves(&src.px);
+        let (d1, b1, s1) = halves(&run(Hdr { compression: 100.0, detail: 0.0, ..on("local") }));
+        assert!(b1 - d1 < 0.4 * (b0 - d0), "range {} -> {}", b0 - d0, b1 - d1);
+        assert!((s1 - s0).abs() < 0.05, "detail kept: {s0} -> {s1}");
+        let (.., s2) = halves(&run(Hdr { compression: 100.0, detail: 100.0, ..on("local") }));
+        // the edge-aware base keeps a little of the stripes, so +100% nearly doubles them
+        assert!(s2 > 1.6 * s0, "detail +100%: {s0} -> {s2}");
+        // nothing squeezed or added: the photo stays as it is
+        let same = run(Hdr { compression: 0.0, detail: 0.0, ..on("local") });
+        assert!(same.iter().zip(&src.px).all(|(a, b)| (a[0] - b[0]).abs() < 1e-3 * b[0].max(1.0)));
+        // off by default
+        assert_eq!(render(&src, &Develop::default(), &Opts::default()).px, render(&src, &Develop { hdr: Hdr { compression: 100.0, ..Default::default() }, ..Default::default() }, &Opts::default()).px);
+        // the global methods squeeze the range too, and keep the order of brightness
+        let (d, b, _) = halves(&run(on("equalize")));
+        assert!(b - d < 0.7 * (b0 - d0) && b > d, "equalize: range {} -> {}", b0 - d0, b - d);
+        // highlight compression rolls the top off into white and leaves the shadows be
+        let hc = run(on("highlights"));
+        let (d, b, _) = halves(&hc);
+        assert!(hc.iter().all(|p| luma(*p) <= 1.0 + 1e-3) && b - d < b0 - d0 - 0.5 && (d - d0).abs() < 0.05, "highlights: {d0}..{b0} -> {d}..{b}");
+        // gamma 2 halves the stops below white; exposure and gamma alone change nothing else
+        let (d, b, s) = halves(&run(Hdr { gamma: 2.0, ..on("gamma") }));
+        assert!((d - d0 / 2.0).abs() < 0.01 && (b - b0 / 2.0).abs() < 0.01 && (s - s0 / 2.0).abs() < 0.01, "{d} {b} {s}");
+        // fine detail grows the 2 px stripes; smooth edges keeps the range squeezed
+        let (.., s3) = halves(&run(Hdr { fine_detail: 100.0, detail: 0.0, compression: 0.0, ..on("local") }));
+        assert!(s3 > 1.3 * s0, "fine detail: {s0} -> {s3}");
+        let (d, b, _) = halves(&run(Hdr { smooth_edges: true, compression: 100.0, ..on("local") }));
+        assert!(b - d < 0.4 * (b0 - d0));
+        // a toning curve that darkens the midtones darkens the dark half, and the identity curve is a no-op
+        let (d, ..) = halves(&run(Hdr { curve: vec![[0.0, 0.0], [128.0, 90.0], [255.0, 255.0]], compression: 0.0, detail: 0.0, ..on("local") }));
+        assert!(d < d0 - 0.3, "curve: {d0} -> {d}");
+        assert_eq!(run(Hdr { curve: vec![[0.0, 0.0], [255.0, 255.0]], ..on("gamma") }), run(on("gamma")));
+
+        // auto HDR computes adaptive parameters and enables HDR
+        // merging a simulated bracket: the shadows come up from the +2 EV frame, the stripes in the clipped
+        // highlights come back from the -2 EV frame, and the result fits the display
+        let fused = run(on("fusion"));
+        let (d, b, _) = halves(&fused);
+        let stripes = |px: &[Px], x: usize| luma(px[x + 1]).log2() - luma(px[x + 3]).log2();
+        assert!(fused.iter().all(|p| p.iter().all(|&c| c <= 1.0)) && b > d && b - d < 0.7 * (b0 - d0), "fusion: {d0}..{b0} -> {d}..{b}");
+        // without Natural, the merge alone squeezes harder (and would grey a bright area)
+        let (dp, bp, _) = halves(&run(Hdr { natural: 0.0, ..on("fusion") }));
+        assert!(bp - dp < 0.6 * (b0 - d0) && bp - dp < b - d, "plain fusion: {}", bp - dp);
+        assert!(stripes(&fused, 3 * w / 4).abs() > 0.1 && stripes(&fused, w / 4).abs() > 0.1, "detail in both halves");
+        // a wider bracket reaches further into both ends; leaning on well-exposedness alone still merges
+        let (d5, b5, _) = halves(&run(Hdr { frames: 5.0, ev_spacing: 3.0, ..on("fusion") }));
+        assert!(b5 - d5 <= b - d + 0.05, "{} vs {}", b5 - d5, b - d);
+        assert!(run(Hdr { contrast_weight: 0.0, saturation_weight: 0.0, ..on("fusion") }).iter().all(|p| p.iter().all(|c| c.is_finite())));
+
+        let auto = auto_hdr(&src);
+        assert!(auto.enabled && auto.method == "fusion" && auto.ev_spacing >= 1.0);
+        assert!(auto.compression >= 30.0 && auto.compression <= 75.0);
+        assert!(auto.shadows > 0.0);
+        assert!(auto.highlights < 0.0);
+    }
+
+    #[test]
     fn pro_adjustments_and_image_rotation() {
         let src = gradient();
         let run = |d: &Develop| render(&src, d, &Opts::default());
@@ -3849,6 +4362,43 @@ mod tests {
         // Centre of the person's head inside the U-shaped notch (x = 100, y = 125) must stay unselected (0.0)
         let idx = (125 - win.y0) * win.w + (100 - win.x0);
         assert!(matte[idx] < 0.01, "foreground head inside U-notch bled into castle matte: {}", matte[idx]);
+    }
+
+    #[test]
+    fn hdr_merge_exposures_keeps_a_bright_sky_bright_and_textured() {
+        // a cloudy sky above the clip (1.2-2.0, flat white as shot) over dark textured ground
+        let (w, h) = (240, 160);
+        let px: Vec<Px> = (0..w * h)
+            .map(|i| {
+                let (x, y) = ((i % w) as f32, (i / w) as f32);
+                let v = if y < 96.0 { 1.6 * (1.0 + 0.25 * (x / 9.0).sin() * (y / 7.0).sin()) } else { 0.04 * if (i % w) % 6 < 3 { 1.0 } else { 1.4 } };
+                [v * 0.9, v, v * 1.15]
+            })
+            .collect();
+        let run = |x: Hdr| {
+            let mut p = px.clone();
+            hdr(&mut p, w, h, &x);
+            p
+        };
+        // display brightness of the sky (well inside it) and of the ground, and the clouds' contrast
+        let stats = |p: &[Px]| {
+            let disp = |i: usize| srgb_oetf(luma(p[i]).clamp(0.0, 1.0));
+            let sky: Vec<f32> = (10..80).flat_map(|y| (10..230).map(move |x| y * w + x)).map(disp).collect();
+            let mean = sky.iter().sum::<f32>() / sky.len() as f32;
+            let sd = (sky.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / sky.len() as f32).sqrt();
+            let ground = (110..150).flat_map(|y| (10..230).map(move |x| y * w + x)).map(disp).sum::<f32>() / (40 * 220) as f32;
+            (mean, sd, ground)
+        };
+        let fusion = Hdr { enabled: true, ..Default::default() };
+        let (sky, clouds, ground) = stats(&run(fusion.clone()));
+        assert!(sky > 0.75 && sky > ground + 0.3, "the sky stays bright: sky {sky}, ground {ground}");
+        assert!(clouds > 0.03, "the clouds come back: {clouds}");
+        let (grey, ..) = stats(&run(Hdr { natural: 0.0, ..fusion.clone() }));
+        // the range limit already keeps the darkest shot from greying it; Natural lifts it a little more
+        assert!(sky > grey + 0.01, "Natural keeps the sky brighter than plain fusion: {sky} vs {grey}");
+        // a far wider bracket than the photo needs ends the same
+        let (wide, ..) = stats(&run(Hdr { frames: 7.0, ev_spacing: 2.0, exposedness: 164.0, ..fusion }));
+        assert!((wide - sky).abs() < 0.08, "7 shots at ±6 EV: {wide} vs {sky}");
     }
 
     #[test]
