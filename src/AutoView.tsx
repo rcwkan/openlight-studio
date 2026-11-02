@@ -1,4 +1,4 @@
-import { open } from "@tauri-apps/plugin-dialog";
+import { ask, open } from "@tauri-apps/plugin-dialog";
 import { ReactNode, useEffect, useRef, useState } from "react";
 import { api, AutoFunction, AutoResult, AutoSettings, JobProgress, LABEL_COLORS, Photo, Settings, thumbUrl } from "./api";
 import { CompareGroup, CompareModal } from "./CompareModal";
@@ -733,6 +733,7 @@ function Results({ r, photos, filter, setFilter, onShow, title }: { r: AutoResul
             }
           }}
           onMoveToBin={async (photoId) => {
+            if (!(await ask("Move this photo to the Bin?\n\nYou can restore it from the Bin later.", { title: "Move to Bin", kind: "warning" }))) return;
             try {
               await api.moveToBin([photoId]);
             } catch (err) {

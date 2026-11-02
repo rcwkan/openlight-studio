@@ -494,9 +494,18 @@ export default function App() {
     setFilter({ folder: null, immich_album: null, ids: null, view: "bin", in_bin: true });
   };
 
+  // a second, explicit "are you sure" before acting on this many photos at once
+  const BULK_DELETE = 20;
+  const confirmBulk = async (n: number, action: string) =>
+    n < BULK_DELETE ||
+    ask(`You are about to ${action} ${n} photos at once.\n\nThis is a large number of photos. Are you absolutely sure?`, { title: `Confirm ${n} photos`, kind: "warning" });
+
   const moveToBin = async (idsOverride?: number[]) => {
-    const ids = idsOverride || targets();
+    // buttons pass their click event here, so only trust a real id list
+    const ids = Array.isArray(idsOverride) ? idsOverride : targets();
     if (!ids.length) return;
+    if (!(await ask(`Move ${ids.length} photo(s) to the Bin?\n\nYou can restore them from the Bin later.`, { title: "Move to Bin", kind: "warning" }))) return;
+    if (!(await confirmBulk(ids.length, "move to the Bin"))) return;
     try {
       const n = await api.moveToBin(ids);
       setStatus(`Moved ${n} photo(s) to Bin`);
@@ -536,6 +545,7 @@ export default function App() {
     if (!confirmDelete) return;
     const ids = confirmDelete.ids;
     setConfirmDelete(null);
+    if (!(await confirmBulk(ids.length, "permanently delete from disk"))) return;
     try {
       const n = await api.permanentDelete(ids);
       setStatus(`Permanently deleted ${n} photo(s)`);
@@ -557,7 +567,7 @@ export default function App() {
       `Empty Bin (${count} photo(s))?\n\nAll photos in the Bin will be permanently deleted from your disk. This action cannot be undone.`,
       { title: "Empty Bin", kind: "error" }
     );
-    if (!ok) return;
+    if (!ok || !(await confirmBulk(count, "permanently delete from disk"))) return;
     try {
       const n = await api.emptyBin();
       setStatus(`Emptied Bin (${n} photo(s) permanently deleted)`);
@@ -572,7 +582,7 @@ export default function App() {
 
   const remove = async () => {
     const ids = targets();
-    if (!ids.length || !(await ask(`Remove ${ids.length} photo(s) from the catalog? Files on disk are not touched.`, { title: "Remove from catalog", kind: "warning" }))) return;
+    if (!ids.length || !(await ask(`Remove ${ids.length} photo(s) from the catalog? Files on disk are not touched.`, { title: "Remove from catalog", kind: "warning" })) || !(await confirmBulk(ids.length, "remove from the catalog"))) return;
     await api.remove(ids);
     setSelected([]);
     setWorkingIds((prev) => prev.filter((id) => !ids.includes(id)));
