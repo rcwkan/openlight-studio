@@ -1,6 +1,6 @@
 # Media Credits & Licensing Verification
 
-All photographic images included in the OpenLight Studio web application and interactive demo (`html/`) are dedicated to the **Public Domain** under the **Creative Commons CC0 1.0 Universal Public Domain Dedication**. They have no copyright restrictions, require no royalties or permissions, and are free for commercial and non-commercial use, adaptation, and redistribution.
+All photographic images included in the OpenLight Studio web application and interactive demo (`html/`) are free for commercial and personal use with zero copyright restrictions:
 
 ---
 
@@ -17,19 +17,15 @@ All photographic images included in the OpenLight Studio web application and int
 
 ### 2. Portrait Demo Image (`html/demo-portrait.jpg`)
 
-- **Title**: *Mother Nature: Summer*
-- **Description**: Portrait of a smiling woman adorned with a vibrant floral crown against a warm amber studio background.
-- **Photographer**: Autumn Goodman ([@auttgood](https://unsplash.com/@auttgood))
-- **Source Repository**: [Wikimedia Commons File:Mother Nature, Summer (Unsplash).jpg](https://commons.wikimedia.org/wiki/File:Mother_Nature,_Summer_(Unsplash).jpg)
-- **Community Accolades**: Official **Wikimedia Commons Featured Picture** (peer-reviewed and voted into the top tier of photographic illustrations)
-- **License**: [Creative Commons CC0 1.0 Universal (CC0 1.0) Public Domain Dedication](https://creativecommons.org/publicdomain/zero/1.0/)
-- **Usage in OpenLight Studio**: Interactive portrait grading, warm skin tone & floral contrast demos, and AI subject/facial mask segmentation (crown, face, hair, shoulders).
+- **Title**: *Daytime Portrait on Concrete Stairs*
+- **Description**: Portrait of a woman sitting on concrete architectural stairs in natural daylight.
+- **Photographer**: Corey Saldana ([@corey_saldana](https://unsplash.com/@corey_saldana))
+- **Source URL**: [Unsplash photo VJStJwfnvYM](https://unsplash.com/photos/woman-in-black-brassiere-and-blue-denim-jeans-sitting-on-brown-concrete-stairs-during-daytime-VJStJwfnvYM)
+- **License**: [Unsplash License](https://unsplash.com/license) (Free to download and use for commercial and non-commercial purposes, no permission required)
+- **Usage in OpenLight Studio**: Interactive portrait grading, natural daylight tone reproduction, and AI subject segmentation (face, hair, outfit & jeans, concrete stairs).
 
 ---
 
-### Summary of CC0 1.0 Universal Terms
+### Licensing Summary
 
-> The person who associated a work with this deed has dedicated the work to the public domain by waiving all of his or her rights to the work worldwide under copyright law, including all related and neighboring rights, to the extent allowed by law.
-> 
-> You can copy, modify, distribute and perform the work, even for commercial purposes, all without asking permission.
-
+Both images are cleared for all personal, educational, and commercial purposes under CC0 1.0 and the Unsplash License, with no royalties, permissions, or restrictive copyrights.
