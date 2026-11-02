@@ -395,7 +395,7 @@ function ComparePane({
             </span>
           )}
           {photo.edited && (
-            <span className="rounded bg-neutral-800 text-amber-300 px-1 text-[10px]" title="Edited">
+            <span className="badge-edited" title="Edited photo (adjustments applied)">
               ±
             </span>
           )}

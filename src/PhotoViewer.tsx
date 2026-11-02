@@ -415,7 +415,7 @@ export function PhotoViewer({
               </span>
             )}
             {photo.edited && (
-              <span className="rounded bg-neutral-800 px-1 py-0.2 text-[9px] font-medium text-amber-300" title="Edited photo">
+              <span className="badge-edited" title="Edited photo (adjustments applied)">
                 ±
               </span>
             )}

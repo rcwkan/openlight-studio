@@ -3218,6 +3218,65 @@ pub fn auto_tone(img: &Img, wb: &WhiteBalance) -> BasicTone {
     t
 }
 
+/// Auto HDR toning: analyzes the image dynamic range, highlight clipping, and shadow depth
+/// to compute optimal local adaptation compression, edge strength, shadow lift, and detail.
+pub fn auto_hdr(img: &Img) -> Hdr {
+    let px: Vec<Px> = subsample(img).copied().collect();
+    let pct = |mut v: Vec<f32>, qs: &[f32]| -> Vec<f32> {
+        v.sort_by(f32::total_cmp);
+        qs.iter().map(|q| v.get(((v.len().max(1) - 1) as f32 * q) as usize).copied().unwrap_or(0.0)).collect()
+    };
+    let lum: Vec<f32> = px.iter().map(|p| luma(*p).max(0.0)).collect();
+    let p = pct(lum.clone(), &[0.02, 0.10, 0.50, 0.90, 0.98]);
+    let (p02, p10, med, p90, p98) = (p[0], p[1], p[2], p[3], p[4]);
+
+    // Dynamic range estimation in stops
+    let dr = (p98.max(1e-3) / p02.max(1e-3)).log2().clamp(2.0, 14.0);
+
+    // Compression: squeeze range more if dynamic range is wide
+    let compression = (35.0 + (dr - 4.0) * 5.0).clamp(30.0, 75.0).round();
+
+    let radius = 35.0;
+    let edge = 50.0;
+
+    // Detail enhancement (brings back local contrast flattened by compression)
+    let detail = (25.0 + (compression - 30.0) * 0.4).clamp(20.0, 60.0).round();
+
+    // Shadows: lift shadows if dark end is compressed or deep
+    let shadows = if p10 < 0.10 {
+        ((0.10 - p10) / 0.10 * 35.0 + 15.0).clamp(10.0, 50.0).round()
+    } else {
+        15.0
+    };
+
+    // Highlights: pull down blown or hot highlights
+    let highlights = if p90 > 0.80 {
+        (-((p90 - 0.80) / 0.20 * 35.0 + 15.0)).clamp(-50.0, -10.0).round()
+    } else {
+        -15.0
+    };
+
+    // Exposure shift to align median with midtone key (~0.18 linear)
+    let exposure = ((0.18 / med.max(1e-3)).log2() * 0.4).clamp(-1.5, 1.5);
+    let exposure = (exposure * 20.0).round() / 20.0;
+
+    let vibrance = 15.0;
+    let saturation = 0.0;
+
+    Hdr {
+        enabled: true,
+        radius,
+        edge,
+        compression,
+        exposure,
+        detail,
+        shadows,
+        highlights,
+        vibrance,
+        saturation,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Output: display buffers, histogram/telemetry, export
 // ---------------------------------------------------------------------------
@@ -3755,6 +3814,13 @@ mod tests {
         assert!(same.iter().zip(&src.px).all(|(a, b)| (a[0] - b[0]).abs() < 1e-3 * b[0].max(1.0)));
         // off by default
         assert_eq!(render(&src, &Develop::default(), &Opts::default()).px, render(&src, &Develop { hdr: Hdr { compression: 100.0, ..Default::default() }, ..Default::default() }, &Opts::default()).px);
+
+        // auto HDR computes adaptive parameters and enables HDR
+        let auto = auto_hdr(&src);
+        assert!(auto.enabled);
+        assert!(auto.compression >= 30.0 && auto.compression <= 75.0);
+        assert!(auto.shadows > 0.0);
+        assert!(auto.highlights < 0.0);
     }
 
     #[test]

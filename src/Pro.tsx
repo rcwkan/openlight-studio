@@ -22,6 +22,7 @@ export function ProTab(p: {
   /** no selection: whole-photo panels and auto */
   whole: boolean;
   autoLevels: () => void;
+  autoHdr?: () => void;
 }) {
   const { dev, edit, S, reset } = p;
   const [ch, setCh] = useState<"rgb" | "red" | "green" | "blue">("rgb");
@@ -74,7 +75,23 @@ export function ProTab(p: {
         {S("Output white", ["levels", ch, "out_white"], 0, 255)}
       </Panel>
 
-      <Panel title="HDR toning" right={reset("hdr", "HDR toning")}>
+      <Panel
+        title="HDR toning"
+        right={
+          <span className="flex gap-2">
+            {p.autoHdr && (
+              <button
+                className="text-[10px] font-normal normal-case text-sky-400 hover:text-sky-300"
+                onClick={p.autoHdr}
+                title="Automatically optimize HDR toning for this photo"
+              >
+                auto
+              </button>
+            )}
+            {reset("hdr", "HDR toning")}
+          </span>
+        }
+      >
         {check("HDR toning", ["hdr", "enabled"], "Squeeze the photo's range region by region and bring its detail back, like Photoshop's HDR Toning")}
         <div className={dev.hdr.enabled ? "" : "pointer-events-none opacity-40"}>
           {S("Radius", ["hdr", "radius"], 0, 100)}
