@@ -254,7 +254,7 @@ export const FUNCS: { id: AutoFunction; title: string; short: string; icon: stri
       },
       { kind: "heading", label: "Merging" },
       { kind: "check", k: "align", label: "Line up handheld shots" },
-      { kind: "check", k: "auto_tone", label: "Start with auto white balance and tone" },
+      { kind: "check", k: "auto_tone", label: "Start with auto white balance, tone and HDR toning", hint: "HDR toning (Merge exposures) fits the merged range to the screen; tune it in Develop › Pro" },
       { kind: "text", k: "folder", label: "Folder", folder: true, placeholder: "Next to the photos", hint: "Photos from Immich or the cloud go to Pictures/OpenLight Enhanced" },
     ],
   },

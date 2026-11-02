@@ -209,7 +209,7 @@ pub struct HdrSettings {
     pub align: bool,
     /// off | low | medium | high: what moved between frames comes from the middle exposure alone.
     pub deghost: String,
-    /// The new photo starts with auto white balance and tone.
+    /// The new photo starts with auto white balance, tone and HDR toning (Merge exposures, fitted to its range).
     pub auto_tone: bool,
     /// Where the new files go; empty: next to the photos (Pictures/OpenLight Enhanced for remote ones).
     pub folder: String,
@@ -1437,7 +1437,10 @@ pub fn hdr(core: &Arc<Core>, ids: &[i64], s: &HdrSettings, job: &Job) -> Result<
             let p = g[m.reference];
             let out = enhanced_path(&enhanced_dir(&s.folder, p)?, p, "-HDR");
             develop::export_linear(&m.img, &out)?;
-            let d = if s.auto_tone { develop::auto(&m.img, &Develop::default(), "natural")? } else { Develop::default() };
+            let mut d = if s.auto_tone { develop::auto(&m.img, &Develop::default(), "natural")? } else { Develop::default() };
+            if s.auto_tone {
+                d.hdr = develop::auto_hdr(&m.img);
+            }
             let id = add_master(core, p, &out, (m.img.w, m.img.h), &d, "hdr", false)?;
             let evs: Vec<String> = m.ev.iter().map(|e| format!("{e:+.1}")).collect();
             let moved = m.shift.iter().map(|s| s.0.abs().max(s.1.abs())).max().unwrap_or(0);
@@ -1629,6 +1632,7 @@ mod tests {
         let new = r["rows"][0]["new_id"].as_i64().unwrap_or_else(|| panic!("{r}"));
         let p = core.photo(new).unwrap();
         assert!(p.filename.ends_with("-HDR.tif") && p.keywords.contains("hdr") && (p.width, p.height) == (600, 400), "{p:?}");
+        assert!(core.develop(new).unwrap().hdr.enabled, "the merge starts tone-mapped");
         assert!(run(&core, "hdr", &[shots[0]], &json!({}), &job).unwrap()["rows"][0]["error"].as_str().unwrap().contains("no bracket"));
         drop(job);
         assert!(core.jobs.lock().unwrap().is_empty());
