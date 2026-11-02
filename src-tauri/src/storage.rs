@@ -406,7 +406,7 @@ pub fn connect_drive(core: &Core, id: &str) -> Result<String, String> {
 pub fn open_drive(core: &Arc<Core>, id: &str) -> Result<Value, String> {
     let d = drive(core, id)?;
     let path = PathBuf::from(connect_drive(core, id)?);
-    let ids = catalog::import(core, &path, &|done, total| core.emit("import-progress", json!({ "label": format!("Reading {}", d.name), "done": done, "total": total })))?;
+    let ids = catalog::import_shallow(core, &path, &|done, total| core.emit("import-progress", json!({ "label": format!("Reading {}", d.name), "done": done, "total": total })))?;
     core.emit("catalog-changed", json!({}));
     let n = ids.len();
     auto::after_import(core, ids, "folders");

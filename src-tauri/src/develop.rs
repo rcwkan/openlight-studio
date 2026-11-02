@@ -1089,12 +1089,21 @@ fn decode_raw(path: &Path) -> Result<DynamicImage, String> {
         };
         let buf = ImageBuffer::from_raw(w as u32, h as u32, data).ok_or_else(|| "bad RAW buffer".to_string())?;
         let mut img = DynamicImage::ImageRgb32F(buf);
-        if let Some(o) = Orientation::from_exif(raw_orientation(&raw.orientation)) {
+        if let Some(o) = Orientation::from_exif(file_orientation(&raw.orientation, &path)) {
             img.apply_orientation(o);
         }
         Ok(img)
     })
     .unwrap_or_else(|_| Err("RAW decoder crashed on this file (unsupported camera?)".into()))
+}
+
+/// How to turn a RAW file upright: the decoder's orientation, else the EXIF one (Sony ARW files
+/// are reported "Normal" by the decoder whatever way the camera was held).
+fn file_orientation(o: &rawler::Orientation, path: &Path) -> u8 {
+    match raw_orientation(o) {
+        1 => crate::catalog::exif_orientation(path),
+        n => n,
+    }
 }
 
 fn raw_orientation(o: &rawler::Orientation) -> u8 {
@@ -1119,6 +1128,20 @@ pub fn raw_preview(path: &Path) -> Option<DynamicImage> {
         let dec = rawler::get_decoder(&src).ok()?;
         let p = rawler::decoders::RawDecodeParams::default();
         dec.preview_image(&src, &p).ok().flatten().or_else(|| dec.thumbnail_image(&src, &p).ok().flatten())
+    })
+    .ok()
+    .flatten()
+}
+
+/// Developed (cropped, oriented) pixel size of a RAW file, read from its header without decoding pixels.
+pub fn raw_size(path: &Path) -> Option<(u32, u32)> {
+    let path = path.to_path_buf();
+    std::panic::catch_unwind(move || {
+        let src = rawler::rawsource::RawSource::new(&path).ok()?;
+        let dec = rawler::get_decoder(&src).ok()?;
+        let raw = dec.raw_image(&src, &rawler::decoders::RawDecodeParams::default(), true).ok()?;
+        let (w, h) = raw.crop_area.or(raw.active_area).map_or((raw.width, raw.height), |r| (r.d.w, r.d.h));
+        Some(if file_orientation(&raw.orientation, &path) >= 5 { (h as u32, w as u32) } else { (w as u32, h as u32) })
     })
     .ok()
     .flatten()
@@ -1164,33 +1187,62 @@ fn tones(src: &[Px], w: usize, h: usize, d: &Develop, overlay: Option<usize>) ->
     // 1. white balance + exposure
     let wb = wb_gains(d.white_balance.temperature_k, d.white_balance.tint);
     let g = wb.map(|v| v * d.basic_tone.exposure.exp2());
-    let mut px: Vec<Px> = src.par_iter().map(|p| [p[0] * g[0], p[1] * g[1], p[2] * g[2]]).collect();
-    // 1a. lens corrections on the full frame, camera calibration
-    lens(&mut px, w, h, &d.lens);
-    calibrate(&mut px, &d.calibration);
-    // 1b. object removal
-    for r in &d.retouch {
-        heal(&mut px, w, h, r);
-    }
-    // 2. dehaze
-    if d.presence.dehaze != 0.0 {
-        dehaze(&mut px, w, h, d.presence.dehaze / 100.0);
-    }
-    // 3. global tone
     let tone = Tone::new(&d.basic_tone);
-    if !tone.is_identity() {
-        px.par_iter_mut().for_each(|p| *p = tone.apply(*p));
-    }
-    // 4. presence: clarity / texture
-    if d.presence.clarity != 0.0 || d.presence.texture != 0.0 {
-        local_contrast(&mut px, w, h, d.presence.clarity / 100.0, d.presence.texture / 100.0);
+    let curves = Curves::new(&d.tone_curve);
+    let color = ColorOps::new(d);
+    let pro = Pro::new(d);
+    // GPU fast path: gain, tone, curves, colour (and Pro when no blur stage sits before it) in one
+    // pass, only when nothing sits between them.
+    let simple = d.masks.is_empty()
+        && d.retouch.is_empty()
+        && d.lens == Lens::default()
+        && d.calibration == Calibration::default()
+        && d.presence.dehaze == 0.0
+        && d.presence.clarity == 0.0
+        && d.presence.texture == 0.0;
+    let no_detail = d.detail.luminance_noise_reduction <= 0.0 && d.detail.color_noise_reduction <= 0.0 && d.detail.sharpening <= 0.0 && d.filters.blur <= 0.0;
+    let mut pro_gpu = false;
+    // ponytail: light edits (tone/curves only) are faster on the CPU than the transfer to the GPU
+    let heavy = color.active || (pro.active && no_detail);
+    let on_gpu = if simple && heavy {
+        color.gpu_params().and_then(|cp| {
+            pro_gpu = pro.active && no_detail;
+            let mut params = cp;
+            params.extend(if pro_gpu { pro.gpu_params() } else { vec![0.0; crate::gpu::PRO_LEN] });
+            let t = (!tone.is_identity()).then(|| crate::gpu::ToneP { a_sh: tone.a_sh, a_hi: tone.a_hi, bp: tone.bp, wp: tone.wp, k: tone.k });
+            crate::gpu::run(src, &crate::gpu::Stack { gain: g, tone: t, curves: curves.as_ref().map(|c| &c.lut), params, levels: pro.levels.as_ref() })
+        })
+    } else {
+        None
+    };
+    let gpu_done = on_gpu.is_some();
+    let pro_gpu = pro_gpu && gpu_done;
+    let mut px: Vec<Px> = on_gpu.unwrap_or_else(|| src.par_iter().map(|p| [p[0] * g[0], p[1] * g[1], p[2] * g[2]]).collect());
+    if !gpu_done {
+        // 1a. lens corrections on the full frame, camera calibration
+        lens(&mut px, w, h, &d.lens);
+        calibrate(&mut px, &d.calibration);
+        // 1b. object removal
+        for r in &d.retouch {
+            heal(&mut px, w, h, r);
+        }
+        // 2. dehaze
+        if d.presence.dehaze != 0.0 {
+            dehaze(&mut px, w, h, d.presence.dehaze / 100.0);
+        }
+        // 3. global tone
+        if !tone.is_identity() {
+            px.par_iter_mut().for_each(|p| *p = tone.apply(*p));
+        }
+        // 4. presence: clarity / texture
+        if d.presence.clarity != 0.0 || d.presence.texture != 0.0 {
+            local_contrast(&mut px, w, h, d.presence.clarity / 100.0, d.presence.texture / 100.0);
+        }
     }
     // 5. local masks
     let wts = apply_masks(&mut px, w, h, &d.masks, overlay);
     // 6. curves + colour
-    let curves = Curves::new(&d.tone_curve);
-    let color = ColorOps::new(d);
-    if curves.is_some() || color.active {
+    if !gpu_done && (curves.is_some() || color.active) {
         px.par_iter_mut().for_each(|p| {
             if let Some(c) = &curves {
                 *p = c.apply(*p);
@@ -1211,13 +1263,12 @@ fn tones(src: &[Px], w: usize, h: usize, d: &Develop, overlay: Option<usize>) ->
         sharpen(&mut px, w, h, &d.detail);
     }
     // 7b. Pro: Photoshop adjustments on the result (inside the mask, for a mask's tuning)
-    let pro = Pro::new(d);
     if d.filters.blur > 0.0 {
         let s = d.filters.blur / 100.0 * 0.02 * w.max(h) as f32;
         let ch: [Vec<f32>; 3] = std::array::from_fn(|c| blur(&px.iter().map(|p| p[c]).collect::<Vec<_>>(), w, h, s));
         px.par_iter_mut().enumerate().for_each(|(i, p)| *p = [ch[0][i], ch[1][i], ch[2][i]]);
     }
-    if pro.active {
+    if pro.active && !pro_gpu {
         px.par_iter_mut().for_each(|p| *p = pro.apply(*p));
     }
     (px, wts)
@@ -1373,11 +1424,11 @@ fn dehaze(px: &mut [Px], w: usize, h: usize, amount: f32) {
 
 /// Pixel rectangle inside an image.
 #[derive(Clone, Copy)]
-struct Win {
-    x0: usize,
-    y0: usize,
-    w: usize,
-    h: usize,
+pub(crate) struct Win {
+    pub(crate) x0: usize,
+    pub(crate) y0: usize,
+    pub(crate) w: usize,
+    pub(crate) h: usize,
 }
 
 /// Pixel bounding box (min, max) of normalised points.
@@ -1441,21 +1492,43 @@ fn guided(guide: &[f32], p: &[f32], w: usize, h: usize, r: f32, eps: f32) -> Vec
 /// Outside pixels (`raw < 0.5`) are clamped by a 1px anti-aliased edge (`0.48 * b_fine`) so
 /// U-shaped concavities (e.g. a foreground person's head/body carved out of a background castle)
 /// never flood across the 0.5 boundary into the background selection.
-fn object_matte(points: &[[f32; 2]], px: &[Px], w: usize, h: usize, soft: f32, shift: f32) -> (Win, Vec<f32>) {
-    let s = w.max(h) as f32;
+pub(crate) fn object_matte(points: &[[f32; 2]], px: &[Px], w: usize, h: usize, soft: f32, shift: f32) -> (Win, Vec<f32>) {
     let (lo, hi) = bounds(points, w, h);
+    matte_core(lo, hi, |win| fill(points, w, h, win), px, w, h, soft, shift)
+}
+
+/// The same snapping for a painted selection: its edges move to the picture's own where the colours change.
+pub(crate) fn snap_painted(painted: &[bool], px: &[Px], w: usize, h: usize, soft: f32) -> (Win, Vec<f32>) {
+    let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
+    for (i, _) in painted.iter().enumerate().filter(|(_, p)| **p) {
+        let (x, y) = ((i % w) as f32, (i / w) as f32);
+        (lo, hi) = ([lo[0].min(x), lo[1].min(y)], [hi[0].max(x + 1.0), hi[1].max(y + 1.0)]);
+    }
+    if lo[0] > hi[0] {
+        return (Win { x0: 0, y0: 0, w: 0, h: 0 }, vec![]);
+    }
+    let raw = |win: Win| (0..win.w * win.h).map(|k| if painted[(win.y0 + k / win.w) * w + win.x0 + k % win.w] { 1.0 } else { 0.0 }).collect();
+    matte_core(lo, hi, raw, px, w, h, soft, 0.0)
+}
+
+fn matte_core(lo: [f32; 2], hi: [f32; 2], raw_in: impl FnOnce(Win) -> Vec<f32>, px: &[Px], w: usize, h: usize, soft: f32, shift: f32) -> (Win, Vec<f32>) {
+    let s = w.max(h) as f32;
     let size = (hi[0] - lo[0]).min(hi[1] - lo[1]).max(1.0);
     let band = (0.08 * size).min(0.008 * s).max(1.0);
     let r = ((0.001 + 0.004 * soft) * s).min(0.1 * size).max(1.0);
     let k = 0.05 + 0.45 * soft;
     let mid = (0.5 - shift / 250.0).clamp(0.1, 0.9);
-    let win = win(points, w, h, 3.0 * (band + r));
+    let pad = 3.0 * (band + r);
+    let c = |v: f32, n: usize| v.max(0.0).min(n as f32) as usize;
+    let (wx0, wy0) = (c((lo[0] - pad).floor(), w), c((lo[1] - pad).floor(), h));
+    let (wx1, wy1) = (c((hi[0] + pad).ceil(), w), c((hi[1] + pad).ceil(), h));
+    let win = Win { x0: wx0, y0: wy0, w: wx1.saturating_sub(wx0), h: wy1.saturating_sub(wy0) };
     let n = win.w * win.h;
     if n == 0 {
         return (win, vec![]);
     }
     let at = |k: usize| px[(win.y0 + k / win.w) * w + win.x0 + k % win.w];
-    let raw = fill(points, w, h, win);
+    let raw = raw_in(win);
     let b_band = blur(&raw, win.w, win.h, band);
     let b_fine = blur(&raw, win.w, win.h, 1.0);
     let prior: Vec<f32> = (0..n)
@@ -2024,6 +2097,40 @@ impl ColorOps {
         }
     }
 
+    /// Parameters for `gpu.rs` (layout mirrored by its `color_ops`); None when they do not fit.
+    fn gpu_params(&self) -> Option<Vec<f32>> {
+        if self.swatches.len() > crate::gpu::MAX_SW {
+            return None;
+        }
+        let mut v = vec![0.0f32; crate::gpu::COLOR_LEN];
+        v[0] = self.active as u8 as f32;
+        v[1] = self.mono as u8 as f32;
+        v[2] = self.sat;
+        v[3] = self.vib;
+        if let Some(m) = &self.mixer {
+            v[4] = 1.0;
+            for (i, b) in m.iter().enumerate() {
+                v[5 + i * 3..8 + i * 3].copy_from_slice(b);
+            }
+        }
+        if let Some(g) = &self.grade {
+            v[29] = 1.0;
+            for (z, o) in g.off.iter().enumerate() {
+                v[30 + z * 3..33 + z * 3].copy_from_slice(o);
+            }
+            v[39..42].copy_from_slice(&g.global);
+            v[42] = g.bal;
+            v[43] = g.k;
+        }
+        v[44] = self.swatches.len() as f32;
+        for (n, s) in self.swatches.iter().enumerate() {
+            let o = 45 + n * 11;
+            v[o..o + 8].copy_from_slice(&[s.h, s.c, s.l, s.rh, s.rc, s.rl, s.inner, s.outer]);
+            v[o + 8..o + 11].copy_from_slice(&s.shift);
+        }
+        Some(v)
+    }
+
     #[inline]
     fn apply(&self, p: Px) -> Px {
         let [mut l, a, b] = oklab(p);
@@ -2157,6 +2264,48 @@ impl Pro {
             posterize,
             threshold,
         }
+    }
+
+    /// Parameters for `gpu.rs` (layout mirrored by its `pro_ops`).
+    fn gpu_params(&self) -> Vec<f32> {
+        let mut v = vec![0.0f32; crate::gpu::PRO_LEN];
+        v[0] = self.levels.is_some() as u8 as f32;
+        if let Some(((sin, cos), sat, light, tint)) = self.hue_sat {
+            v[1] = 1.0;
+            v[2..6].copy_from_slice(&[sin, cos, sat, light]);
+            if let Some([ta, tb]) = tint {
+                v[6] = 1.0;
+                v[7] = ta;
+                v[8] = tb;
+            }
+        }
+        if let Some((fams, absolute)) = &self.selective {
+            v[9] = 1.0;
+            v[10] = *absolute as u8 as f32;
+            for (i, f) in fams {
+                v[11 + i * 4..15 + i * 4].copy_from_slice(f);
+            }
+        }
+        if let Some(m) = &self.mixer {
+            v[47] = 1.0;
+            for (r, row) in m.iter().enumerate() {
+                v[48 + r * 4..52 + r * 4].copy_from_slice(row);
+            }
+        }
+        if let Some((s, h, amt)) = self.gradient {
+            v[60] = 1.0;
+            v[61..64].copy_from_slice(&s);
+            v[64..67].copy_from_slice(&h);
+            v[67] = amt;
+        }
+        v[68] = self.invert as u8 as f32;
+        v[69] = self.posterize.unwrap_or(0.0);
+        if let Some(t) = self.threshold {
+            v[70] = t;
+            v[71] = 1.0;
+        }
+        v[72] = self.active as u8 as f32;
+        v
     }
 
     #[inline]
@@ -3739,5 +3888,69 @@ mod tests {
         assert_eq!((film.levels.rgb.black, film.grain.amount), (20.0, 20.0));
         assert_eq!(auto(&img, &film, "natural").unwrap().grain.amount, 20.0, "natural leaves the film grain alone");
         assert!(auto(&img, &cur, "bw").unwrap().profile == "Monochrome" && auto(&img, &cur, "nope").is_err());
+    }
+}
+
+#[cfg(test)]
+mod gpu_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The GPU pass must reproduce the CPU stages (same `tones`, GPU switched off vs on).
+    #[test]
+    fn gpu_matches_cpu() {
+        if crate::gpu::detect().is_none() {
+            return eprintln!("no GPU, skipped");
+        }
+        let (w, h) = (700usize, 500usize);
+        let mut s = 12345u32;
+        let mut rnd = move || { s = s.wrapping_mul(1664525).wrapping_add(1013904223); (s >> 8) as f32 / (1u32 << 24) as f32 };
+        let src: Vec<Px> = (0..w * h).map(|_| [rnd() * 1.2, rnd() * 1.2, rnd() * 1.2]).collect();
+        let cases = [
+            ("tone+curves", json!({"basic_tone": {"exposure": 0.4, "contrast": 20.0, "shadows": 30.0, "highlights": -25.0, "whites": 10.0, "blacks": -10.0}, "tone_curve": {"point_luma": [[0, 0], [64, 50], [192, 210], [255, 255]]}})),
+            ("color", json!({"presence": {"saturation": 25.0, "vibrance": 40.0}, "color_mixer": {"hue": [10, -5, 0, 20, 0, 0, -15, 0], "saturation": [0, 20, -10, 0, 30, 0, 0, 10], "luminance": [5, 0, 0, -10, 0, 20, 0, 0]}})),
+            ("grading+point", json!({"color_grading_3way": {"shadows": {"hue": 220, "sat": 40, "lum": -10}, "highlights": {"hue": 40, "sat": 30, "lum": 5}, "global": {"hue": 10, "sat": 10, "lum": 0}, "balance": 20, "blending": 30},
+                "point_color": [{"src_hsl": [30, 20, 60], "shift_hsl": [20, 30, 10], "range_hsl": [50, 50, 50], "falloff": 50}]})),
+            ("mono", json!({"profile": "Monochrome"})),
+            ("pro", json!({"levels": {"rgb": {"black": 10, "gamma": 1.2, "white": 240}}, "hue_saturation": {"hue": 20, "saturation": 15, "lightness": 10},
+                "selective_color": {"reds": [10, 0, -10, 5], "whites": [0, 0, 5, -5], "blacks": [0, 0, 0, 10]}, "channel_mixer": {"red": [90, 10, 0, 0]},
+                "gradient_map": {"amount": 30, "shadows": [0.1, 0.0, 0.3], "highlights": [1.0, 0.9, 0.7]}})),
+            ("colorize+absolute", json!({"hue_saturation": {"colorize": true, "colorize_hue": 200, "colorize_saturation": 40, "lightness": -20}, "selective_color": {"absolute": true, "greens": [20, 0, 10, 0]}})),
+            ("invert+posterize", json!({"filters": {"invert": true, "posterize": 6}})),
+            ("threshold", json!({"filters": {"threshold": 120}})),
+            ("pro after sharpen", json!({"detail": {"sharpening": 40}, "filters": {"invert": true}, "presence": {"saturation": 10}})),
+        ];
+        for (name, v) in cases {
+            let d: Develop = serde_json::from_value(v).unwrap();
+            crate::gpu::set_enabled(false);
+            let t0 = std::time::Instant::now();
+            let (cpu, _) = tones(&src, w, h, &d, None);
+            let t_cpu = t0.elapsed();
+            crate::gpu::set_enabled(true);
+            let t0 = std::time::Instant::now();
+            let (gpu, _) = tones(&src, w, h, &d, None);
+            eprintln!("  cpu {t_cpu:?}, gpu {:?}, bit-identical px: {}", t0.elapsed(), cpu.iter().zip(&gpu).filter(|(a, b)| a == b).count());
+            let bad = cpu.iter().zip(&gpu).filter(|(a, b)| (0..3).any(|c| !((a[c] - b[c]).abs() <= 2e-3 * (1.0 + a[c].abs())))).count();
+            let frac = bad as f64 / cpu.len() as f64;
+            eprintln!("{name}: {bad} of {} pixels differ ({:.4}%)", cpu.len(), frac * 100.0);
+            // hard thresholds (posterize / threshold) may flip a few pixels sitting on an edge
+            assert!(frac < 0.002, "{name}: {:.3}% of pixels differ", frac * 100.0);
+        }
+    }
+}
+
+#[cfg(test)]
+mod raw_size_tests {
+    /// Set OPENLIGHT_TEST_RAW to a RAW file to check the header size (skipped otherwise).
+    #[test]
+    fn raw_size_is_full_sensor() {
+        let Some(p) = std::env::var_os("OPENLIGHT_TEST_RAW") else { return };
+        let (w, h) = super::raw_size(std::path::Path::new(&p)).expect("raw size");
+        eprintln!("raw_size = {w}x{h} ({:.1} MP)", (w * h) as f64 / 1e6);
+        let raw = rawler::decode_file(std::path::Path::new(&p)).unwrap();
+        eprintln!("rawler orientation = {:?}, exif orientation = {}", raw.orientation, crate::catalog::exif_orientation(std::path::Path::new(&p)));
+        let img = super::load(std::path::Path::new(&p), Some(800)).unwrap();
+        eprintln!("decoded (oriented) = {}x{}", img.w, img.h);
+        assert!(w * h > 4_000_000, "still preview-sized");
     }
 }

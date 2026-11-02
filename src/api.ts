@@ -30,6 +30,8 @@ export type AspectFilter = "all" | "landscape" | "portrait" | "square";
 
 export type Filter = {
   folder?: string | null;
+  /** only the folder's own photos, not its subfolders */
+  flat?: boolean;
   text?: string | null;
   min_rating?: number | null;
   flag?: string | null;
@@ -178,6 +180,9 @@ export type Theme = "system" | "dark" | "light" | "slate" | "warm" | "nordic" | 
 export type Settings = {
   theme?: Theme;
   mcp_enabled: boolean;
+  gpu_accel?: boolean;
+  ai_denoise_model?: string;
+  ai_removal_model?: string;
   mcp_port: number;
   mcp_token: string;
   providers: Provider[];
@@ -341,12 +346,47 @@ function parseRender(buf: ArrayBuffer): Rendered {
   return { hist, image: new ImageData(new Uint8ClampedArray(buf, 8 + 4096, w * h * 4), w, h) };
 }
 
+export type AiHardware = { gpu: string | null; vram_mb: number | null; device: string };
+export type AiModel = {
+  id: string;
+  /** denoise | inpaint */
+  kind: string;
+  name: string;
+  blurb: string;
+  license: string;
+  source: string;
+  size_mb: number;
+  installed: boolean;
+  fits: boolean;
+  recommended: boolean;
+  note: string;
+};
+
+/** One brush stroke over the photo: its path as fractions of the frame, and the brush radius as a fraction of the frame's width */
+export type Stroke = { points: [number, number][]; radius: number };
+
+/** A painted selection snapped to the picture's edges: the matte (0-255) inside a window of the preview frame. */
+export type Snap = { w: number; h: number; x0: number; y0: number; ww: number; wh: number; alpha: Uint8Array };
+
 export const api = {
+  /** Snap a rough outline (fractions of the frame) to the object's edges, for confirming a removal */
+  snapObject: async (id: number, strokes: Stroke[]): Promise<Snap> => {
+    const buf = await invoke<ArrayBuffer>("snap_object", { id, strokes });
+    const v = new DataView(buf);
+    const n = (i: number) => v.getUint32(i * 4, true);
+    return { w: n(0), h: n(1), x0: n(2), y0: n(3), ww: n(4), wh: n(5), alpha: new Uint8Array(buf, 24) };
+  },
+  /** This machine's GPU and the AI denoise models, the best one for it marked */
+  aiModels: () => invoke<{ hardware: AiHardware; models: AiModel[] }>("ai_models"),
+  aiDownload: (id: string) => invoke<void>("ai_download", { id }),
+  aiRemove: (id: string) => invoke<void>("ai_remove", { id }),
   appInfo: () => invoke<AppInfo>("app_info"),
   query: (filter: Filter) => invoke<Photo[]>("query_photos", { filter }),
   photo: async (id: number) => (await invoke<Photo[]>("query_photos", { filter: { ids: [id] } }))[0],
   folders: () => invoke<[string, number][]>("list_folders"),
   importFolder: (path: string) => invoke<number>("import_folder", { path }),
+  /** subfolders of a folder, and how many photos are directly in it */
+  browseFolder: (path: string) => invoke<[string[], number]>("browse_folder", { path }),
   setSelection: (ids: number[]) => invoke("set_selection", { ids }),
   update: (ids: number[], update: Culling) => invoke<number>("update_photos", { ids, update }),
   virtualCopy: (id: number) => invoke<number>("virtual_copy", { id }),
@@ -361,9 +401,9 @@ export const api = {
   emptyBin: () => invoke<number>("empty_bin"),
   getDevelop: (id: number) => invoke<Develop>("get_develop", { id }),
   defaultDevelop: () => invoke<Develop>("default_develop"),
-  /** fullFrame: no crop or straighten, so view coordinates are mask coordinates */
-  render: async (id: number, develop: Develop, skipCrop: boolean, overlayMask: number | null, fullFrame = false, proof: Proof | null = null) =>
-    parseRender(await invoke<ArrayBuffer>("render_preview", { id, develop, skipCrop, overlayMask, fullFrame, proof })),
+  /** fullFrame: no crop or straighten, so view coordinates are mask coordinates; hires: the full-size photo instead of the 1600 px proxy */
+  render: async (id: number, develop: Develop, skipCrop: boolean, overlayMask: number | null, fullFrame = false, proof: Proof | null = null, hires = false) =>
+    parseRender(await invoke<ArrayBuffer>("render_preview", { id, develop, skipCrop, overlayMask, fullFrame, proof, hires })),
   /** Upright mode: off | auto | level | vertical | full | guided (uses develop.transform.guides) */
   upright: (id: number, develop: Develop, mode: string) => invoke<Develop["transform"]>("upright", { id, develop, mode }),
   /** Measured lateral chromatic aberration: [ca_red_cyan, ca_blue_yellow] */
@@ -384,6 +424,7 @@ export const api = {
   export: (req: ExportReq) => invoke<string[]>("export_photos", { req }),
   settings: () => invoke<Settings>("get_settings"),
   saveSettings: (settings: Settings) => invoke("save_settings", { settings }),
+  gpuInfo: () => invoke<string | null>("gpu_info"),
   regenerateToken: () => invoke<string>("regenerate_token"),
   setKey: (id: string, key: string) => invoke("set_provider_key", { id, key }),
   aiRun: (id: number, prompt: string, provider: string) => invoke<string>("ai_run", { id, prompt, provider }),
@@ -523,3 +564,23 @@ export function spline(pts: number[][]): (x: number) => number {
     return (2 * t3 - 3 * t2 + 1) * y[k] + (t3 - 2 * t2 + t) * h * m[k] + (-2 * t3 + 3 * t2) * y[k + 1] + (t3 - t2) * h * m[k + 1];
   };
 }
+
+// Folders added with "Add folder" (the roots of the sidebar tree) are remembered per viewer.
+const ROOTS_KEY = "openlight.folderRoots";
+export const loadRoots = (): string[] => {
+  try {
+    return JSON.parse(localStorage.getItem(ROOTS_KEY) ?? "[]");
+  } catch {
+    return [];
+  }
+};
+const saveRoots = (r: string[]) => {
+  try {
+    localStorage.setItem(ROOTS_KEY, JSON.stringify(r));
+  } catch {
+    /* storage unavailable: the roots last for this session only */
+  }
+  return r;
+};
+export const rememberRoot = (p: string) => saveRoots([...loadRoots().filter((r) => r !== p), p]);
+export const forgetRoot = (p: string) => saveRoots(loadRoots().filter((r) => r !== p));

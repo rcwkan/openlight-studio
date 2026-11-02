@@ -2,7 +2,7 @@ import { listen } from "@tauri-apps/api/event";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Log } from "./Agent";
-import { api, AppInfo, AutoFunction, CloudFolder, Culling, Develop as Dev, Filter, FolderLoading, JobProgress, LABELS, NetworkDrive, Photo, setThumbsDir, Settings, Source } from "./api";
+import { api, AppInfo, AutoFunction, CloudFolder, Culling, Develop as Dev, Filter, FolderLoading, forgetRoot, loadRoots, rememberRoot, JobProgress, LABELS, NetworkDrive, Photo, setThumbsDir, Settings, Source } from "./api";
 import { AiTaskState, Develop } from "./Develop";
 import { ExportDialog, Library, RemoteDialog, SelectMods } from "./Library";
 import { CompareModal } from "./CompareModal";
@@ -259,6 +259,7 @@ export default function App() {
     );
   };
 
+  const [roots, setRoots] = useState<string[]>(loadRoots);
   const shortFolder = (f: string) => f.split(/[\\/]/).filter(Boolean).slice(-2).join("/") || f;
 
   // A folder is a live source: opening it picks up files added since it was last read.
@@ -266,11 +267,18 @@ export default function App() {
     const viewId = `folder:${folder}`;
     const name = shortFolder(folder);
     const isSwitching = filter.folder !== folder || filter.immich_album != null || filter.ids != null;
-    setLoadingFolder({ viewId, name });
+    // photos are read only when this folder itself holds some; its subfolders are in the sidebar tree
+    const images = await api.browseFolder(folder).then(([, n]) => n, () => 1);
     if (isSwitching) {
       setPhotos([]);
     }
-    setFilter((f) => ({ ...f, folder, immich_album: null, ids: null, view: viewId, in_bin: null }));
+    setFilter((f) => ({ ...f, folder, flat: true, immich_album: null, ids: null, view: viewId, in_bin: null }));
+    if (!images) {
+      setStatus("");
+      await reloadRef.current();
+      return;
+    }
+    setLoadingFolder({ viewId, name });
     setStatus(`Reading ${name}…`);
     try {
       const n = await api.importFolder(folder);
@@ -301,7 +309,10 @@ export default function App() {
 
   const addFolder = async () => {
     const dir = await open({ directory: true, title: "Add a folder of photos" });
-    if (typeof dir === "string") openFolder(dir);
+    if (typeof dir === "string") {
+      setRoots(rememberRoot(dir));
+      openFolder(dir);
+    }
   };
 
   const openImmich = async (album: string | null, name: string) => {
@@ -421,7 +432,7 @@ export default function App() {
     if (isSwitching) {
       setPhotos([]);
     }
-    setFilter((f) => ({ ...f, folder: d.path, immich_album: null, ids: null, view: viewId, in_bin: null }));
+    setFilter((f) => ({ ...f, folder: d.path, flat: true, immich_album: null, ids: null, view: viewId, in_bin: null }));
     setStatus(`Opening ${d.name}…`);
     try {
       const r = await api.networkOpen(d.id);
@@ -767,6 +778,8 @@ export default function App() {
           onShowAll={openAll}
           onAddFolder={addFolder}
           onOpenFolder={openFolder}
+          roots={roots}
+          onRemoveRoot={(r) => setRoots(forgetRoot(r))}
           onImmich={openImmich}
           nextPage={nextPage}
           onLoadMore={loadMore}
@@ -801,6 +814,8 @@ export default function App() {
       {defaults && (
         <div className={module === "develop" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
           <Develop
+            onOpenModels={() => (setSettingsTab("ai"), setModule("settings"))}
+            onOpenPhoto={(id) => setTimeout(() => openInDevelop(id), 400)}
             visible={module === "develop"}
             photos={photos}
             workingPhotos={workingPhotos}

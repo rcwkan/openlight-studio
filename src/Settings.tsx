@@ -5,6 +5,7 @@ import { Agent, Log } from "./Agent";
 import { api, AppInfo, CleanUp, JobProgress, Settings, size, Source, StorageReport } from "./api";
 import { Btn } from "./controls";
 import { Duplicate, Locations } from "./Storage";
+import { AiModelsSettings } from "./AiModels";
 import { applyTheme, getStoredTheme, isSystemDark, Theme, THEMES } from "./theme";
 
 const card = "rounded-lg border border-neutral-800 bg-neutral-900 p-4";
@@ -14,12 +15,13 @@ const num = (n: number) => n.toLocaleString();
 const plural = (n: number, word: string) => `${num(n)} ${word}${n === 1 ? "" : "s"}`;
 const short = (folder: string) => folder.split(/[\\/]/).slice(-2).join("/");
 
-export type SettingsTab = "appearance" | "locations" | "duplicate" | "usage" | "agent" | "about";
+export type SettingsTab = "appearance" | "locations" | "duplicate" | "usage" | "ai" | "agent" | "about";
 const TABS: [SettingsTab, string][] = [
   ["appearance", "Appearance"],
   ["locations", "Locations"],
   ["duplicate", "Duplicate"],
   ["usage", "Usage & clean up"],
+  ["ai", "AI models"],
   ["agent", "AI & MCP"],
   ["about", "About"],
 ];
@@ -52,6 +54,7 @@ export function SettingsView(p: {
       {p.settings && p.tab === "appearance" && <Appearance settings={p.settings} setSettings={p.setSettings} />}
       {p.settings && p.tab === "locations" && <Locations settings={p.settings} setSettings={p.setSettings} onConnect={p.onConnect} onAuto={p.onAuto} />}
       {p.settings && p.tab === "duplicate" && <Duplicate settings={p.settings} selected={p.selected} jobs={p.jobs} />}
+      {p.settings && p.tab === "ai" && <AiModelsSettings settings={p.settings} setSettings={p.setSettings} />}
       {p.tab === "usage" && <Usage onSettingsChanged={reload} />}
       {p.tab === "agent" && (
         <Agent
@@ -64,6 +67,25 @@ export function SettingsView(p: {
       )}
       {p.tab === "about" && <About />}
     </div>
+  );
+}
+
+/** GPU acceleration: on by default, effective only when a GPU is detected. */
+function GpuToggle({ settings, setSettings }: { settings: Settings; setSettings: (s: Settings) => void }) {
+  const [gpu, setGpu] = useState<string | null | undefined>(undefined);
+  useEffect(() => void api.gpuInfo().then(setGpu).catch(() => setGpu(null)), []);
+  const on = settings.gpu_accel !== false;
+  const change = (v: boolean) => {
+    const updated = { ...settings, gpu_accel: v };
+    setSettings(updated);
+    api.saveSettings(updated);
+  };
+  return (
+    <label className="flex items-center gap-3 rounded-lg border border-neutral-800 bg-neutral-900 p-3 text-xs text-neutral-300">
+      <input type="checkbox" checked={on && !!gpu} disabled={!gpu} onChange={(e) => change(e.target.checked)} />
+      <span className="font-semibold text-neutral-100">GPU acceleration</span>
+      <span className="text-neutral-400">{gpu === undefined ? "Detecting GPU…" : gpu ? `Detected: ${gpu}` : "No compatible GPU found, using CPU"}</span>
+    </label>
   );
 }
 
@@ -96,6 +118,7 @@ function Appearance({ settings, setSettings }: { settings: Settings; setSettings
   return (
     <div className="flex-1 overflow-y-auto p-6">
       <div className="mx-auto max-w-5xl space-y-6">
+        <GpuToggle settings={settings} setSettings={setSettings} />
         <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h2 className="text-base font-semibold text-neutral-100 flex items-center gap-2">

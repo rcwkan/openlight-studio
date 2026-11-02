@@ -26,6 +26,9 @@ type Props = {
   onShowAll?: () => void;
   onAddFolder: () => void;
   onOpenFolder: (folder: string) => void;
+  /** folders added with Add folder: the roots of the sidebar tree */
+  roots: string[];
+  onRemoveRoot: (folder: string) => void;
   onImmich: (album: string | null, name: string) => void;
   /** Next page of the Immich album being shown, null when it is fully loaded */
   nextPage: number | null;
@@ -224,42 +227,51 @@ export function Library(p: Props) {
           }
         >
           {local.length === 0 && drives.length === 0 && <p className="text-[11px] text-neutral-500">Add a folder to browse and edit its photos in place.</p>}
-          {local.map(([folder, n]) => {
-            const isCurLoading = p.loadingFolder?.viewId === `folder:${folder}`;
-            return (
-              <FolderRow
-                key={folder}
-                label={short(folder)}
-                title={folder}
-                hue="amber"
-                icon={<Icon d={ICONS.folder} />}
-                count={n}
-                active={f.folder === folder}
-                loading={isCurLoading}
-                progress={isCurLoading ? p.loadingFolder?.progress : undefined}
-                onClick={() => p.onOpenFolder(folder)}
-              />
-            );
-          })}
+          {p.roots.map((r) => (
+            <FolderNode key={r} path={r} depth={0} p={p} onRemove={() => p.onRemoveRoot(r)} />
+          ))}
+          {local
+            .filter(([folder]) => !p.roots.some((r) => under(folder, r)))
+            .map(([folder, n]) => {
+              const isCurLoading = p.loadingFolder?.viewId === `folder:${folder}`;
+              return (
+                <FolderRow
+                  key={folder}
+                  label={short(folder)}
+                  title={folder}
+                  hue="amber"
+                  icon={<Icon d={ICONS.folder} />}
+                  count={n}
+                  active={f.folder === folder}
+                  loading={isCurLoading}
+                  progress={isCurLoading ? p.loadingFolder?.progress : undefined}
+                  onClick={() => p.onOpenFolder(folder)}
+                />
+              );
+            })}
           {drives.map((d) => {
             const isCurLoading = p.loadingFolder?.viewId === `drive:${d.id}`;
             return (
-              <FolderRow
+              <FolderNode
                 key={d.id}
-                label={d.name}
-                hue="amber"
-                title={`${d.url ? `${d.url} → ` : ""}${d.path}${online[d.id] ? "" : " (not connected: opening it connects it)"}`}
-                icon={
-                  <span className="relative flex">
-                    <Icon d={ICONS.drive} />
-                    <span className={`absolute -bottom-px -right-px h-1.5 w-1.5 rounded-full ring-1 ring-neutral-900 ${online[d.id] ? "bg-emerald-500" : "bg-neutral-600"}`} />
-                  </span>
-                }
-                count={count(d.path) || undefined}
-                active={f.view === `drive:${d.id}`}
-                loading={isCurLoading}
-                progress={isCurLoading ? p.loadingFolder?.progress : undefined}
-                onClick={() => p.onOpenDrive(d).then(checkDrives)}
+                path={d.path}
+                depth={0}
+                p={p}
+                root={{
+                  label: d.name,
+                  title: `${d.url ? `${d.url} → ` : ""}${d.path}${online[d.id] ? "" : " (not connected: opening it connects it)"}`,
+                  icon: (
+                    <span className="relative flex">
+                      <Icon d={ICONS.drive} />
+                      <span className={`absolute -bottom-px -right-px h-1.5 w-1.5 rounded-full ring-1 ring-neutral-900 ${online[d.id] ? "bg-emerald-500" : "bg-neutral-600"}`} />
+                    </span>
+                  ),
+                  count: count(d.path) || undefined,
+                  active: f.view === `drive:${d.id}`,
+                  loading: isCurLoading,
+                  progress: isCurLoading ? p.loadingFolder?.progress : undefined,
+                  onClick: () => p.onOpenDrive(d).then(checkDrives),
+                }}
               />
             );
           })}
@@ -870,6 +882,67 @@ export function FolderLoadingScreen({ loading }: { loading: FolderLoading }) {
         </div>
       </div>
     </div>
+  );
+}
+
+/** A folder in the sidebar tree: its subfolders are listed (one level, read when it opens) and its photos are read only when it is clicked. */
+function FolderNode({
+  path,
+  depth,
+  p,
+  root,
+  onRemove,
+}: {
+  path: string;
+  depth: number;
+  p: Props;
+  /** a drive's own row, instead of the plain folder row */
+  root?: { label: string; title: string; icon: ReactNode; count?: number; active: boolean; loading: boolean; progress?: FolderProgress; onClick: () => void };
+  onRemove?: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [kids, setKids] = useState<string[]>([]);
+  const show = (v: boolean) => {
+    setOpen(v);
+    if (v) void api.browseFolder(path).then(([d]) => setKids(d), () => setKids([]));
+  };
+  const loading = p.loadingFolder?.viewId === `folder:${path}`;
+  const row = root ?? {
+    label: depth ? (path.split(/[\\/]/).filter(Boolean).pop() ?? path) : short(path),
+    title: path,
+    icon: <Icon d={ICONS.folder} />,
+    count: p.folders.find(([d]) => d === path)?.[1],
+    active: p.filter.view === `folder:${path}`,
+    loading,
+    progress: loading ? p.loadingFolder?.progress : undefined,
+    onClick: () => p.onOpenFolder(path),
+  };
+  return (
+    <>
+      <div className="flex items-center" style={{ paddingLeft: depth * 12 }}>
+        <button className="w-4 shrink-0 text-[10px] text-neutral-500 hover:text-neutral-200" title={open ? "Hide subfolders" : "Show subfolders"} onClick={() => show(!open)}>
+          {open ? "▾" : "▸"}
+        </button>
+        <div className="min-w-0 flex-1">
+          <FolderRow
+            {...row}
+            hue="amber"
+            actions={
+              onRemove && (
+                <button className="px-1 text-neutral-400 hover:text-red-400" title="Remove from the list; nothing is deleted" onClick={onRemove}>
+                  ×
+                </button>
+              )
+            }
+            onClick={() => {
+              row.onClick();
+              if (!open) show(true);
+            }}
+          />
+        </div>
+      </div>
+      {open && kids.map((k) => <FolderNode key={k} path={k} depth={depth + 1} p={p} />)}
+    </>
   );
 }
 

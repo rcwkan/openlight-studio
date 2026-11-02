@@ -2,9 +2,10 @@ import { listen } from "@tauri-apps/api/event";
 import { Fragment, ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { AdvancedTab } from "./Advanced";
 import { Log } from "./Agent";
+import { AiTab } from "./AiDenoise";
 import { AutoTab } from "./Auto";
 import { ProTab } from "./Pro";
-import { api, Develop as Dev, getPath, HistoryEntry, Mask, MaskComponent, Photo, Proof, Rendered, setPath, Settings, srgbToOklch, thumbUrl } from "./api";
+import { api, Snap, Stroke, Develop as Dev, getPath, HistoryEntry, Mask, MaskComponent, Photo, Proof, Rendered, setPath, Settings, srgbToOklch, thumbUrl } from "./api";
 import { Btn, ColorWheel, CurveEditor, Histogram, Panel, Seg, Slider } from "./controls";
 
 export interface AiTaskState {
@@ -19,7 +20,7 @@ export interface AiTaskState {
   userClosedDetails?: boolean;
 }
 
-type RTab = "adjust" | "selections" | "advanced" | "pro" | "auto";
+type RTab = "adjust" | "selections" | "advanced" | "pro" | "ai" | "auto";
 
 interface PhotoSessionCache {
   dev: Dev;
@@ -51,13 +52,22 @@ type Props = {
   settings: Settings | null;
   setSettings: (s: Settings) => void;
   onExport: () => void;
+  /** open Settings → AI models */
+  onOpenModels?: () => void;
+  /** open a photo in Develop */
+  onOpenPhoto?: (id: number) => void;
   onSaveAsNewPhoto?: (newPhoto: Photo) => Promise<void> | void;
   logs: Log[];
   clearLogs?: () => void;
 };
 
-type Tool = "none" | "crop" | "swatch" | "maskcolor" | "select" | "guides" | "spot";
+type Tool = "none" | "crop" | "swatch" | "maskcolor" | "select" | "guides" | "spot" | "remove";
 type Path = (string | number)[];
+
+/** Long edge of the preview the backend renders (PROXY_EDGE in lib.rs). */
+const PROXY_EDGE = 1600;
+/** Highest zoom, relative to fit: enough for 100% on a large photo. */
+const MAX_ZOOM = 12;
 
 const BANDS: [string, string][] = [
   ["Red", "#e5484d"],
@@ -362,15 +372,27 @@ export function Develop(p: Props) {
   }, [refreshHistory, p.onPhotoUpdated]);
 
   // --- render loop: latest request wins, one render in flight --------------------------
+  const fitScaleRef = useRef(1);
+  // generative removal: the outline being drawn, and the outline once snapped to the object for confirming
+  const [strokes, setStrokes] = useState<Stroke[]>([]);
+  const [live, setLive] = useState<Stroke | null>(null);
+  const [brush, setBrush] = useState(0.035);
+  const [cursor, setCursor] = useState<{ x: number; y: number } | null>(null);
+  const [snap, setSnap] = useState<Snap | null>(null);
+  const snapCanvas = useRef<HTMLCanvasElement>(null);
+  const brushCanvas = useRef<HTMLCanvasElement>(null);
+  const snapTimer = useRef<number | undefined>(undefined);
+  const strokesRef = useRef<Stroke[]>([]);
   const job = useRef<{ id: number; d: Dev; skip: boolean; overlay: number | null; full: boolean; proof: Proof | null } | null>(null);
   const busy = useRef(false);
-  const draw = (r: Rendered) => {
+  const draw = (r: Rendered, hires = false) => {
     const c = canvas.current;
     if (!c) return;
     if (c.width !== r.image.width || c.height !== r.image.height) {
       c.width = r.image.width;
       c.height = r.image.height;
-      setImgSize({ w: r.image.width, h: r.image.height });
+      // the layout stays in proxy pixels; a full-size render is the same picture, sharper
+      if (!hires) setImgSize({ w: r.image.width, h: r.image.height });
     }
     c.getContext("2d")!.putImageData(r.image, 0, 0);
     setHist(r.hist);
@@ -397,7 +419,7 @@ export function Develop(p: Props) {
   const skipCrop = tool === "crop";
   // AI Select, gradient handles, guides and spot healing show the frame before any geometry
   // (distortion, transform, straighten, crop), so the photo's coordinates are mask coordinates
-  const fullFrame = tool === "select" || tool === "guides" || tool === "spot" || handlesOn;
+  const fullFrame = tool === "select" || tool === "guides" || tool === "spot" || tool === "remove" || !!snap || handlesOn;
   // Visualize Spots only while healing; gamut and clipping warnings in every tab
   const spots = tool === "spot" ? proof.spots : null;
   const showBefore = before || peekingBefore;
@@ -407,6 +429,63 @@ export function Develop(p: Props) {
     job.current = { id, d: showBefore ? p.defaults : dev, skip: skipCrop && !showBefore, overlay: overlay && !showBefore ? maskSel : null, full: fullFrame, proof: view };
     pump();
   }, [id, dev, showBefore, skipCrop, fullFrame, overlay, maskSel, proof.gamut, proof.clipping, spots, p.defaults, pump]);
+
+  // the snapped object, tinted red over the photo
+  useEffect(() => {
+    const c = snapCanvas.current;
+    if (!c || !snap) return;
+    const { w, h, x0, y0, ww, wh, alpha } = snap;
+    c.width = w;
+    c.height = h;
+    const img = new ImageData(ww, wh);
+    for (let i = 0; i < alpha.length; i++) img.data.set([239, 68, 68, Math.round(alpha[i] * 0.6)], i * 4);
+    const ctx = c.getContext("2d")!;
+    ctx.clearRect(0, 0, w, h);
+    ctx.putImageData(img, x0, y0);
+  }, [snap]);
+  useEffect(() => {
+    const c = brushCanvas.current;
+    if (!c) return;
+    c.width = imgSize.w;
+    c.height = imgSize.h;
+    const ctx = c.getContext("2d")!;
+    ctx.clearRect(0, 0, c.width, c.height);
+    ctx.lineCap = ctx.lineJoin = "round";
+    ctx.strokeStyle = ctx.fillStyle = "#ef4444";
+    for (const s of live ? [...strokes, live] : strokes) {
+      ctx.lineWidth = 2 * s.radius * c.width;
+      ctx.beginPath();
+      s.points.forEach(([x, y], i) => (i ? ctx.lineTo(x * c.width, y * c.height) : ctx.moveTo(x * c.width, y * c.height)));
+      if (s.points.length === 1) ctx.lineTo(s.points[0][0] * c.width + 0.01, s.points[0][1] * c.height);
+      ctx.stroke();
+    }
+  }, [strokes, live, imgSize.w, imgSize.h]);
+  const clearBrush = () => {
+    window.clearTimeout(snapTimer.current);
+    strokesRef.current = [];
+    setStrokes([]);
+    setLive(null);
+    setSnap(null);
+  };
+  useEffect(() => clearBrush(), [id]);
+
+  // Zoomed in past the proxy's own pixels: once the edit settles, render the full-size photo
+  const zoomedPastProxy = fitScaleRef.current * zoom * (window.devicePixelRatio || 1) > 1.02;
+  useEffect(() => {
+    if (id == null || !dev || !zoomedPastProxy) return;
+    const view = showBefore ? null : { gamut: proof.gamut, clipping: proof.clipping, spots };
+    let cancelled = false;
+    const t = setTimeout(() => {
+      api
+        .render(id, showBefore ? p.defaults : dev, skipCrop && !showBefore, overlay && !showBefore ? maskSel : null, fullFrame, view, true)
+        .then((r) => !cancelled && !job.current && draw(r, true))
+        .catch((e) => console.warn("Full-size render:", e));
+    }, 400);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [id, dev, showBefore, skipCrop, fullFrame, overlay, maskSel, proof.gamut, proof.clipping, spots, p.defaults, zoomedPastProxy]);
 
   useEffect(() => {
     const el = boxRef.current;
@@ -421,7 +500,14 @@ export function Develop(p: Props) {
   }, [id, isVisible]);
   const fitScale = Math.min((box.w - 24) / imgSize.w, (box.h - 24) / imgSize.h, 1.5);
   const fillRatio = fitScale > 0 ? Math.max(box.w / (imgSize.w * fitScale), box.h / (imgSize.h * fitScale), 1) : 1;
+  fitScaleRef.current = fitScale;
   const scale = fitScale * zoom;
+  // The % shown is real size: photo pixels per screen pixel. The preview is the photo shrunk to PROXY_EDGE.
+  const dpr = window.devicePixelRatio || 1;
+  const proxyK = p.active?.width && p.active.height ? Math.min(1, PROXY_EDGE / Math.max(p.active.width, p.active.height)) : 1;
+  // one preview pixel is fitScale * zoom CSS pixels = that times dpr screen pixels, and one photo pixel is proxyK preview pixels
+  const trueZoom = (z: number) => fitScale * z * proxyK * dpr;
+  const hundred = fitScale > 0 ? 1 / (fitScale * proxyK * dpr) : 2; // zoom at which one photo pixel is one screen pixel
   const disp = { w: Math.max(1, imgSize.w * scale), h: Math.max(1, imgSize.h * scale) };
 
   const clampPan = useCallback(
@@ -442,7 +528,7 @@ export function Develop(p: Props) {
 
   const zoomTo = useCallback(
     (target: number, anchor?: { clientX: number; clientY: number }) => {
-      const z1 = Math.round(clamp(target, 0.5, 4) * 100) / 100;
+      const z1 = Math.round(clamp(target, 0.5, MAX_ZOOM) * 100) / 100;
       setZoom((z0) => {
         const r = boxRef.current?.getBoundingClientRect();
         const cx = anchor && r ? anchor.clientX - (r.left + r.width / 2) : 0;
@@ -693,10 +779,44 @@ export function Develop(p: Props) {
       { once: true },
     );
   };
+  // Brush: paint over the object; a moment after the last stroke the painted area is snapped to the picture's edges
+  const paintStroke = (e: React.PointerEvent) => {
+    const r = wrap.current!.getBoundingClientRect();
+    const at = (ev: { clientX: number; clientY: number }): [number, number] => [clamp((ev.clientX - r.left) / r.width, 0, 1), clamp((ev.clientY - r.top) / r.height, 0, 1)];
+    const pts: [number, number][] = [at(e)];
+    window.clearTimeout(snapTimer.current);
+    setSnap(null);
+    setLive({ points: [...pts], radius: brush });
+    const move = (ev: PointerEvent) => {
+      const q = at(ev);
+      const last = pts[pts.length - 1];
+      if (Math.hypot((q[0] - last[0]) * r.width, (q[1] - last[1]) * r.height) >= 2) {
+        pts.push(q);
+        setLive({ points: [...pts], radius: brush });
+      }
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener(
+      "pointerup",
+      () => {
+        window.removeEventListener("pointermove", move);
+        if (id == null) return;
+        const all = [...strokesRef.current, { points: pts, radius: brush }];
+        strokesRef.current = all;
+        setStrokes(all);
+        setLive(null);
+        snapTimer.current = window.setTimeout(() => {
+          api.snapObject(id, all).then(setSnap, (err) => setError(String(err)));
+        }, 450);
+      },
+      { once: true },
+    );
+  };
   const switchTab = (t: typeof rtab) => {
     setRtab(t);
     if (t === "advanced" || t === "auto") setMaskSel(null); // these panels edit the whole photo
-    if (tool === "guides" || tool === "spot") setTool("none");
+    if (tool === "guides" || tool === "spot" || tool === "remove") setTool("none");
+    if (t !== "ai") clearBrush();
   };
 
   const others = Array.from(new Set([...p.selected, ...p.workingPhotos.map((w) => w.id)])).filter((s) => s !== id);
@@ -753,13 +873,13 @@ export function Develop(p: Props) {
     else if (mod && (e.key === "=" || e.key === "+")) (e.preventDefault(), zoomTo(zoom * 1.25));
     else if (mod && e.key === "-") (e.preventDefault(), zoomTo(zoom / 1.25));
     else if (mod && e.key === "0") (e.preventDefault(), resetView());
-    else if (mod && e.key === "1") (e.preventDefault(), zoom > 1.05 || pan.x !== 0 || pan.y !== 0 ? resetView() : zoomTo(2));
+    else if (mod && e.key === "1") (e.preventDefault(), zoom > 1.05 || pan.x !== 0 || pan.y !== 0 ? resetView() : zoomTo(hundred));
     else if (mod) return;
     else if (e.code === "Space") (e.preventDefault(), setSpaceHeld(true));
     else if (e.key === "=" || e.key === "+") (e.preventDefault(), zoomTo(zoom * 1.25));
     else if (e.key === "-") (e.preventDefault(), zoomTo(zoom / 1.25));
     else if (e.key.toLowerCase() === "f") (e.preventDefault(), resetView());
-    else if (e.key.toLowerCase() === "z") (e.preventDefault(), zoom > 1.05 || pan.x !== 0 || pan.y !== 0 ? resetView() : zoomTo(2));
+    else if (e.key.toLowerCase() === "z") (e.preventDefault(), zoom > 1.05 || pan.x !== 0 || pan.y !== 0 ? resetView() : zoomTo(hundred));
     else if (e.key === "[" || e.key === "]") (e.preventDefault(), turn(e.key === "]" ? 1 : -1));
     else if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key) && (document.activeElement === boxRef.current || zoom > 1.01 || pan.x !== 0 || pan.y !== 0)) {
       e.preventDefault();
@@ -773,7 +893,7 @@ export function Develop(p: Props) {
     else if (e.key.toLowerCase() === "o" && maskSel != null) setOverlay((o) => !o);
     else if (e.key.toLowerCase() === "q") (setRtab("advanced"), setMaskSel(null), setTool((t) => (t === "spot" ? "none" : "spot")));
     else if (e.key.toLowerCase() === "j") setProof((v) => ({ ...v, clipping: !v.clipping }));
-    else if (e.key === "Escape") (setTool("none"), setMaskSel(null));
+    else if (e.key === "Escape") (setTool("none"), setMaskSel(null), clearBrush());
   };
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
@@ -874,7 +994,7 @@ export function Develop(p: Props) {
   const onBoxPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (e.button !== 0 && e.button !== 1) return;
     if ((e.target as HTMLElement).closest("button, input, select, textarea, a, [data-no-pan]")) return;
-    if ((tool === "guides" || tool === "crop") && !spaceHeld && e.button === 0) return;
+    if ((tool === "guides" || tool === "crop" || tool === "remove") && !spaceHeld && e.button === 0) return;
     boxRef.current?.focus();
     suppressClick.current = false;
     panStart.current = { id: e.pointerId, x: e.clientX, y: e.clientY, px: pan.x, py: pan.y, moved: false };
@@ -911,7 +1031,7 @@ export function Develop(p: Props) {
     if ((e.target as HTMLElement).closest("button, input, select, textarea, a, [data-no-pan]")) return;
     if (tool !== "none" && !spaceHeld) return;
     if (zoom > 1.05 || pan.x !== 0 || pan.y !== 0) resetView();
-    else zoomTo(2, { clientX: e.clientX, clientY: e.clientY });
+    else zoomTo(hundred, { clientX: e.clientX, clientY: e.clientY });
   };
 
   const photoIdx = p.photos.findIndex((ph) => ph.id === id);
@@ -1224,6 +1344,7 @@ export function Develop(p: Props) {
               <span className="px-2 py-1 text-violet-300">{picking ? "✦ Finding the object…" : mask ? "Click another object to select it · ⌥-click to subtract · Esc when done" : "Click an object to select it"}</span>
             ) : null}
             {tool === "guides" ? <span className="px-2 py-1 text-amber-300">Drag along lines that should be vertical or horizontal ({dev?.transform.guides.length ?? 0}/4) · Esc when done</span> : null}
+            {tool === "remove" ? <span className="px-2 py-1 text-rose-300">Paint over the object to remove: drag to paint, then check the red area · Esc cancels</span> : null}
             {tool === "spot" ? <span className="px-2 py-1 text-sky-300">{picking ? "Healing…" : "Click a spot to heal it · Esc when done"}</span> : null}
             {(proof.gamut || proof.clipping) && (
               <Btn active onClick={() => setProof({ ...proof, gamut: null, clipping: false })} title="Soft-proofing overlays are on; click to turn them off">
@@ -1269,7 +1390,9 @@ export function Develop(p: Props) {
             <canvas
               ref={canvas}
               onClick={onCanvasClick}
-              onPointerDown={tool === "guides" && !showBefore && !spaceHeld ? drawGuide : undefined}
+              onPointerMove={tool === "remove" ? (e) => setCursor({ x: e.nativeEvent.offsetX, y: e.nativeEvent.offsetY }) : undefined}
+              onPointerLeave={() => setCursor(null)}
+              onPointerDown={tool === "guides" && !showBefore && !spaceHeld ? drawGuide : tool === "remove" && !showBefore && !spaceHeld ? paintStroke : undefined}
               className={`block h-full w-full ${
                 picking ? "cursor-wait" : dragging ? "cursor-grabbing" : spaceHeld ? "cursor-grab" : tool !== "none" && tool !== "crop" ? "cursor-crosshair" : ""
               }`}
@@ -1280,6 +1403,14 @@ export function Develop(p: Props) {
                   <line key={i} x1={g[0][0]} y1={g[0][1]} x2={g[1][0]} y2={g[1][1]} stroke={i < dev.transform.guides.length ? "#fbbf24" : "white"} strokeWidth={2} vectorEffect="non-scaling-stroke" />
                 ))}
               </svg>
+            )}
+            {snap && !showBefore && <canvas ref={snapCanvas} className="pointer-events-none absolute inset-0 h-full w-full" />}
+            {!showBefore && (strokes.length > 0 || live) && (!snap || live) && <canvas ref={brushCanvas} className="pointer-events-none absolute inset-0 h-full w-full opacity-60" />}
+            {tool === "remove" && cursor && !showBefore && (
+              <span
+                className="pointer-events-none absolute rounded-full border-2 border-white/90 bg-red-500/15 shadow"
+                style={{ left: cursor.x, top: cursor.y, width: 2 * brush * disp.w, height: 2 * brush * disp.w, transform: "translate(-50%, -50%)" }}
+              />
             )}
             {tool === "spot" && dev && !showBefore && (
               <svg viewBox="0 0 1 1" preserveAspectRatio="none" className="pointer-events-none absolute inset-0 h-full w-full" style={{ filter: "drop-shadow(0 0 1px #000)" }}>
@@ -1385,19 +1516,19 @@ export function Develop(p: Props) {
             <input
               type="range"
               min={0.5}
-              max={4}
+              max={MAX_ZOOM}
               step={0.05}
-              value={Math.min(4, zoom)}
+              value={Math.min(MAX_ZOOM, zoom)}
               onChange={(e) => zoomTo(Number(e.target.value))}
               className="w-20"
               title="Zoom level (scroll wheel or pinch on photo)"
             />
             <button
               className="min-w-[42px] rounded px-1 py-0.5 text-center font-mono text-[10px] text-neutral-200 hover:bg-neutral-800"
-              onClick={() => (zoom > 1.05 || pan.x !== 0 || pan.y !== 0 ? resetView() : zoomTo(2))}
-              title="Click to toggle Fit / 200% zoom (Z or double-click photo)"
+              onClick={() => (zoom > 1.05 || pan.x !== 0 || pan.y !== 0 ? resetView() : zoomTo(hundred))}
+              title="Click to toggle Fit / 100% (actual pixels) (Z or double-click photo)"
             >
-              {Math.round(zoom * 100)}%
+              {Math.round(trueZoom(zoom) * 100)}%
             </button>
             <button
               className="rounded px-1.5 py-0.5 text-neutral-300 hover:bg-neutral-800 hover:text-white"
@@ -1421,11 +1552,11 @@ export function Develop(p: Props) {
               Fill
             </button>
             <button
-              className={`rounded px-1.5 py-0.5 text-[10px] ${Math.abs(zoom - 2) < 0.05 ? "bg-sky-600 text-white" : "text-neutral-300 hover:bg-neutral-800"}`}
-              onClick={() => zoomTo(2)}
-              title="Zoom 200% (Z or ⌘1)"
+              className={`rounded px-1.5 py-0.5 text-[10px] ${Math.abs(trueZoom(zoom) - 1) < 0.03 ? "bg-sky-600 text-white" : "text-neutral-300 hover:bg-neutral-800"}`}
+              onClick={() => zoomTo(hundred)}
+              title="Actual pixels, 100% (Z or ⌘1)"
             >
-              200%
+              100%
             </button>
             {(pan.x !== 0 || pan.y !== 0) && (
               <button
@@ -1584,7 +1715,7 @@ export function Develop(p: Props) {
         )}
         <div className="border-b border-neutral-800 px-3 py-2">
           <Seg
-            options={[["adjust", "Adjust"], ["selections", dev?.masks.length ? `Selections (${dev.masks.length})` : "Selections"], ["advanced", "Advanced"], ["pro", "Pro"], ["auto", "Auto"]]}
+            options={[["adjust", "Adjust"], ["selections", dev?.masks.length ? `Selections (${dev.masks.length})` : "Selections"], ["advanced", "Advanced"], ["pro", "Pro"], ["ai", "AI"], ["auto", "Auto"]]}
             value={rtab}
             onChange={switchTab}
           />
@@ -1606,6 +1737,7 @@ export function Develop(p: Props) {
           />
         )}
         {dev && T && rtab === "pro" && <ProTab dev={T} edit={edit} S={S} reset={reset} whole={!mask} autoLevels={autoLevels} />}
+        {rtab === "ai" && <AiTab photoId={id} settings={p.settings} drawing={tool === "remove"} onDraw={() => (tool === "remove" ? setTool("none") : (clearBrush(), setTool("remove")))} selection={snap ? strokes : null} brush={brush} setBrush={setBrush} onClear={clearBrush} onOpenModels={() => p.onOpenModels?.()} onOpenPhoto={(n) => p.onOpenPhoto?.(n)} />}
         {dev && rtab === "auto" && (
           <AutoTab
             dev={dev}

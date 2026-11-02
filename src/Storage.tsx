@@ -79,6 +79,19 @@ export function Locations(p: { settings: Settings; setSettings: (s: Settings) =>
   );
 }
 
+/** A UNC path (backslashes, server first), `host` or `host/share` -> smb://host[/share]; an address with a scheme is kept. */
+const toShareUrl = (v: string) => {
+  v = v.trim();
+  if (!v || /^[a-z][a-z0-9+.-]*:\/\//i.test(v)) return v;
+  const [host, share] = v.replace(/\\/g, "/").replace(/^\/+/, "").split("/");
+  return `smb://${host}${share ? "/" + encodeURIComponent(share) : ""}`;
+};
+/** smb://host/share -> the UNC path where the folder dialog should start browsing. */
+const shareToUnc = (u: string) => {
+  const m = /^smb:\/\/([^/]+)(?:\/([^/]+))?/i.exec(u.trim());
+  return m ? `\\\\${m[1]}${m[2] ? "\\" + decodeURIComponent(m[2]) : ""}` : undefined;
+};
+
 function NetworkDrives({ settings, setSettings }: { settings: Settings; setSettings: (s: Settings) => void }) {
   const [online, setOnline] = useState<Record<string, boolean>>({});
   const [draft, setDraft] = useState({ name: "", url: "", path: "" });
@@ -118,9 +131,38 @@ function NetworkDrives({ settings, setSettings }: { settings: Settings; setSetti
           </Btn>
         </div>
       ))}
-      <div className={`${form} mt-2 border-t border-neutral-800 pt-3`}>
+      <div className="mt-2 flex items-center gap-3 border-t border-neutral-800 pt-3">
+        <Btn
+          active
+          disabled={!!busy}
+          onClick={async () => {
+            const dir = await open({ directory: true, title: "Choose a folder on your network (look under Network, or type \\\\server\\share)" });
+            if (typeof dir !== "string") return;
+            // a network path (\\server\share\...) also gives the address that connects it again later
+            const unc = dir.startsWith("\\\\");
+            run("Adding…", async () => setSettings(await api.networkAdd({ name: "", url: unc ? toShareUrl(dir) : "", path: dir })));
+          }}
+        >
+          Add network folder…
+        </Btn>
+        <p className={hint}>Pick the folder in the Windows dialog; it is added as it is. Your system asks for the password if the share needs one.</p>
+      </div>
+      <details className="mt-2">
+        <summary className={`${hint} cursor-pointer`}>Enter an address by hand instead</summary>
+      <div className={`${form} mt-2`}>
         <Row label="Address">
-          <input className={`${field} font-mono text-[11px]`} value={draft.url} placeholder="smb://nas.local/photos" onChange={(e) => patch({ url: e.target.value })} />
+          <input
+            className={`${field} font-mono text-[11px]`}
+            value={draft.url}
+            placeholder="IP or name (192.168.2.101), \\server\share, or smb://nas.local/photos"
+            onChange={(e) => patch({ url: e.target.value })}
+            onBlur={() => {
+              const v = draft.url.trim();
+              // a pasted UNC path to a subfolder also gives the folder
+              const sub = v.startsWith("\\\\") && v.split("\\").filter(Boolean).length > 2 && !draft.path.trim();
+              patch({ url: toShareUrl(v), ...(sub ? { path: v } : {}) });
+            }}
+          />
         </Row>
         <Row label="Folder">
           <div className="flex min-w-0 gap-1">
@@ -132,8 +174,9 @@ function NetworkDrives({ settings, setSettings }: { settings: Settings; setSetti
             />
             <Btn
               onClick={async () => {
-                const dir = await open({ directory: true, title: "The folder of the connected share" });
-                if (typeof dir === "string") patch({ path: dir });
+                const dir = await open({ directory: true, defaultPath: shareToUnc(draft.url) ?? (draft.path || undefined), title: "The folder of the connected share" });
+                // a folder picked on a share fills in the share's address too
+                if (typeof dir === "string") patch({ path: dir, ...(!draft.url.trim() && dir.startsWith("\\\\") ? { url: toShareUrl(dir) } : {}) });
               }}
             >
               Choose…
@@ -163,7 +206,8 @@ function NetworkDrives({ settings, setSettings }: { settings: Settings; setSetti
           Add drive
         </Btn>
       </div>
-      {busy && <p className="mt-1 text-sky-300">{busy}</p>}
+      </details>
+      {busy &&<p className="mt-1 text-sky-300">{busy}</p>}
       {error && <p className="mt-1 break-words text-red-400">{error}</p>}
     </section>
   );
