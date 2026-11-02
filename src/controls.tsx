@@ -66,6 +66,7 @@ export const HUE = {
   emerald: { text: "text-emerald-600", bg: "bg-emerald-600", soft: "bg-emerald-600/15", border: "border-emerald-600" },
   rose: { text: "text-rose-500", bg: "bg-rose-500", soft: "bg-rose-500/15", border: "border-rose-500" },
   cyan: { text: "text-cyan-600", bg: "bg-cyan-600", soft: "bg-cyan-600/15", border: "border-cyan-600" },
+  orange: { text: "text-orange-500", bg: "bg-orange-500", soft: "bg-orange-500/15", border: "border-orange-500" },
 };
 export type Hue = keyof typeof HUE;
 
