@@ -114,7 +114,8 @@ export function PhotoViewer({
   // Actual 1:1 scale relative to fit
   const actualScale = useMemo(() => {
     if (!photo || !photo.width || fitDimensions.w <= 0) return 2.5;
-    return Math.max(1, photo.width / fitDimensions.w);
+    // 100%: one photo pixel per screen pixel (a CSS pixel is devicePixelRatio of them)
+    return Math.max(1, photo.width / (window.devicePixelRatio || 1) / fitDimensions.w);
   }, [photo, fitDimensions.w]);
 
   // Reset view to Fit
@@ -123,6 +124,31 @@ export function PhotoViewer({
     setZoomMode("fit");
     setPan({ x: 0, y: 0 });
   }, []);
+
+  // Past 1:1 of the proxy the canvas is stretched: render the full-size photo once the view is zoomed in
+  const fullDone = useRef<number | null>(null);
+  useEffect(() => {
+    if (!photo || zoom <= 1.05 || fullDone.current === photo.id) return;
+    const id = photo.id;
+    let cancelled = false;
+    setLoadingHighRes(true);
+    api
+      .getDevelop(id)
+      .then((dev) => api.render(id, dev, false, null, false, null, true))
+      .then((r) => {
+        const canvas = canvasRef.current;
+        if (cancelled || !canvas) return;
+        canvas.width = r.image.width;
+        canvas.height = r.image.height;
+        canvas.getContext("2d")?.putImageData(r.image, 0, 0);
+        fullDone.current = id;
+      })
+      .catch((err) => console.warn("Full-size render:", err))
+      .finally(() => !cancelled && setLoadingHighRes(false));
+    return () => {
+      cancelled = true;
+    };
+  }, [photo?.id, zoom > 1.05]);
 
   // High resolution render on photo change
   useEffect(() => {
@@ -133,6 +159,7 @@ export function PhotoViewer({
     setFlipV(false);
     setHighResReady(false);
     setLoadingHighRes(true);
+    fullDone.current = null;
 
     let cancelled = false;
     api

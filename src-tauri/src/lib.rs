@@ -1,11 +1,15 @@
 mod ai;
+mod aimodel;
+mod brush;
 mod auto;
 mod catalog;
 mod cloud;
 mod develop;
 mod enhance;
+mod gpu;
 mod mcp;
 mod remote;
+mod sdfill;
 mod storage;
 mod vision;
 
@@ -45,6 +49,11 @@ pub struct Settings {
     pub adobe_cloud_path: String,
     /// Advanced settings of the auto functions, and what runs on new photos.
     pub auto: auto::AutoSettings,
+    /// Use the GPU for image processing when one is detected.
+    pub gpu_accel: bool,
+    /// The AI models the Develop AI tab uses (ids from aimodel.rs); empty: the best one installed.
+    pub ai_denoise_model: String,
+    pub ai_removal_model: String,
     /// Shares on a NAS or server, browsed in place like folders.
     pub network_drives: Vec<storage::NetworkDrive>,
     /// Cloud storage accounts; their secrets are in the keychain.
@@ -66,6 +75,9 @@ impl Default for Settings {
             amazon_photos_path: String::new(),
             adobe_cloud_path: String::new(),
             auto: Default::default(),
+            gpu_accel: true,
+            ai_denoise_model: String::new(),
+            ai_removal_model: String::new(),
             network_drives: vec![],
             clouds: vec![],
         }
@@ -110,6 +122,8 @@ pub struct Core {
     /// Cancel flags of the running jobs (auto functions, duplicating), by job id.
     pub jobs: Mutex<HashMap<String, Arc<AtomicBool>>>,
     cache: Mutex<Vec<(String, Arc<Img>)>>,
+    /// The one full-size decode kept for zoomed views (24 MP is ~300 MB of floats).
+    full: Mutex<Option<(String, Arc<Img>)>>,
     // ponytail: one full-size decode at a time bounds memory; a decode pool if imports/exports need throughput
     decode_lock: Mutex<()>,
     app: OnceLock<tauri::AppHandle>,
@@ -126,6 +140,7 @@ impl Core {
             mcp_status: Mutex::new("not started".into()),
             jobs: Default::default(),
             cache: Default::default(),
+            full: Default::default(),
             decode_lock: Mutex::new(()),
             app: OnceLock::new(),
         };
@@ -138,6 +153,7 @@ impl Core {
     }
 
     pub fn save_settings(&self) -> Result<(), String> {
+        gpu::set_enabled(self.settings.lock().unwrap().gpu_accel);
         let path = self.dir.join("settings.json");
         let s = serde_json::to_string_pretty(&*self.settings.lock().unwrap()).map_err(es)?;
         fs::write(&path, s).map_err(es)?;
@@ -198,6 +214,16 @@ impl Core {
         c.retain(|(p, _)| p != path);
         c.insert(0, (path.to_string(), img.clone()));
         c.truncate(12);
+        Ok(img)
+    }
+
+    /// Full-size working image of a photo, for views zoomed past the proxy.
+    pub fn full_image(&self, path: &str) -> Result<Arc<Img>, String> {
+        if let Some((_, img)) = self.full.lock().unwrap().as_ref().filter(|(p, _)| p == path) {
+            return Ok(img.clone());
+        }
+        let img = Arc::new(self.decode(&self.local_file(path)?, None)?);
+        *self.full.lock().unwrap() = Some((path.to_string(), img.clone()));
         Ok(img)
     }
 
@@ -403,13 +429,19 @@ fn list_folders(core: St) -> Result<Vec<(String, i64)>, String> {
 #[tauri::command(async)]
 fn import_folder(core: St, path: String) -> Result<usize, String> {
     let c = core.inner().clone();
-    let ids = catalog::import(&core, Path::new(&path), &|done, total| {
+    let ids = catalog::import_shallow(&core, Path::new(&path), &|done, total| {
         c.emit("import-progress", json!({"label": "Reading folder", "done": done, "total": total}))
     })?;
     core.emit("catalog-changed", json!({}));
     let n = ids.len();
     auto::after_import(core.inner(), ids, "folders");
     Ok(n)
+}
+
+/// Subfolders of `path` and the number of photos directly in it, without reading any photo.
+#[tauri::command(async)]
+fn browse_folder(path: String) -> Result<(Vec<String>, usize), String> {
+    catalog::browse(Path::new(&path))
 }
 
 #[tauri::command]
@@ -485,10 +517,12 @@ struct Proof {
 /// Binary reply: u32 width, u32 height, 4x256 u32 histogram (R, G, B, luma), RGBA8 pixels.
 /// The histogram is of the photo itself, not of the overlays.
 #[tauri::command(async)]
-fn render_preview(core: St, id: i64, develop: Develop, skip_crop: bool, overlay_mask: Option<usize>, full_frame: Option<bool>, proof: Option<Proof>) -> Result<tauri::ipc::Response, String> {
+fn render_preview(core: St, id: i64, develop: Develop, skip_crop: bool, overlay_mask: Option<usize>, full_frame: Option<bool>, proof: Option<Proof>, hires: Option<bool>) -> Result<tauri::ipc::Response, String> {
     let photo = core.photo(id)?;
     let opts = Opts { skip_crop, overlay_mask, full_frame: full_frame.unwrap_or(false) };
-    let mut out = develop::render(&*core.proxy(&photo.path)?, &develop, &opts);
+    let src = if hires == Some(true) { core.full_image(&photo.path)? } else { core.proxy(&photo.path)? };
+    let mut out = develop::render(&src, &develop, &opts);
+    drop(src);
     let mut rgba = develop::to_rgba8(&out);
     let hist = develop::histogram(&rgba);
     let proof = proof.unwrap_or_default();
@@ -676,6 +710,60 @@ fn save_settings(core: St, mut settings: Settings) -> Result<(), String> {
         *s = settings;
     }
     core.save_settings()
+}
+
+/// This machine's GPU and the AI denoise models, with the best one for it marked.
+#[tauri::command(async)]
+fn ai_models(core: St) -> Value {
+    let hw = aimodel::hardware();
+    let models = aimodel::models(&core.dir, &hw);
+    json!({ "hardware": hw, "models": models })
+}
+
+/// Download an AI model (progress arrives as `ai-model-progress`).
+#[tauri::command(async)]
+fn ai_download(core: St, id: String) -> Result<(), String> {
+    let c = core.inner().clone();
+    let model = id.clone();
+    aimodel::download(&core.dir, &id, &|done, total| c.emit("ai-model-progress", json!({ "id": model, "done": done, "total": total })))
+}
+
+/// Snaps brush strokes painted over an object to the object, for the confirm step. Reply: u32 frame width and
+/// height of the preview, u32 window x, y, width, height, then the window's selection as u8 (0-255).
+#[tauri::command(async)]
+fn snap_object(core: St, id: i64, strokes: Vec<brush::Stroke>) -> Result<tauri::ipc::Response, String> {
+    let photo = core.photo(id)?;
+    let img = core.proxy(&photo.path)?;
+    let a = brush::snap(&img, &strokes)?;
+    let (w, h) = (img.w, img.h);
+    let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0, 0);
+    for y in 0..h {
+        for x in 0..w {
+            if a[y * w + x] > 0.01 {
+                (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x + 1), y1.max(y + 1));
+            }
+        }
+    }
+    let (ww, wh) = (x1.saturating_sub(x0), y1.saturating_sub(y0));
+    let mut buf = Vec::with_capacity(24 + ww * wh);
+    for v in [w, h, x0, y0, ww, wh] {
+        buf.extend((v as u32).to_le_bytes());
+    }
+    for y in y0..y1 {
+        buf.extend(a[y * w + x0..y * w + x1].iter().map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8));
+    }
+    Ok(tauri::ipc::Response::new(buf))
+}
+
+#[tauri::command(async)]
+fn ai_remove(core: St, id: String) -> Result<(), String> {
+    aimodel::remove(&core.dir, &id)
+}
+
+/// Detected GPU adapter name, or null when none is usable (the Settings toggle then has no effect).
+#[tauri::command]
+fn gpu_info() -> Option<String> {
+    gpu::detect()
 }
 
 #[tauri::command]
@@ -920,6 +1008,7 @@ pub fn run() {
             query_photos,
             list_folders,
             import_folder,
+            browse_folder,
             set_selection,
             update_photos,
             virtual_copy,
@@ -949,6 +1038,11 @@ pub fn run() {
             export_photos,
             get_settings,
             save_settings,
+            gpu_info,
+            ai_models,
+            ai_download,
+            ai_remove,
+            snap_object,
             regenerate_token,
             set_provider_key,
             ai_run,
