@@ -348,6 +348,11 @@ function ComparePane({
   onSelectIndex: (index: number) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const [imgLoaded, setImgLoaded] = useState(false);
+
+  useEffect(() => {
+    setImgLoaded(false);
+  }, [photo?.id]);
 
   if (!photo) {
     return (
@@ -440,16 +445,26 @@ function ComparePane({
         }`}
       >
         <div className="relative flex h-full w-full items-center justify-center">
+          {!imgLoaded && (
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-neutral-500">
+              <svg className="h-6 w-6 animate-spin text-neutral-600" viewBox="0 0 24 24" fill="none">
+                <circle className="opacity-20" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2.5" />
+                <path className="opacity-80" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+              </svg>
+              <span className="text-[11px] font-mono">Loading preview…</span>
+            </div>
+          )}
           <img
             src={thumbUrl(photo)}
             alt={photo.filename}
             draggable={false}
+            onLoad={() => setImgLoaded(true)}
             style={{
               transformOrigin: `${pan.x * 100}% ${pan.y * 100}%`,
               transform: zoom ? "scale(2.5)" : "none",
               transition: zoom ? "none" : "transform 0.15s ease",
             }}
-            className="max-h-full max-w-full object-contain rounded shadow-lg select-none"
+            className={`max-h-full max-w-full object-contain rounded shadow-lg select-none transition-opacity duration-150 ${imgLoaded ? "opacity-100" : "opacity-0"}`}
           />
 
           {/* Quick status stamp over the image */}

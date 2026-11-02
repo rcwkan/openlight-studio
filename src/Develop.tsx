@@ -19,7 +19,7 @@ export interface AiTaskState {
   userClosedDetails?: boolean;
 }
 
-type RTab = "adjust" | "selections" | "advanced" | "pro" | "auto";
+type RTab = "adjust" | "advanced" | "pro" | "auto";
 
 interface PhotoSessionCache {
   dev: Dev;
@@ -695,7 +695,7 @@ export function Develop(p: Props) {
   };
   const switchTab = (t: typeof rtab) => {
     setRtab(t);
-    if (t === "advanced" || t === "auto") setMaskSel(null); // these panels edit the whole photo
+    if (t === "advanced") setMaskSel(null); // these panels edit the whole photo (Auto's own do too, and it lists the selections)
     if (tool === "guides" || tool === "spot") setTool("none");
   };
 
@@ -1009,6 +1009,17 @@ export function Develop(p: Props) {
   const autoTone = () => measured("Auto tone", api.autoTone, (cur, basic_tone) => ({ ...cur, basic_tone }));
   const autoWb = () => measured("Auto white balance", api.autoWhiteBalance, (cur, white_balance) => ({ ...cur, white_balance }));
   const autoProfile = (profile: string, label: string) => measured(`Auto: ${label}`, (i, cur) => api.autoDevelop(i, cur, profile), (_, d) => d);
+  // Auto › by photo type: the AI (or, failing that, the photo's keywords) picks the profile
+  const autoByType = async () => {
+    if (id == null) return;
+    try {
+      const [type, err] = await api.photoType(id);
+      await autoProfile(type, `${type} (by photo type)`);
+      if (err) setError(`The AI could not tell the photo type, so its keywords did: ${err}`);
+    } catch (e) {
+      setError(`Auto by photo type: ${e}`);
+    }
+  };
   // Auto › remove: the engine heals the selection's objects away and commits the step
   const removeSelection = async (i: number) => {
     if (id == null) return;
@@ -1346,8 +1357,20 @@ export function Develop(p: Props) {
                 ) : null,
               )}
           </div>
-          {(loading || error) && (
-            <div className="absolute inset-x-0 top-3 mx-auto w-fit rounded bg-neutral-900/90 px-3 py-1.5 text-[11px] text-neutral-300">{error ? <span className="text-red-400">{error}</span> : "Loading…"}</div>
+          {loading && (
+            <div className="absolute inset-0 z-30 flex flex-col items-center justify-center bg-neutral-950/80 backdrop-blur-xs select-none">
+              <div className="relative mb-3 flex h-14 w-14 items-center justify-center rounded-2xl bg-neutral-900 border border-neutral-800 shadow-xl">
+                <svg className="h-7 w-7 animate-spin text-sky-400" viewBox="0 0 24 24" fill="none">
+                  <circle className="opacity-20" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2.5" />
+                  <path className="opacity-90" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                </svg>
+              </div>
+              <p className="text-xs font-semibold text-neutral-200 mb-1">Demosaicing RAW Buffer…</p>
+              <p className="text-[10px] text-neutral-400 font-mono">32-bit Rec.2020 floating-point pipeline</p>
+            </div>
+          )}
+          {error && (
+            <div className="absolute inset-x-0 top-3 mx-auto z-30 w-fit rounded bg-red-950/90 border border-red-800/80 px-3 py-1.5 text-[11px] text-red-200 shadow-lg">{error}</div>
           )}
           {showBefore && <div className="absolute left-3 top-3 rounded bg-neutral-900/80 px-2 py-1 text-[11px]">Before</div>}
 
@@ -1584,7 +1607,7 @@ export function Develop(p: Props) {
         )}
         <div className="border-b border-neutral-800 px-3 py-2">
           <Seg
-            options={[["adjust", "Adjust"], ["selections", dev?.masks.length ? `Selections (${dev.masks.length})` : "Selections"], ["advanced", "Advanced"], ["pro", "Pro"], ["auto", "Auto"]]}
+            options={[["adjust", "Adjust"], ["advanced", "Advanced"], ["pro", "Pro"], ["auto", dev?.masks.length ? `Auto (${dev.masks.length})` : "Auto"]]}
             value={rtab}
             onChange={switchTab}
           />
@@ -1610,6 +1633,7 @@ export function Develop(p: Props) {
           <AutoTab
             dev={dev}
             profile={autoProfile}
+            byType={autoByType}
             whiteBalance={autoWb}
             tone={autoTone}
             levels={autoLevels}
@@ -1622,7 +1646,7 @@ export function Develop(p: Props) {
             aiPrompt={id != null ? p.aiTasks[id]?.prompt : undefined}
           />
         )}
-        {dev && rtab === "selections" && (
+        {dev && rtab === "auto" && (
           <SelectionsTab
             dev={dev}
             change={change}
@@ -1907,7 +1931,7 @@ export function Develop(p: Props) {
   );
 }
 
-/** Stored selections (masks). Each AI-selected object is its own selection that can be selected
+/** Stored selections (masks), listed in the Auto tab. Each AI-selected object is its own selection that can be selected
  *  to finetune in Adjust, unselected, toggled on/off or deleted without a new AI run. */
 function SelectionsTab({
   dev,

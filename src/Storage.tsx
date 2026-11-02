@@ -386,7 +386,16 @@ export function CloudBrowser({ account, action, onPick, onClose }: { account: Cl
         </div>
         <div className="min-h-[12rem] flex-1 overflow-y-auto rounded bg-neutral-950 p-1">
           {error && <p className="break-words p-2 text-red-400">{error}</p>}
-          {!entries && !error && <p className="p-2 text-neutral-500">Loading…</p>}
+          {!entries && !error && (
+            <div className="flex flex-col items-center justify-center py-10 text-neutral-400 gap-2">
+              <svg className="h-5 w-5 animate-spin text-sky-400" viewBox="0 0 24 24" fill="none">
+                <circle className="opacity-20" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2.5" />
+                <path className="opacity-80" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+              </svg>
+              <span className="text-[11px] font-medium text-neutral-300">Scanning remote directory…</span>
+              <span className="text-[10px] text-neutral-500 font-mono">Fetching folder metadata</span>
+            </div>
+          )}
           {dirs.map((d) => (
             <button key={d.path} className="flex w-full items-center gap-2 rounded px-2 py-1 text-left hover:bg-neutral-800" onClick={() => setPath(d.path)}>
               <span className="text-amber-300">▸</span>
