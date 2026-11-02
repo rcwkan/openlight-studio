@@ -2077,7 +2077,7 @@ export function Develop(p: Props) {
             setSpotSize={setSpotSize}
           />
         )}
-        {dev && T && rtab === "pro" && <ProTab dev={T} edit={edit} S={S} reset={reset} whole={!mask} autoLevels={autoLevels} autoHdr={autoHdr} />}
+        {dev && T && rtab === "pro" && <ProTab dev={T} edit={edit} S={S} reset={reset} whole={!mask} autoLevels={autoLevels} autoHdr={autoHdr} hist={hist?.[3]} />}
         {dev && rtab === "auto" && (
           <AutoTab
             dev={dev}

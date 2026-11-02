@@ -152,8 +152,32 @@ export type Develop = {
   channel_mixer: { red: number[]; green: number[]; blue: number[]; monochrome: boolean; gray: number[] };
   /** colours are sRGB 0-1 */
   gradient_map: { amount: number; shadows: number[]; highlights: number[] };
-  /** HDR Toning: radius / edge / compression 0-100, exposure EV, detail -100..300 %, the rest -100..100 */
-  hdr: { enabled: boolean; radius: number; edge: number; compression: number; exposure: number; detail: number; shadows: number; highlights: number; vibrance: number; saturation: number };
+  /** HDR Toning: method fusion (simulated bracket: frames 2-9, ev_spacing 0.5-4, exposedness / contrast_weight /
+   *  saturation_weight 0-200, natural 0-100) | local | equalize | gamma | highlights; radius / edge / compression 0-100, exposure EV,
+   *  gamma 0.1-3, detail / fine_detail -100..300 %, the rest -100..100; curve [x, y] 0-255 on display brightness */
+  hdr: {
+    enabled: boolean;
+    method: string;
+    frames: number;
+    ev_spacing: number;
+    exposedness: number;
+    contrast_weight: number;
+    saturation_weight: number;
+    natural: number;
+    radius: number;
+    edge: number;
+    smooth_edges: boolean;
+    compression: number;
+    exposure: number;
+    gamma: number;
+    detail: number;
+    fine_detail: number;
+    shadows: number;
+    highlights: number;
+    vibrance: number;
+    saturation: number;
+    curve: number[][];
+  };
   filters: { blur: number; invert: boolean; posterize: number; threshold: number };
   /** angle 0/90/180/270 clockwise, then the mirrors; the crop is in the rotated frame */
   image_rotation: { angle: number; flip_h: boolean; flip_v: boolean };
