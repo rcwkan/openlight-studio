@@ -100,7 +100,7 @@ OpenLight Studio introduces the **Model Context Protocol (MCP)** directly into p
 The app serves streamable HTTP MCP on loopback:
 ```text
 Endpoint: http://127.0.0.1:41920/mcp
-Auth:     Bearer <token> (found in Settings › AI & MCP)
+Auth:     Bearer <token> (found in Settings › Agent & MCP)
 ```
 
 Add OpenLight Studio to Claude Desktop or Claude Code:

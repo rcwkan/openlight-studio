@@ -706,7 +706,7 @@ footer .wrap{display:flex;gap:20px;flex-wrap:wrap;justify-content:space-between}
             <div class="ai"><b>✦ AI</b><span class="typed" id="heroTyped"></span><span class="go">Run</span></div>
           </div>
           <div class="panel">
-            <div class="ptabs"><span class="on">Adjust</span><span>Selections</span><span>Advanced</span><span>Pro</span><span>Auto</span></div>
+            <div class="ptabs"><span class="on">Adjust</span><span>Advanced</span><span>Pro</span><span style="color:var(--violet)">AI</span><span>Auto</span></div>
             <div class="hist"><svg width="100%" height="100%"><use href="#hist"/></svg></div>
             <h6>Basic</h6>
             <div class="sl">Temp<div class="tr"><i style="left:58%"></i></div><em>+12</em></div>
@@ -769,10 +769,15 @@ footer .wrap{display:flex;gap:20px;flex-wrap:wrap;justify-content:space-between}
         <h3>Develop</h3>
         <p>White balance, tone, presence, parametric and point curves, 8-band colour mixer, Point Color, 3-way grading, detail, vignette, crop &amp; straighten.</p>
       </article>
-      <article class="fcard reveal" style="--glow:rgba(167,139,250,.2)">
+      <article class="fcard reveal" style="--glow:rgba(167,139,250,.24)">
+        <div class="ic">🧠</div>
+        <h3>On-Device AI Models</h3>
+        <p>Paint over unwanted objects for edge-snapped removal using <b>LaMa</b> or <b>Stable Diffusion</b> generative fill. Clean high-ISO noise with <b>NAFNet</b>. Everything stays in-place as non-destructive adjustment layers on the RAW master with zero duplicate files.</p>
+      </article>
+      <article class="fcard reveal" style="--glow:rgba(167,139,250,.18)">
         <div class="ic">✦</div>
-        <h3>AI Select &amp; Remove</h3>
-        <p>"Select the castle" traces an edge-snapped mask. "Remove the people" heals each outline from a matching nearby area. Or press <kbd>S</kbd> and click.</p>
+        <h3>AI Select &amp; Agent Routing</h3>
+        <p>"Select the castle" traces an edge-snapped mask. Connect Claude, Gemini, or local models to fine tune, color grade, or mask objects with natural language.</p>
       </article>
       <article class="fcard reveal">
         <div class="ic">🎭</div>
@@ -1001,6 +1006,50 @@ footer .wrap{display:flex;gap:20px;flex-wrap:wrap;justify-content:space-between}
       </div>
     </div>
 
+    <!-- AI In-Place Object Removal & Denoise -->
+    <div class="demo flip reveal" id="aiModelDemo">
+      <div class="demo-text">
+        <span class="tag">AI TAB · ON-DEVICE NEURAL MODELS</span>
+        <h3>In-place object removal and AI denoise</h3>
+        <p>Paint over photobombers, power lines, or unwanted clutter with edge-snapping, then let <b>LaMa</b> or <b>Stable Diffusion 1.5</b> fill the background naturally. High-ISO RAW shots are cleaned up using <b>NAFNet</b> neural denoising while preserving highlight headroom and fine texture.</p>
+        <p><b>Zero duplicate master files:</b> Unlike conventional tools that write massive 250 MB <code>-Enhanced-Removed.tif</code> files, OpenLight Studio composites neural patches non-destructively in-place right inside Develop. Adjust exposure, white balance, or denoise strength in real time!</p>
+        <div class="ai-controls-demo" style="margin-top:14px;display:flex;flex-direction:column;gap:10px">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;background:var(--card);padding:8px 12px;border-radius:8px;border:1px solid var(--line)">
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;font-weight:500">
+              <input type="checkbox" id="aiDemoRemCheck" checked style="accent-color:var(--cyan);width:15px;height:15px">
+              <span>Object Removal: Bridge &amp; Passersby</span>
+            </label>
+            <span style="font-size:11px;padding:2px 6px;border-radius:4px;background:var(--card2);color:var(--violet);font-family:var(--mono)">LaMa 512</span>
+          </div>
+          <div style="background:var(--card);padding:10px 12px;border-radius:8px;border:1px solid var(--line)">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;font-weight:500">
+                <input type="checkbox" id="aiDemoDnCheck" checked style="accent-color:var(--cyan);width:15px;height:15px">
+                <span>AI Denoise</span>
+              </label>
+              <span id="aiDemoDnVal" style="font-size:12px;font-family:var(--mono);color:var(--cyan)">80%</span>
+            </div>
+            <input type="range" id="aiDemoDnSlider" min="0" max="100" value="80" style="width:100%;accent-color:var(--cyan)">
+            <div style="font-size:11px;color:var(--muted);margin-top:4px">Model: NAFNet · Real-time linear blending</div>
+          </div>
+        </div>
+      </div>
+      <div class="demo-box">
+        <div class="photo sel" id="aiDemoPhoto" style="position:relative;overflow:hidden">
+          <svg id="aiDemoImg" viewBox="0 0 600 400" preserveAspectRatio="xMidYMid slice" style="transition:filter .15s ease">
+            <use href="#scene"/>
+          </svg>
+          <!-- Simulated Inpaint Patch -->
+          <div id="aiDemoPatch" style="position:absolute;left:24%;top:67%;width:22%;height:18%;border-radius:8px;pointer-events:none;background:radial-gradient(ellipse at center, rgba(140,165,180,0.92) 0%, rgba(120,145,160,0.85) 60%, transparent 100%);filter:blur(3px);transition:opacity .3s ease"></div>
+          <!-- Noise overlay simulated for 0% vs 100% denoise -->
+          <div id="aiDemoGrain" style="position:absolute;inset:0;pointer-events:none;background:radial-gradient(#fff 1px, transparent 0);background-size:4px 4px;opacity:0.04;mix-blend-mode:overlay;transition:opacity .2s ease"></div>
+          <span class="hint" id="aiDemoHint" style="bottom:12px;left:12px;position:absolute;background:rgba(12,15,18,0.85);padding:4px 10px;border-radius:6px;font-size:12px;border:1px solid var(--line)">
+            ✦ In-Place Layer: 1 Master RAW · 0 Duplicates
+          </span>
+        </div>
+      </div>
+    </div>
+
     <!-- Culling -->
     <div class="demo flip reveal">
       <div class="demo-text">
@@ -1073,17 +1122,17 @@ npm run tauri dev</pre>
         <h3>Develop</h3>
         <p>Open a photo in <b>Develop</b>. The right panel has five tabs:</p>
         <ul>
-          <li><b>Adjust</b> — Basic, curves, colour mixer, Point Color, grading, detail, effects.</li>
-          <li><b>Selections</b> — your masks. Select one and every panel tunes inside it; <b>Done</b> or <kbd>Esc</kbd> returns.</li>
+          <li><b>Adjust</b> — Basic tone, curves, colour mixer, Point Color, grading, detail, effects.</li>
           <li><b>Advanced</b> — lens corrections, Transform/Upright, calibration, noise, grain, spot removal (<kbd>Q</kbd>), soft proofing.</li>
           <li><b>Pro</b> — Levels, Hue/Sat, Selective Color, Channel Mixer, Gradient Map, filters, rotation.</li>
+          <li><b>AI</b> — On-device neural models: <b>Remove objects</b> (paint, snap, LaMa / Stable Diffusion generative fill) and <b>AI Denoise</b> (NAFNet). Stored non-destructively as adjustment layers directly on the RAW master with real-time blending and zero duplicate files.</li>
           <li><b>Auto</b> — ✦ Auto, profiles, one-at-a-time autos, auto rotate, auto select &amp; remove.</li>
         </ul>
       </div></div>
 
       <div class="step reveal"><div>
-        <h3>Ask the AI</h3>
-        <p>Pick a provider in <b>Settings › AI &amp; MCP</b> (API keys go to the keychain, or read from <code>ANTHROPIC_API_KEY</code>, <code>GEMINI_API_KEY</code>, <code>OPENAI_API_KEY</code>, <code>OPENROUTER_API_KEY</code>). Then type in the <b>✦ AI</b> bar:</p>
+        <h3>Ask the AI &amp; Agent</h3>
+        <p>Pick a provider in <b>Settings › Agent &amp; MCP</b> (API keys go to the keychain, or read from <code>ANTHROPIC_API_KEY</code>, <code>GEMINI_API_KEY</code>, <code>OPENAI_API_KEY</code>, <code>OPENROUTER_API_KEY</code>). Manage on-device models in <b>Settings › AI models</b>. Then type in the <b>✦ AI</b> bar:</p>
 <pre class="code">select the castle and warm it up a little
 remove the people on the left
 make it moody, keep the sky detail</pre>
@@ -1097,7 +1146,7 @@ make it moody, keep the sky detail</pre>
 
       <div class="step reveal"><div>
         <h3>Connect an agent</h3>
-        <p>The <b>AI &amp; MCP</b> tab shows the bearer token and copy-ready configs. The green <b>MCP</b> dot in the title bar means the server is running.</p>
+        <p>The <b>Agent &amp; MCP</b> tab shows the bearer token and copy-ready configs. The green <b>MCP</b> dot in the title bar means the server is running.</p>
 <pre class="code">claude mcp add --transport http openlight http://127.0.0.1:41920/mcp \
   --header "Authorization: Bearer &lt;token&gt;"</pre>
         <p style="margin-top:10px">Or over stdio — it forwards to the running app, or edits the catalog headless when the app is closed:</p>
@@ -1209,7 +1258,7 @@ make it moody, keep the sky detail</pre>
         </div>
         <div class="shotcard">
           <div class="mini"><span class="num">03</span><div class="photo"><svg><use href="#scene"/></svg><svg viewBox="0 0 600 400" preserveAspectRatio="xMidYMid slice" style="position:absolute;inset:0;width:100%;height:100%"><path d="M145 290 L145 240 L200 240 L202 226 L242 208 L264 192 L265 202 L304 202 L304 142 L315 142 L316 102 L328 114 L420 104 L442 122 L443 214 L474 208 L516 208 L517 290Z" fill="rgba(167,139,250,.35)" stroke="#fff" stroke-width="2" stroke-dasharray="5 3"/></svg></div></div>
-          <div class="txt"><h3>✦ AI Select</h3><p>The AI bar with a prompt like "select the castle", the traced outline and the Selections tab listing it.</p><small>The money shot · every channel</small></div>
+          <div class="txt"><h3>✦ AI Tab &amp; In-Place AI</h3><p>On-device object removal with LaMa / SD and NAFNet denoise running non-destructively as adjustment layers.</p><small>The money shot · every channel</small></div>
         </div>
         <div class="shotcard">
           <div class="mini"><span class="num">04</span>
@@ -1542,16 +1591,25 @@ const REGIONS_MAP = {
     lake: { pts: [[0, 315], [600, 315], [600, 400], [0, 400]], hint: "lake" },
   },
   portrait: {
-    face: { pts: [[285, 95], [315, 85], [338, 100], [345, 135], [342, 175], [330, 205], [305, 215], [290, 205], [285, 175], [280, 135]], hint: "face & skin" },
-    hair: { pts: [[255, 65], [285, 60], [315, 65], [330, 85], [290, 85], [280, 135], [285, 175], [275, 215], [280, 260], [250, 260], [230, 220], [225, 160], [230, 110], [240, 80]], hint: "hair" },
-    outfit: { pts: [[245, 260], [280, 260], [305, 215], [330, 205], [350, 245], [375, 280], [380, 340], [375, 395], [230, 395], [225, 330], [235, 280]], hint: "outfit & jeans" },
-    stairs: { pts: [[0, 90], [220, 90], [220, 400], [390, 400], [390, 90], [600, 90], [600, 400], [0, 400]], hint: "concrete stairs" },
+    face: { pts: [[278, 50], [300, 43], [317, 47], [332, 60], [337, 90], [333, 103], [323, 118], [310, 123], [300, 124], [283, 120], [272, 107], [268, 83], [270, 67]], hint: "face & skin" },
+    hair: { pts: [[265, 22], [285, 17], [305, 20], [325, 28], [338, 42], [345, 65], [347, 95], [348, 125], [346, 145], [338, 140], [336, 115], [337, 90], [333, 62], [318, 47], [300, 43], [280, 48], [271, 65], [268, 85], [272, 107], [281, 121], [281, 145], [284, 170], [288, 210], [292, 250], [298, 262], [272, 262], [252, 250], [244, 225], [238, 195], [222, 172], [208, 165], [215, 140], [225, 105], [235, 72], [248, 40]], hint: "hair" },
+    outfit: { pts: [[245, 237], [272, 252], [300, 262], [325, 250], [356, 225], [358, 260], [350, 290], [355, 305], [380, 313], [405, 318], [422, 330], [433, 358], [440, 400], [178, 400], [190, 370], [208, 348], [250, 340], [250, 320], [244, 295]], hint: "outfit & jeans" },
+    // two pieces: the steps either side of her
+    stairs: { pts: [
+      [[155, 114], [222, 114], [214, 140], [208, 165], [204, 180], [204, 260], [208, 300], [218, 325], [222, 343], [205, 350], [190, 370], [178, 400], [30, 400], [75, 280], [110, 210], [140, 160]],
+      [[348, 114], [385, 114], [425, 200], [470, 270], [505, 320], [540, 400], [440, 400], [432, 360], [420, 332], [400, 318], [381, 313], [383, 300], [393, 282], [397, 220], [392, 180], [372, 163], [352, 150], [348, 130]],
+    ], hint: "concrete stairs" },
   }
 };
 let selMode = "landscape";
 let currentRegions = REGIONS_MAP[selMode];
 
-function inside([x, y], pts) {
+// a region's pts is one polygon, or a list of polygons
+const polys = (pts) => (Array.isArray(pts[0][0]) ? pts : [pts]);
+function inside(p, pts) {
+  return polys(pts).some((poly) => insidePoly(p, poly));
+}
+function insidePoly([x, y], pts) {
   let r = false;
   for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
     const [xi, yi] = pts[i], [xj, yj] = pts[j];
@@ -1588,7 +1646,7 @@ sel.addEventListener("click", (ev) => {
 });
 
 function drawSel() {
-  $("#selOv").innerHTML = [...selected].map((n) => currentRegions[n] ? `<path d="M${currentRegions[n].pts.map((p) => p.join(" ")).join(" L")}Z"/>` : "").join("");
+  $("#selOv").innerHTML = [...selected].map((n) => currentRegions[n] ? `<path d="${polys(currentRegions[n].pts).map((poly) => "M" + poly.map((p) => p.join(" ")).join(" L") + "Z").join(" ")}"/>` : "").join("");
   $("#selList").innerHTML = selected.size
     ? [...selected].map((n) => `<div class="item"><i></i>${n[0].toUpperCase() + n.slice(1)}<span>AI outline · edge-snapped</span></div>`).join("")
     : '<div class="empty">Selections (0)</div>';
@@ -1614,6 +1672,35 @@ $$("#selSceneTabs button").forEach((btn) => {
     drawSel();
   };
 });
+
+// AI In-Place Object Removal & Denoise Demo
+const aiRemCheck = $("#aiDemoRemCheck");
+const aiDnCheck = $("#aiDemoDnCheck");
+const aiDnSlider = $("#aiDemoDnSlider");
+const aiDnVal = $("#aiDemoDnVal");
+const aiPatch = $("#aiDemoPatch");
+const aiGrain = $("#aiDemoGrain");
+const aiImg = $("#aiDemoImg");
+
+function updateAiDemo() {
+  if (aiPatch) aiPatch.style.opacity = aiRemCheck && aiRemCheck.checked ? "0.95" : "0";
+  const dnActive = aiDnCheck && aiDnCheck.checked;
+  const strength = aiDnSlider ? +aiDnSlider.value : 80;
+  if (aiDnVal) aiDnVal.textContent = dnActive ? strength + "%" : "Bypassed";
+  if (aiGrain) {
+    const noiseOpacity = dnActive ? Math.max(0.01, ((100 - strength) / 100) * 0.18) : 0.22;
+    aiGrain.style.opacity = String(noiseOpacity);
+  }
+  if (aiImg) {
+    const sharpness = dnActive ? 1.0 + (strength / 100) * 0.08 : 1.0;
+    aiImg.style.filter = `contrast(${sharpness})`;
+  }
+}
+
+if (aiRemCheck) aiRemCheck.onchange = updateAiDemo;
+if (aiDnCheck) aiDnCheck.onchange = updateAiDemo;
+if (aiDnSlider) aiDnSlider.oninput = updateAiDemo;
+updateAiDemo();
 
 // Culling demo
 const SHOTS = [

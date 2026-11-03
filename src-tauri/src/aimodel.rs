@@ -231,18 +231,18 @@ fn tile_for(vram_mb: Option<u32>) -> usize {
 
 #[derive(Serialize)]
 pub struct ModelInfo {
-    id: &'static str,
-    kind: &'static str,
-    name: &'static str,
-    blurb: &'static str,
-    license: &'static str,
-    source: String,
-    size_mb: f32,
-    installed: bool,
-    fits: bool,
-    recommended: bool,
+    pub id: &'static str,
+    pub kind: &'static str,
+    pub name: &'static str,
+    pub blurb: &'static str,
+    pub license: &'static str,
+    pub source: String,
+    pub size_mb: f32,
+    pub installed: bool,
+    pub fits: bool,
+    pub recommended: bool,
     /// why it is or is not the pick for this machine
-    note: String,
+    pub note: String,
 }
 
 pub fn models(data: &Path, hw: &Hardware) -> Vec<ModelInfo> {
@@ -326,6 +326,18 @@ pub fn remove(data: &Path, id: &str) -> Result<(), String> {
     let d = dir(data, s);
     if d.is_dir() {
         fs::remove_dir_all(d).map_err(es)?;
+    }
+    // Also clean up any CoreML cache entries matching this model
+    let cache_dir = data.join("coreml-cache");
+    if cache_dir.is_dir() {
+        if let Ok(entries) = fs::read_dir(&cache_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with(id) || s.files.iter().any(|f| name.starts_with(Path::new(f.0).file_stem().and_then(|s| s.to_str()).unwrap_or(id))) {
+                    let _ = fs::remove_dir_all(entry.path());
+                }
+            }
+        }
     }
     *SESSION.lock().unwrap() = None;
     Ok(())
@@ -645,10 +657,8 @@ pub(crate) fn resized(plane: Vec<f32>, w: usize, h: usize, channels: usize, nw: 
     }
 }
 
-/// Fill the hole with LaMa. The model works on a 512 px square, so a square around the object (with its
-/// surroundings as context) is cut out at the photo's own resolution when it is small enough, and shrunk to 512
-/// when not (big objects come back softer). Only the hole is replaced, with a feathered edge.
-pub fn inpaint(data: &Path, id: &str, img: Img, hole: &Hole, grow: usize, prompt: &str, tick: &dyn Fn(usize, usize) -> bool) -> Result<Img, String> {
+/// Inpaint the hole and return the resulting patch with original coordinates and soft alpha mask.
+pub fn inpaint_patch(data: &Path, id: &str, img: &Img, hole: &Hole, grow: usize, prompt: &str, tick: &dyn Fn(usize, usize) -> bool) -> Result<crate::develop::Patch, String> {
     let s = spec(id)?;
     if !installed(data, s) {
         return Err("download the object removal model first (AI tab)".into());
@@ -686,26 +696,46 @@ pub fn inpaint(data: &Path, id: &str, img: Img, hole: &Hole, grow: usize, prompt
     let filled = if s.kind == "generate" {
         generate(data, s, &rgb_in, &m_in, prompt, tick)?
     } else {
-        lama(data, s, &rgb_in, m_in)?
+        if !tick(1, 3) {
+            return Err("cancelled".into());
+        }
+        let res = lama(data, s, &rgb_in, m_in)?;
+        if !tick(2, 3) {
+            return Err("cancelled".into());
+        }
+        res
     };
     let filled = resized(filled, LAMA, LAMA, 3, side, side);
+    let _ = tick(3, 3);
 
     // paste the hole back, feathered a little so the seam disappears
     let sigma = (side as f32 / LAMA as f32).max(1.0) * 1.5;
     let hard: Vec<f32> = (0..side * side).map(|k| if mask[(sy + k / side) * w + sx + k % side] { 1.0 } else { 0.0 }).collect();
     let soft = crate::develop::blur(&hard, side, side, sigma);
-    let mut px = img.px;
+    let mut patch_data = Vec::with_capacity(side * side);
     for k in 0..side * side {
         let f = (soft[k] * 2.0).min(1.0).max(hard[k]);
-        if f > 0.0 {
-            let i = (sy + k / side) * w + sx + k % side;
-            let new = decode([filled[k * 3], filled[k * 3 + 1], filled[k * 3 + 2]]);
-            for c in 0..3 {
-                px[i][c] += f * (new[c] - px[i][c]);
-            }
-        }
+        let new_px = decode([filled[k * 3], filled[k * 3 + 1], filled[k * 3 + 2]]);
+        patch_data.push([new_px[0], new_px[1], new_px[2], f]);
     }
-    Ok(Img { w, h, px })
+    Ok(crate::develop::Patch {
+        sx,
+        sy,
+        side,
+        orig_w: w,
+        orig_h: h,
+        data: patch_data,
+    })
+}
+
+/// Fill the hole with LaMa. The model works on a 512 px square, so a square around the object (with its
+/// surroundings as context) is cut out at the photo's own resolution when it is small enough, and shrunk to 512
+/// when not (big objects come back softer). Only the hole is replaced, with a feathered edge.
+pub fn inpaint(data: &Path, id: &str, img: Img, hole: &Hole, grow: usize, prompt: &str, tick: &dyn Fn(usize, usize) -> bool) -> Result<Img, String> {
+    let patch = inpaint_patch(data, id, &img, hole, grow, prompt, tick)?;
+    let mut px = img.px;
+    crate::develop::composite_patch(&mut px, img.w, img.h, &patch, [1.0, 1.0, 1.0]);
+    Ok(Img { w: img.w, h: img.h, px })
 }
 
 #[cfg(test)]

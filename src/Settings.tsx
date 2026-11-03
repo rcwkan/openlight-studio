@@ -22,11 +22,11 @@ const TABS: [SettingsTab, string][] = [
   ["duplicate", "Duplicate"],
   ["usage", "Usage & clean up"],
   ["ai", "AI models"],
-  ["agent", "AI & MCP"],
+  ["agent", "Agent & MCP"],
   ["about", "About"],
 ];
 
-/** Settings: Appearance & theme selection, storage locations, duplicate detection, library clean-up, and AI & MCP configuration. */
+/** Settings: Appearance & theme selection, storage locations, duplicate detection, library clean-up, and Agent & MCP configuration. */
 export function SettingsView(p: {
   tab: SettingsTab;
   setTab: (t: SettingsTab) => void;
@@ -55,7 +55,7 @@ export function SettingsView(p: {
       {p.settings && p.tab === "locations" && <Locations settings={p.settings} setSettings={p.setSettings} onConnect={p.onConnect} onAuto={p.onAuto} />}
       {p.settings && p.tab === "duplicate" && <Duplicate settings={p.settings} selected={p.selected} jobs={p.jobs} />}
       {p.settings && p.tab === "ai" && <AiModelsSettings settings={p.settings} setSettings={p.setSettings} />}
-      {p.tab === "usage" && <Usage onSettingsChanged={reload} />}
+      {p.tab === "usage" && <Usage onSettingsChanged={reload} onGoToAiModels={() => p.setTab("ai")} />}
       {p.tab === "agent" && (
         <Agent
           info={p.info ?? null}
@@ -386,12 +386,254 @@ function Appearance({ settings, setSettings }: { settings: Settings; setSettings
   );
 }
 
-/** Storage usage of the catalog folder, a library analysis and clean-up. */
-function Usage({ onSettingsChanged }: { onSettingsChanged: () => void }) {
+/** Visual horizontal bar for statistics with percentage and count. */
+function StatBar({
+  label,
+  count,
+  total,
+  color = "bg-sky-500",
+  extra,
+}: {
+  label: string | React.ReactNode;
+  count: number;
+  total: number;
+  color?: string;
+  extra?: string;
+}) {
+  const pct = total > 0 ? (count / total) * 100 : 0;
+  return (
+    <div className="group flex items-center gap-2 py-0.5 text-[11px]">
+      <div className="w-32 shrink-0 truncate text-neutral-300" title={typeof label === "string" ? label : undefined}>
+        {label}
+      </div>
+      <div className="relative h-2 flex-1 rounded-full bg-neutral-800 overflow-hidden">
+        <div
+          className={`h-full rounded-full transition-all duration-300 ${color}`}
+          style={{ width: `${Math.max(pct > 0 ? 1 : 0, Math.min(100, pct))}%` }}
+        />
+      </div>
+      <div className="w-24 shrink-0 text-right tabular-nums text-neutral-400">
+        <span>{num(count)}</span>
+        <span className="ml-1 text-[10px] text-neutral-500">({pct.toFixed(1)}%)</span>
+      </div>
+      {extra && <span className="text-[10px] text-neutral-500">{extra}</span>}
+    </div>
+  );
+}
+
+/** Star ratings 5 down to 1 and Unrated breakdown. */
+function RatingBreakdown({
+  ratings,
+  total,
+}: {
+  ratings?: { rating: number; count: number }[];
+  total: number;
+}) {
+  const map: Record<number, number> = { 5: 0, 4: 0, 3: 0, 2: 0, 1: 0, 0: 0 };
+  if (ratings) {
+    for (const r of ratings) {
+      if (r.rating in map) map[r.rating] = r.count;
+      else map[0] = (map[0] || 0) + r.count;
+    }
+  }
+  const rows = [
+    { stars: 5, label: "★★★★★ 5 Stars", color: "bg-amber-400" },
+    { stars: 4, label: "★★★★☆ 4 Stars", color: "bg-amber-400" },
+    { stars: 3, label: "★★★☆☆ 3 Stars", color: "bg-amber-500" },
+    { stars: 2, label: "★★☆☆☆ 2 Stars", color: "bg-amber-600" },
+    { stars: 1, label: "★☆☆☆☆ 1 Star", color: "bg-amber-700" },
+    { stars: 0, label: "☆☆☆☆☆ Unrated", color: "bg-neutral-600" },
+  ];
+  return (
+    <div className="space-y-1">
+      {rows.map((row) => (
+        <StatBar
+          key={row.stars}
+          label={<span className={row.stars > 0 ? "text-amber-400 font-medium" : "text-neutral-500"}>{row.label}</span>}
+          count={map[row.stars] || 0}
+          total={total}
+          color={row.color}
+        />
+      ))}
+    </div>
+  );
+}
+
+/** Segmented culling status bar: Picks (green), Unflagged (gray), Rejects (red). */
+function CullingBar({ picks, rejects, total }: { picks: number; rejects: number; total: number }) {
+  const unflagged = Math.max(0, total - picks - rejects);
+  const picksPct = total > 0 ? (picks / total) * 100 : 0;
+  const rejectsPct = total > 0 ? (rejects / total) * 100 : 0;
+  const unflaggedPct = total > 0 ? (unflagged / total) * 100 : 0;
+
+  return (
+    <div className="space-y-1.5">
+      <div className="flex h-3 w-full overflow-hidden rounded bg-neutral-800">
+        {picks > 0 && (
+          <div
+            className="bg-emerald-500 transition-all"
+            style={{ width: `${picksPct}%` }}
+            title={`Picks: ${num(picks)} (${picksPct.toFixed(1)}%)`}
+          />
+        )}
+        {unflagged > 0 && (
+          <div
+            className="bg-neutral-700 transition-all"
+            style={{ width: `${unflaggedPct}%` }}
+            title={`Unflagged: ${num(unflagged)} (${unflaggedPct.toFixed(1)}%)`}
+          />
+        )}
+        {rejects > 0 && (
+          <div
+            className="bg-rose-500 transition-all"
+            style={{ width: `${rejectsPct}%` }}
+            title={`Rejects: ${num(rejects)} (${rejectsPct.toFixed(1)}%)`}
+          />
+        )}
+      </div>
+      <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-neutral-400">
+        <span className="flex items-center gap-1.5">
+          <span className="h-2 w-2 rounded-full bg-emerald-500" />
+          <span>Picks: <strong className="text-neutral-200">{num(picks)}</strong> ({picksPct.toFixed(1)}%)</span>
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="h-2 w-2 rounded-full bg-neutral-600" />
+          <span>Unflagged: <strong className="text-neutral-200">{num(unflagged)}</strong> ({unflaggedPct.toFixed(1)}%)</span>
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="h-2 w-2 rounded-full bg-rose-500" />
+          <span>Rejects: <strong className="text-neutral-200">{num(rejects)}</strong> ({rejectsPct.toFixed(1)}%)</span>
+        </span>
+      </div>
+    </div>
+  );
+}
+
+/** Capture timeline histogram (photos shot by year). */
+function TimelineHistogram({
+  years,
+  total,
+  height = "h-24",
+}: {
+  years?: { year: string; count: number }[];
+  total: number;
+  height?: string;
+}) {
+  if (!years || years.length === 0) {
+    return <p className="text-[11px] text-neutral-500 italic">No capture dates recorded.</p>;
+  }
+  const sorted = [...years].sort((a, b) => a.year.localeCompare(b.year));
+  const max = Math.max(1, ...sorted.map((y) => y.count));
+
+  return (
+    <div className="space-y-2">
+      <div className={`flex ${height} items-end gap-1.5 rounded-lg border border-neutral-800/80 bg-neutral-950 p-2.5`}>
+        {sorted.map((y) => {
+          const heightPct = Math.max(8, Math.round((y.count / max) * 100));
+          const pct = ((y.count / Math.max(1, total)) * 100).toFixed(1);
+          return (
+            <div
+              key={y.year}
+              className="group relative flex flex-1 flex-col items-center justify-end h-full min-w-0"
+              title={`${y.year}: ${num(y.count)} photos (${pct}%)`}
+            >
+              <div className="absolute -top-6 opacity-0 group-hover:opacity-100 transition-opacity bg-neutral-800 px-1.5 py-0.5 rounded text-[9px] tabular-nums text-neutral-200 pointer-events-none z-10 whitespace-nowrap shadow-md border border-neutral-700">
+                {num(y.count)} ({pct}%)
+              </div>
+              <div
+                className="w-full max-w-[32px] rounded-t bg-sky-500/85 transition-all group-hover:bg-sky-400 group-hover:shadow-[0_0_8px_rgba(56,189,248,0.5)]"
+                style={{ height: `${heightPct}%` }}
+              />
+              <span className="mt-1 truncate text-[9px] font-medium text-neutral-400 group-hover:text-neutral-200">
+                {y.year.slice(-2)}'
+              </span>
+            </div>
+          );
+        })}
+      </div>
+      <div className="flex justify-between text-[10px] text-neutral-500">
+        <span>Oldest: {sorted[0]?.year}</span>
+        <span>Timeline span: {sorted.length} years</span>
+        <span>Latest: {sorted[sorted.length - 1]?.year}</span>
+      </div>
+    </div>
+  );
+}
+
+/** RAW formats vs Standard formats distribution. */
+function FormatsSection({
+  rawCount,
+  stdCount,
+  formats,
+  total,
+}: {
+  rawCount: number;
+  stdCount: number;
+  formats?: { ext: string; count: number }[];
+  total: number;
+}) {
+  const totalFmt = Math.max(1, rawCount + stdCount);
+  const rawPct = (rawCount / totalFmt) * 100;
+  const stdPct = (stdCount / totalFmt) * 100;
+
+  return (
+    <div className="space-y-2">
+      <div className="flex h-3 w-full overflow-hidden rounded bg-neutral-800">
+        {rawCount > 0 && (
+          <div
+            className="bg-indigo-500 transition-all"
+            style={{ width: `${rawPct}%` }}
+            title={`RAW formats: ${num(rawCount)} (${rawPct.toFixed(1)}%)`}
+          />
+        )}
+        {stdCount > 0 && (
+          <div
+            className="bg-teal-500 transition-all"
+            style={{ width: `${stdPct}%` }}
+            title={`Standard formats: ${num(stdCount)} (${stdPct.toFixed(1)}%)`}
+          />
+        )}
+      </div>
+      <div className="flex flex-wrap items-center justify-between gap-2 text-[10px]">
+        <span className="flex items-center gap-1.5 text-indigo-400 font-medium">
+          <span className="h-2 w-2 rounded-full bg-indigo-500" />
+          <span>RAW files: <strong className="text-neutral-200">{num(rawCount)}</strong> ({rawPct.toFixed(1)}%)</span>
+        </span>
+        <span className="flex items-center gap-1.5 text-teal-400 font-medium">
+          <span className="h-2 w-2 rounded-full bg-teal-500" />
+          <span>Standard (JPG, PNG, TIF): <strong className="text-neutral-200">{num(stdCount)}</strong> ({stdPct.toFixed(1)}%)</span>
+        </span>
+      </div>
+      {formats && formats.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 pt-1">
+          {formats.map((f) => (
+            <span
+              key={f.ext}
+              className="inline-flex items-center gap-1 rounded bg-neutral-950 px-2 py-0.5 text-[10px] text-neutral-300 border border-neutral-800"
+            >
+              <strong className="text-neutral-100">{f.ext}</strong>
+              <span className="text-neutral-500">· {num(f.count)}</span>
+              <span className="text-neutral-600">({((f.count / Math.max(1, total)) * 100).toFixed(1)}%)</span>
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+type AnalysisTab = "overview" | "culling" | "timeline" | "gear" | "exposure" | "folders";
+
+/** Storage usage of the catalog folder, rich library analysis and clean-up. */
+function Usage({ onSettingsChanged, onGoToAiModels }: { onSettingsChanged: () => void; onGoToAiModels?: () => void }) {
   const [r, setR] = useState<StorageReport | null>(null);
   const [busy, setBusy] = useState("");
   const [note, setNote] = useState("");
   const [showDetails, setShowDetails] = useState(false);
+  const [analysisTab, setAnalysisTab] = useState<AnalysisTab>("overview");
+  const [folderSearch, setFolderSearch] = useState("");
+  const [folderSort, setFolderSort] = useState<"bytes" | "photos" | "name">("bytes");
+
   useEffect(() => void api.storage().then(setR, (e) => setNote(`Could not measure storage: ${e}`)), []);
   if (!r) return <p className="p-4 text-[12px] text-neutral-500">{note || "Measuring storage…"}</p>;
 
@@ -417,13 +659,17 @@ function Usage({ onSettingsChanged }: { onSettingsChanged: () => void }) {
   };
 
   const s = r.summary;
+  const totalPhotos = Math.max(1, s.total_photos);
   const sep = r.data_dir.includes("\\") ? "\\" : "/";
   const own = r.folders.filter((f) => !f.folder.startsWith(r.data_dir + sep));
   const google = r.folders.filter((f) => f.folder.startsWith(`${r.data_dir}${sep}remote${sep}Google Photos`)).reduce((n, f) => n + f.photos, 0);
   const immichAlbumsBytes = r.immich_albums_bytes ?? 0;
   const cloudDir = `${r.data_dir}${sep}remote${sep}Cloud`;
   const cloudPhotos = r.folders.filter((f) => f.folder === cloudDir || f.folder.startsWith(cloudDir + sep)).reduce((n, f) => n + f.photos, 0);
-  const otherBytes = r.other ?? Math.max(0, r.total - (r.catalog + r.thumbs + r.originals + immichAlbumsBytes + r.google + (r.cloud ?? 0)));
+  const aiModelsBytes = r.ai_models ?? 0;
+  const aiCacheBytes = r.ai_cache?.bytes ?? 0;
+  const otherBytes = r.other ?? Math.max(0, r.total - (r.catalog + r.thumbs + r.originals + immichAlbumsBytes + r.google + (r.cloud ?? 0) + aiModelsBytes + aiCacheBytes));
+
   const parts: [string, number, string][] = [
     ["Catalog", r.catalog, "bg-sky-500"],
     ["Thumbnails", r.thumbs, "bg-violet-500"],
@@ -431,18 +677,22 @@ function Usage({ onSettingsChanged }: { onSettingsChanged: () => void }) {
     ["Immich photo cache", r.originals, "bg-amber-500"],
     ["Google Photos picks", r.google, "bg-emerald-500"],
     ...((r.cloud ?? 0) > 0 ? [["Cloud downloads", r.cloud ?? 0, "bg-rose-500"] as [string, number, string]] : []),
+    ...(aiModelsBytes > 0 ? [["Downloaded AI models", aiModelsBytes, "bg-purple-500"] as [string, number, string]] : []),
+    ...(aiCacheBytes > 0 ? [["AI layers & patch cache", aiCacheBytes, "bg-pink-500"] as [string, number, string]] : []),
     ["Other", otherBytes, "bg-neutral-500"],
   ];
-  const tiles: [string, number, string?][] = [
-    ["Photos", s.total_photos - s.virtual_copies],
-    ["Virtual copies", s.virtual_copies],
-    ["Edited", s.edited],
-    ["Edited with AI", r.ai.photos, `${num(r.ai.edits)} AI and MCP edits in all`],
-    ["Picks", s.picks],
-    ["Rejects", s.rejects],
-    ["Rated ★3+", s.rated_3_plus],
-    ["History steps", r.history_steps],
+
+  const tiles: [string, number, string?, string?][] = [
+    ["Photos", s.total_photos - s.virtual_copies, `${num(s.total_photos)} total in catalog`],
+    ["Virtual copies", s.virtual_copies, s.virtual_copies > 0 ? `${((s.virtual_copies / totalPhotos) * 100).toFixed(1)}% of photos` : "No virtual copies"],
+    ["Edited", s.edited, `${((s.edited / totalPhotos) * 100).toFixed(1)}% of catalog`],
+    ["Edited with AI", r.ai.photos, `${num(r.ai.edits)} AI & MCP edits`],
+    ["Picks", s.picks, `${((s.picks / totalPhotos) * 100).toFixed(1)}% of catalog`],
+    ["Rejects", s.rejects, `${((s.rejects / totalPhotos) * 100).toFixed(1)}% of catalog`],
+    ["Rated ★3+", s.rated_3_plus, `${((s.rated_3_plus / totalPhotos) * 100).toFixed(1)}% of catalog`],
+    ["History steps", r.history_steps, s.history_stats ? `avg ${s.history_stats.avg_steps} · peak ${s.history_stats.max_steps}` : undefined],
   ];
+
   const c = r.clean;
   // key, title, what it is, amount, button, confirmation for what can't be recovered
   const cleans: [CleanUp, string, string, string, string, string?][] = [
@@ -472,6 +722,30 @@ function Usage({ onSettingsChanged }: { onSettingsChanged: () => void }) {
         ] as [CleanUp, string, string, string, string, string?],
       ]
       : []),
+    ...(c.ai_models && (c.ai_models.count > 0 || c.ai_models.bytes > 0)
+      ? [
+        [
+          "ai_models" as CleanUp,
+          "Downloaded AI models",
+          "Neural network weights for AI denoise and generative object removal.",
+          `${plural(c.ai_models.count, "model")} · ${size(c.ai_models.bytes)}`,
+          "Clear",
+          `Delete all downloaded AI models (${plural(c.ai_models.count, "model")}, ${size(c.ai_models.bytes)})?\n\nYou can re-download them anytime from the AI models tab.`,
+        ] as [CleanUp, string, string, string, string, string?],
+      ]
+      : []),
+    ...(c.ai_cache && (c.ai_cache.count > 0 || c.ai_cache.bytes > 0)
+      ? [
+        [
+          "ai_cache" as CleanUp,
+          "AI layers & patch cache",
+          "Rendered pixel patches for AI object removal and denoise. Safely re-rendered on demand.",
+          `${plural(c.ai_cache.count, "patch")} · ${size(c.ai_cache.bytes)}`,
+          "Clear",
+          `Clear ${plural(c.ai_cache.count, "AI patch")} (${size(c.ai_cache.bytes)})?\n\nPhotos retain their AI adjustment layers in Develop history, and patches will re-render automatically on demand.`,
+        ] as [CleanUp, string, string, string, string, string?],
+      ]
+      : []),
     [
       "missing",
       "Missing photos",
@@ -484,13 +758,30 @@ function Usage({ onSettingsChanged }: { onSettingsChanged: () => void }) {
     ["compact", "Compact catalog", "Rewrites the catalog file without its unused space.", `${size(c.compact.bytes)} unused`, "Compact"],
   ];
 
+  const filteredFolders = [...r.folders]
+    .filter((f) => !folderSearch || f.folder.toLowerCase().includes(folderSearch.toLowerCase()))
+    .sort((a, b) => {
+      if (folderSort === "bytes") return b.bytes - a.bytes;
+      if (folderSort === "photos") return b.photos - a.photos;
+      return a.folder.localeCompare(b.folder);
+    });
+
+  const ANALYSIS_TABS: { id: AnalysisTab; label: string; count?: number | string }[] = [
+    { id: "overview", label: "Overview" },
+    { id: "culling", label: "Ratings & Culling" },
+    { id: "timeline", label: "Capture Timeline", count: s.years?.length ? `${s.years.length} yrs` : undefined },
+    { id: "gear", label: "Gear & Formats", count: `${s.cameras.length} cams` },
+    { id: "exposure", label: "Exposure" },
+    { id: "folders", label: "Folders", count: r.folders.length },
+  ];
+
   return (
     <div className="flex min-h-0 flex-1 gap-4 overflow-y-auto p-4 text-[12px]">
-      <div className="flex w-[520px] shrink-0 flex-col gap-4">
+      <div className="flex w-[500px] shrink-0 flex-col gap-4">
         <section className={card}>
           <div className="flex items-baseline justify-between">
-            <h2 className="font-semibold">Storage</h2>
-            <span className="tabular-nums text-neutral-300">{size(r.total)}</span>
+            <h2 className="font-semibold text-neutral-100">Storage</h2>
+            <span className="tabular-nums font-semibold text-neutral-200">{size(r.total)}</span>
           </div>
           <p className="mb-3 truncate font-mono text-[11px] text-neutral-500 select-text" title={r.data_dir}>
             {r.data_dir}
@@ -520,6 +811,7 @@ function Usage({ onSettingsChanged }: { onSettingsChanged: () => void }) {
               <span className="text-[9px]">{showDetails ? "▲" : "▼"}</span>
             </button>
             <span className="text-[10px] text-neutral-500">
+              {r.ai_models_details?.length ? `${plural(r.ai_models_count ?? r.ai_models_details.length, "model")} · ` : ""}
               {r.immich_albums?.length ? `${r.immich_albums.length} Immich album(s) · ` : ""}
               {size(r.catalog)} DB
             </span>
@@ -574,6 +866,74 @@ function Usage({ onSettingsChanged }: { onSettingsChanged: () => void }) {
                 </div>
               )}
 
+              {r.ai_models_details && r.ai_models_details.length > 0 && (
+                <div>
+                  <div className="mb-1 flex items-center justify-between font-semibold text-purple-400">
+                    <div className="flex items-center gap-2">
+                      <span>Downloaded AI Models ({r.ai_models_count ?? r.ai_models_details.length})</span>
+                      {onGoToAiModels && (
+                        <button
+                          type="button"
+                          onClick={onGoToAiModels}
+                          className="text-[10px] font-normal text-sky-400 underline hover:text-sky-300"
+                        >
+                          Manage in AI models tab →
+                        </button>
+                      )}
+                    </div>
+                    <span className="tabular-nums text-neutral-300">{size(aiModelsBytes)}</span>
+                  </div>
+                  <div className="space-y-1.5 pl-2 font-mono text-[10px] text-neutral-400">
+                    {r.ai_models_details.map((m) => (
+                      <div key={m.id} className="flex items-center justify-between gap-2 border-b border-neutral-900 pb-1 last:border-b-0">
+                        <div className="flex min-w-0 items-center gap-1.5 truncate">
+                          <span className="truncate font-sans text-neutral-200">{m.name}</span>
+                          <span className="shrink-0 rounded bg-neutral-800 px-1 py-0.5 font-sans text-[9px] uppercase text-neutral-400">
+                            {m.kind}
+                          </span>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-2">
+                          <span className="tabular-nums text-neutral-300">{size(m.bytes)}</span>
+                          <button
+                            type="button"
+                            disabled={!!busy}
+                            onClick={() =>
+                              run(
+                                `ai_model:${m.id}`,
+                                `Remove ${m.name}`,
+                                () => api.cleanUp(`ai_model:${m.id}`),
+                                `Remove downloaded model "${m.name}" (${size(m.bytes)})?\n\nYou can re-download it anytime from the AI models tab.`
+                              )
+                            }
+                            className="rounded bg-neutral-800 px-1.5 py-0.5 text-[10px] text-red-400 hover:bg-neutral-700 hover:text-red-300 disabled:opacity-40"
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {r.ai_cache && (r.ai_cache.bytes > 0 || r.ai_cache.files > 0) && (
+                <div>
+                  <div className="mb-1 flex items-center justify-between font-semibold text-pink-400">
+                    <span>AI Adjustment Layers & Patch Cache ({plural(r.ai_cache.files, "patch")})</span>
+                    <span className="tabular-nums text-neutral-300">{size(r.ai_cache.bytes)}</span>
+                  </div>
+                  <div className="space-y-0.5 pl-2 font-mono text-[10px] text-neutral-400">
+                    <div className="flex justify-between">
+                      <span>• Rendered in-place pixel patches:</span>
+                      <span>{size(r.ai_cache.bytes)}</span>
+                    </div>
+                    <div className="text-[10px] text-neutral-500 italic mt-0.5">
+                      Cached pixel patches for in-place AI removal & denoise. Safely re-rendered on demand.
+                    </div>
+                  </div>
+                </div>
+              )}
+
               <div>
                 <div className="mb-1 flex items-center justify-between font-semibold text-neutral-300">
                   <span>Analysis of "Other" Storage</span>
@@ -603,7 +963,7 @@ function Usage({ onSettingsChanged }: { onSettingsChanged: () => void }) {
         <section className={card}>
           <div className="mb-2 flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <h2 className="font-semibold">Clean up</h2>
+              <h2 className="font-semibold text-neutral-100">Clean up</h2>
               {c.all && (c.all.count > 0 || c.all.bytes > 0) && (
                 <span className="rounded bg-neutral-800 px-1.5 py-0.5 text-[10px] text-neutral-400">
                   {size(c.all.bytes)} recoverable
@@ -623,7 +983,7 @@ function Usage({ onSettingsChanged }: { onSettingsChanged: () => void }) {
                     "all",
                     "Clear all caches",
                     () => api.cleanUp("all"),
-                    `Clean up all caches, orphaned thumbnails, and edit history, and compact the catalog database?\n\nEstimated space to free: ${size(c.all?.bytes ?? 0)}.\n(Your local and synced photo masters are kept safe).`
+                    `Clean up all caches, orphaned thumbnails, AI layer patches, and edit history, and compact the catalog database?\n\nEstimated space to free: ${size(c.all?.bytes ?? 0)}.\n(Your local and synced photo masters are kept safe).`
                   )
                 }
               >
@@ -634,7 +994,18 @@ function Usage({ onSettingsChanged }: { onSettingsChanged: () => void }) {
           {cleans.map(([key, title, detail, amount, verb, confirm]) => (
             <div key={key} className="flex items-center gap-3 border-t border-neutral-800 py-2 first-of-type:border-t-0">
               <div className="min-w-0 flex-1">
-                <div className="text-neutral-200">{title}</div>
+                <div className="flex items-center gap-2">
+                  <span className="text-neutral-200 font-medium">{title}</span>
+                  {key === "ai_models" && onGoToAiModels && (
+                    <button
+                      type="button"
+                      onClick={onGoToAiModels}
+                      className="text-[10px] text-sky-400 underline hover:text-sky-300 font-normal"
+                    >
+                      AI models tab →
+                    </button>
+                  )}
+                </div>
                 <div className="text-[11px] text-neutral-500">{detail}</div>
               </div>
               <span className="shrink-0 text-right tabular-nums text-neutral-400">{amount}</span>
@@ -646,65 +1017,411 @@ function Usage({ onSettingsChanged }: { onSettingsChanged: () => void }) {
         </section>
       </div>
 
-      <section className={`${card} flex min-w-0 flex-1 flex-col gap-4`}>
-        <h2 className="font-semibold">Library analysis</h2>
-        <div className="grid grid-cols-4 gap-2">
-          {tiles.map(([label, n, hint]) => (
-            <div key={label} className="rounded bg-neutral-950 px-3 py-2" title={hint}>
-              <div className="text-lg tabular-nums text-neutral-100">{num(n)}</div>
-              <div className="text-[11px] text-neutral-500">{label}</div>
-            </div>
-          ))}
-        </div>
-        <p className="text-neutral-400">
-          From folders {num(own.reduce((n, f) => n + f.photos, 0))} · Immich {num(r.immich_photos)} · Google Photos {num(google)}
-          {cloudPhotos ? ` · Cloud storage ${num(cloudPhotos)}` : ""}
-        </p>
-        <div className="grid grid-cols-2 gap-4">
-          {(
-            [
-              ["Cameras", s.cameras],
-              ["Lenses", s.lenses],
-            ] as const
-          ).map(([title, list]) => (
-            <div key={title}>
-              <h3 className={heading}>{title}</h3>
-              {list.length === 0 && <p className="text-neutral-600">None recorded</p>}
-              {list.slice(0, 5).map((x) => (
-                <div key={x.name} className="flex justify-between gap-2">
-                  <span className="truncate">{x.name}</span>
-                  <span className="tabular-nums text-neutral-500">{num(x.count)}</span>
-                </div>
-              ))}
-            </div>
-          ))}
-        </div>
-        <div className="flex min-h-0 flex-col">
-          <h3 className={heading}>Folders by size</h3>
-          {r.folders.length === 0 && <p className="text-neutral-600">No folders yet.</p>}
-          <div className="grid grid-cols-[minmax(0,1fr)_auto_auto_auto] gap-x-4 gap-y-1 overflow-y-auto">
-            {[...r.folders]
-              .sort((a, b) => b.bytes - a.bytes)
-              .map((f) => (
-                <div key={f.folder} className="contents">
-                  <span className="truncate" title={f.folder}>
-                    {short(f.folder)}
+      <section className={`${card} flex min-w-0 flex-1 flex-col gap-4 overflow-y-auto`}>
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-neutral-800 pb-3">
+          <div>
+            <h2 className="text-sm font-semibold text-neutral-100">Library Analysis & Statistics</h2>
+            <p className="text-[11px] text-neutral-400 mt-0.5">
+              From folders {num(own.reduce((n, f) => n + f.photos, 0))} · Immich {num(r.immich_photos)} · Google Photos {num(google)}
+              {cloudPhotos ? ` · Cloud storage ${num(cloudPhotos)}` : ""}
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-1 rounded-lg bg-neutral-950 p-1 border border-neutral-800/80">
+            {ANALYSIS_TABS.map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                onClick={() => setAnalysisTab(t.id)}
+                className={`flex items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium transition-colors ${
+                  analysisTab === t.id
+                    ? "bg-neutral-800 text-white shadow-xs"
+                    : "text-neutral-400 hover:text-neutral-200 hover:bg-neutral-900"
+                }`}
+              >
+                <span>{t.label}</span>
+                {t.count !== undefined && (
+                  <span className="rounded bg-neutral-900 px-1 py-0.2 text-[10px] text-neutral-500 font-mono">
+                    {t.count}
                   </span>
-                  <span className="text-right tabular-nums text-neutral-400">{num(f.photos)}</span>
-                  <span className="text-right tabular-nums text-neutral-400">{f.online ? size(f.bytes) : "—"}</span>
-                  <span className="text-right">
-                    {!f.online ? (
-                      <button className="text-amber-400 hover:text-amber-300 disabled:opacity-40" disabled={!!busy} title="Folder not found; remove its photos from the catalog…" onClick={() => removeFolder(f.folder)}>
-                        offline · remove…
-                      </button>
-                    ) : f.missing ? (
-                      <span className="text-red-400">{num(f.missing)} missing</span>
-                    ) : null}
-                  </span>
-                </div>
-              ))}
+                )}
+              </button>
+            ))}
           </div>
         </div>
+
+        {/* Global Summary Metric Tiles */}
+        <div className="grid grid-cols-4 gap-2">
+          {tiles.map(([label, n, hint]) => (
+            <div key={label} className="rounded bg-neutral-950 px-3 py-2 border border-neutral-800/60" title={hint}>
+              <div className="flex items-baseline justify-between">
+                <div className="text-lg tabular-nums text-neutral-100 font-semibold">{num(n)}</div>
+                {hint && <span className="text-[10px] text-neutral-500 font-mono">{hint}</span>}
+              </div>
+              <div className="text-[11px] text-neutral-400">{label}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* Overview Tab */}
+        {analysisTab === "overview" && (
+          <div className="space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="space-y-4">
+                <div className="rounded-lg border border-neutral-800 bg-neutral-950/60 p-3.5 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h3 className={heading}>Culling & Pick Ratio</h3>
+                    <button
+                      type="button"
+                      onClick={() => setAnalysisTab("culling")}
+                      className="text-[10px] text-sky-400 hover:underline"
+                    >
+                      Details →
+                    </button>
+                  </div>
+                  <CullingBar picks={s.picks} rejects={s.rejects} total={totalPhotos} />
+                  <div className="pt-2 border-t border-neutral-900">
+                    <div className="mb-1 text-[11px] font-medium text-neutral-300">Rating Breakdown</div>
+                    <RatingBreakdown ratings={s.ratings} total={totalPhotos} />
+                  </div>
+                </div>
+
+                <div className="rounded-lg border border-neutral-800 bg-neutral-950/60 p-3.5 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <h3 className={heading}>Capture Timeline (By Year)</h3>
+                    <button
+                      type="button"
+                      onClick={() => setAnalysisTab("timeline")}
+                      className="text-[10px] text-sky-400 hover:underline"
+                    >
+                      Full Timeline →
+                    </button>
+                  </div>
+                  <TimelineHistogram years={s.years} total={totalPhotos} />
+                </div>
+              </div>
+
+              <div className="space-y-4">
+                <div className="rounded-lg border border-neutral-800 bg-neutral-950/60 p-3.5 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h3 className={heading}>File Formats & RAW Ratio</h3>
+                    <button
+                      type="button"
+                      onClick={() => setAnalysisTab("gear")}
+                      className="text-[10px] text-sky-400 hover:underline"
+                    >
+                      All Gear →
+                    </button>
+                  </div>
+                  <FormatsSection
+                    rawCount={s.raw_count ?? 0}
+                    stdCount={s.std_count ?? 0}
+                    formats={s.formats}
+                    total={totalPhotos}
+                  />
+                </div>
+
+                <div className="rounded-lg border border-neutral-800 bg-neutral-950/60 p-3.5 space-y-3">
+                  <h3 className={heading}>Top Cameras & Lenses</h3>
+                  <div className="space-y-3">
+                    <div>
+                      <div className="mb-1 text-[11px] font-medium text-neutral-300">Cameras</div>
+                      {s.cameras.slice(0, 4).map((c) => (
+                        <StatBar key={c.name} label={c.name} count={c.count} total={totalPhotos} color="bg-sky-500" />
+                      ))}
+                      {s.cameras.length === 0 && <p className="text-neutral-600 text-[11px]">None recorded</p>}
+                    </div>
+                    <div className="pt-2 border-t border-neutral-900">
+                      <div className="mb-1 text-[11px] font-medium text-neutral-300">Lenses</div>
+                      {s.lenses.slice(0, 4).map((l) => (
+                        <StatBar key={l.name} label={l.name} count={l.count} total={totalPhotos} color="bg-emerald-500" />
+                      ))}
+                      {s.lenses.length === 0 && <p className="text-neutral-600 text-[11px]">None recorded</p>}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Edit & AI Insights */}
+            <div className="rounded-lg border border-neutral-800 bg-neutral-950/60 p-3.5">
+              <h3 className={heading}>Edit Depth & Non-Destructive AI Adjustments</h3>
+              <div className="mt-2 grid grid-cols-2 sm:grid-cols-4 gap-3 text-[11px]">
+                <div className="rounded bg-neutral-900/80 p-2.5 border border-neutral-800">
+                  <div className="text-neutral-400 text-[10px]">Total History Steps</div>
+                  <div className="text-base font-semibold text-neutral-100 tabular-nums">{num(r.history_steps)}</div>
+                  <div className="text-[10px] text-neutral-500">{size(c.history?.bytes ?? 0)} stored in DB</div>
+                </div>
+                <div className="rounded bg-neutral-900/80 p-2.5 border border-neutral-800">
+                  <div className="text-neutral-400 text-[10px]">Avg Steps / Edited Photo</div>
+                  <div className="text-base font-semibold text-neutral-100 tabular-nums">{s.history_stats?.avg_steps ?? 0}</div>
+                  <div className="text-[10px] text-neutral-500">Across {num(s.edited)} edited files</div>
+                </div>
+                <div className="rounded bg-neutral-900/80 p-2.5 border border-neutral-800">
+                  <div className="text-neutral-400 text-[10px]">Peak History on 1 Photo</div>
+                  <div className="text-base font-semibold text-neutral-100 tabular-nums">{s.history_stats?.max_steps ?? 0}</div>
+                  <div className="text-[10px] text-neutral-500">Deepest edit revision stack</div>
+                </div>
+                <div className="rounded bg-neutral-900/80 p-2.5 border border-neutral-800">
+                  <div className="text-neutral-400 text-[10px]">AI Layers & Patch Cache</div>
+                  <div className="text-base font-semibold text-pink-400 tabular-nums">{size(r.ai_cache?.bytes ?? 0)}</div>
+                  <div className="text-[10px] text-neutral-500">{plural(r.ai_cache?.files ?? 0, "patch")} cached</div>
+                </div>
+              </div>
+            </div>
+
+            {/* Folders Summary */}
+            <div className="rounded-lg border border-neutral-800 bg-neutral-950/60 p-3.5 space-y-2">
+              <div className="flex items-center justify-between">
+                <h3 className={heading}>Folders by Size ({r.folders.length} Total)</h3>
+                <button
+                  type="button"
+                  onClick={() => setAnalysisTab("folders")}
+                  className="text-[10px] text-sky-400 hover:underline"
+                >
+                  Manage all folders →
+                </button>
+              </div>
+              <div className="grid grid-cols-[minmax(0,1fr)_auto_auto_auto] gap-x-4 gap-y-1.5 pt-1">
+                {r.folders.slice(0, 5).map((f) => (
+                  <div key={f.folder} className="contents text-[11px]">
+                    <span className="truncate text-neutral-300" title={f.folder}>
+                      {short(f.folder)}
+                    </span>
+                    <span className="text-right tabular-nums text-neutral-400">{num(f.photos)} photos</span>
+                    <span className="text-right tabular-nums text-neutral-300 font-medium">{f.online ? size(f.bytes) : "—"}</span>
+                    <span className="text-right">
+                      {!f.online ? (
+                        <span className="text-amber-400">offline</span>
+                      ) : f.missing ? (
+                        <span className="text-red-400">{num(f.missing)} missing</span>
+                      ) : (
+                        <span className="text-emerald-500 text-[10px]">online</span>
+                      )}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Ratings & Culling Tab */}
+        {analysisTab === "culling" && (
+          <div className="space-y-4">
+            <div className="rounded-lg border border-neutral-800 bg-neutral-950/60 p-4 space-y-3">
+              <h3 className={heading}>Culling Ratios & Flags</h3>
+              <CullingBar picks={s.picks} rejects={s.rejects} total={totalPhotos} />
+              <div className="grid grid-cols-3 gap-3 pt-3">
+                <div className="rounded border border-emerald-900/50 bg-emerald-950/20 p-3">
+                  <div className="text-emerald-400 font-semibold text-lg tabular-nums">{num(s.picks)}</div>
+                  <div className="text-[11px] text-neutral-300">Picks (Flag = 1)</div>
+                  <div className="text-[10px] text-neutral-500 mt-1">{((s.picks / totalPhotos) * 100).toFixed(2)}% of library</div>
+                </div>
+                <div className="rounded border border-neutral-800 bg-neutral-900/30 p-3">
+                  <div className="text-neutral-200 font-semibold text-lg tabular-nums">{num(Math.max(0, totalPhotos - s.picks - s.rejects))}</div>
+                  <div className="text-[11px] text-neutral-300">Unflagged (Flag = 0)</div>
+                  <div className="text-[10px] text-neutral-500 mt-1">{((Math.max(0, totalPhotos - s.picks - s.rejects) / totalPhotos) * 100).toFixed(2)}% of library</div>
+                </div>
+                <div className="rounded border border-rose-900/50 bg-rose-950/20 p-3">
+                  <div className="text-rose-400 font-semibold text-lg tabular-nums">{num(s.rejects)}</div>
+                  <div className="text-[11px] text-neutral-300">Rejects (Flag = -1)</div>
+                  <div className="text-[10px] text-neutral-500 mt-1">{((s.rejects / totalPhotos) * 100).toFixed(2)}% of library</div>
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-neutral-800 bg-neutral-950/60 p-4 space-y-3">
+              <h3 className={heading}>Star Ratings Distribution</h3>
+              <RatingBreakdown ratings={s.ratings} total={totalPhotos} />
+            </div>
+          </div>
+        )}
+
+        {/* Capture Timeline Tab */}
+        {analysisTab === "timeline" && (
+          <div className="space-y-4">
+            <div className="rounded-lg border border-neutral-800 bg-neutral-950/60 p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <h3 className={heading}>Capture Timeline Histogram</h3>
+                <span className="text-[11px] text-neutral-400">{s.years?.length ?? 0} active capture years</span>
+              </div>
+              <TimelineHistogram years={s.years} total={totalPhotos} height="h-40" />
+            </div>
+
+            <div className="rounded-lg border border-neutral-800 bg-neutral-950/60 p-4 space-y-3">
+              <h3 className={heading}>Chronological Yearly Summary</h3>
+              <div className="space-y-1.5">
+                {[...(s.years ?? [])]
+                  .sort((a, b) => b.year.localeCompare(a.year))
+                  .map((y) => (
+                    <StatBar
+                      key={y.year}
+                      label={<span className="font-mono text-neutral-200 font-medium">Year {y.year}</span>}
+                      count={y.count}
+                      total={totalPhotos}
+                      color="bg-sky-500"
+                    />
+                  ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Gear & Formats Tab */}
+        {analysisTab === "gear" && (
+          <div className="space-y-4">
+            <div className="rounded-lg border border-neutral-800 bg-neutral-950/60 p-4 space-y-3">
+              <h3 className={heading}>File Format Distribution & RAW vs Standard</h3>
+              <FormatsSection
+                rawCount={s.raw_count ?? 0}
+                stdCount={s.std_count ?? 0}
+                formats={s.formats}
+                total={totalPhotos}
+              />
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="rounded-lg border border-neutral-800 bg-neutral-950/60 p-4 space-y-3">
+                <h3 className={heading}>Cameras ({s.cameras.length})</h3>
+                {s.cameras.map((c) => (
+                  <StatBar key={c.name} label={c.name} count={c.count} total={totalPhotos} color="bg-sky-500" />
+                ))}
+                {s.cameras.length === 0 && <p className="text-neutral-600 text-[11px]">No cameras recorded</p>}
+              </div>
+
+              <div className="rounded-lg border border-neutral-800 bg-neutral-950/60 p-4 space-y-3">
+                <h3 className={heading}>Lenses ({s.lenses.length})</h3>
+                {s.lenses.map((l) => (
+                  <StatBar key={l.name} label={l.name} count={l.count} total={totalPhotos} color="bg-emerald-500" />
+                ))}
+                {s.lenses.length === 0 && <p className="text-neutral-600 text-[11px]">No lenses recorded</p>}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Exposure Analytics Tab */}
+        {analysisTab === "exposure" && (
+          <div className="space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="rounded-lg border border-neutral-800 bg-neutral-950/60 p-4 space-y-3">
+                <div>
+                  <h3 className={heading}>ISO Sensitivity</h3>
+                  <p className="text-[10px] text-neutral-500">Daylight vs Low-light Distribution</p>
+                </div>
+                <div className="space-y-1">
+                  {(s.iso_ranges ?? []).map((ir) => (
+                    <StatBar key={ir.range} label={`ISO ${ir.range}`} count={ir.count} total={totalPhotos} color="bg-amber-500" />
+                  ))}
+                  {(!s.iso_ranges || s.iso_ranges.length === 0) && <p className="text-neutral-600 text-[11px]">No ISO metadata</p>}
+                </div>
+              </div>
+
+              <div className="rounded-lg border border-neutral-800 bg-neutral-950/60 p-4 space-y-3">
+                <div>
+                  <h3 className={heading}>Aperture & Depth of Field</h3>
+                  <p className="text-[10px] text-neutral-500">Wide Aperture vs Landscape F-Stops</p>
+                </div>
+                <div className="space-y-1">
+                  {(s.aperture_ranges ?? []).map((ar) => (
+                    <StatBar key={ar.range} label={ar.range} count={ar.count} total={totalPhotos} color="bg-purple-500" />
+                  ))}
+                  {(!s.aperture_ranges || s.aperture_ranges.length === 0) && <p className="text-neutral-600 text-[11px]">No aperture metadata</p>}
+                </div>
+              </div>
+
+              <div className="rounded-lg border border-neutral-800 bg-neutral-950/60 p-4 space-y-3">
+                <div>
+                  <h3 className={heading}>Focal Length</h3>
+                  <p className="text-[10px] text-neutral-500">Ultra-wide, Normal, to Super-tele</p>
+                </div>
+                <div className="space-y-1">
+                  {(s.focal_ranges ?? []).map((fr) => (
+                    <StatBar key={fr.range} label={fr.range} count={fr.count} total={totalPhotos} color="bg-sky-500" />
+                  ))}
+                  {(!s.focal_ranges || s.focal_ranges.length === 0) && <p className="text-neutral-600 text-[11px]">No focal length metadata</p>}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Folders Tab */}
+        {analysisTab === "folders" && (
+          <div className="space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-neutral-800 bg-neutral-950/60 p-3">
+              <input
+                type="text"
+                placeholder="Search folders…"
+                value={folderSearch}
+                onChange={(e) => setFolderSearch(e.target.value)}
+                className="w-64 rounded bg-neutral-900 px-2.5 py-1 text-xs text-neutral-200 border border-neutral-800 focus:border-sky-500 focus:outline-hidden"
+              />
+              <div className="flex items-center gap-1.5 text-xs text-neutral-400">
+                <span className="text-[11px]">Sort:</span>
+                <button
+                  type="button"
+                  onClick={() => setFolderSort("bytes")}
+                  className={`rounded px-2 py-0.5 ${folderSort === "bytes" ? "bg-neutral-800 text-neutral-100 font-medium" : "hover:text-neutral-200"}`}
+                >
+                  Size
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setFolderSort("photos")}
+                  className={`rounded px-2 py-0.5 ${folderSort === "photos" ? "bg-neutral-800 text-neutral-100 font-medium" : "hover:text-neutral-200"}`}
+                >
+                  Photos
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setFolderSort("name")}
+                  className={`rounded px-2 py-0.5 ${folderSort === "name" ? "bg-neutral-800 text-neutral-100 font-medium" : "hover:text-neutral-200"}`}
+                >
+                  Path
+                </button>
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-neutral-800 bg-neutral-950/60 p-4 space-y-2">
+              <div className="grid grid-cols-[minmax(0,1fr)_auto_auto_auto] gap-x-4 border-b border-neutral-800 pb-2 text-[10px] uppercase font-semibold text-neutral-400">
+                <span>Folder</span>
+                <span className="text-right">Photos</span>
+                <span className="text-right">Disk Size</span>
+                <span className="text-right">Status</span>
+              </div>
+              {filteredFolders.length === 0 && <p className="text-neutral-600 text-[11px] py-4 text-center">No folders match filter.</p>}
+              <div className="grid grid-cols-[minmax(0,1fr)_auto_auto_auto] gap-x-4 gap-y-2 pt-1 overflow-y-auto max-h-[500px]">
+                {filteredFolders.map((f) => (
+                  <div key={f.folder} className="contents text-[11px]">
+                    <span className="truncate text-neutral-300" title={f.folder}>
+                      {short(f.folder)}
+                      <span className="ml-2 font-mono text-[10px] text-neutral-600">{f.folder}</span>
+                    </span>
+                    <span className="text-right tabular-nums text-neutral-400">{num(f.photos)}</span>
+                    <span className="text-right tabular-nums text-neutral-300 font-medium">{f.online ? size(f.bytes) : "—"}</span>
+                    <span className="text-right">
+                      {!f.online ? (
+                        <button
+                          className="text-amber-400 hover:text-amber-300 disabled:opacity-40"
+                          disabled={!!busy}
+                          title="Folder not found; remove its photos from the catalog…"
+                          onClick={() => removeFolder(f.folder)}
+                        >
+                          offline · remove…
+                        </button>
+                      ) : f.missing ? (
+                        <span className="text-red-400">{num(f.missing)} missing</span>
+                      ) : (
+                        <span className="text-emerald-500 text-[10px]">online</span>
+                      )}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
       </section>
     </div>
   );

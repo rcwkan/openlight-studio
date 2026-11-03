@@ -41,6 +41,8 @@ settings.json
 thumbs/
 remote/
 *.olxmp
+*.docx
+*.doc
 
 # Editor and OS directories and files
 .vscode/*

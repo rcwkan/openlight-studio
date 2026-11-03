@@ -13,7 +13,7 @@ use image::{
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{f32::consts::PI, path::Path, sync::OnceLock};
+use std::{f32::consts::PI, fs, path::{Path, PathBuf}, sync::OnceLock};
 
 pub(crate) type M3 = [[f32; 3]; 3];
 pub(crate) type Px = [f32; 3];
@@ -55,8 +55,32 @@ pub struct Develop {
     pub image_rotation: ImageRotation,
     pub crop: Crop,
     pub retouch: Vec<Heal>,
+    #[serde(default)]
+    pub ai_removals: Vec<AiRemoval>,
+    #[serde(default)]
+    pub ai_denoise: AiDenoise,
     pub masks: Vec<Mask>,
     pub ai_provenance_log: Vec<Value>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(default)]
+pub struct AiRemoval {
+    pub id: String,
+    pub label: String,
+    pub model: String,
+    pub prompt: String,
+    pub enabled: bool,
+    pub bounds: [f32; 4], // [x0, y0, w, h] in 0.0..1.0 coordinates
+    pub patch_file: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(default)]
+pub struct AiDenoise {
+    pub enabled: bool,
+    pub model: String,
+    pub strength: f32, // 0.0 .. 100.0
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -1247,7 +1271,150 @@ pub fn raw_size(path: &Path) -> Option<(u32, u32)> {
 // Pipeline
 // ---------------------------------------------------------------------------
 
-#[derive(Default, Clone, Copy)]
+#[derive(Clone, Debug, Default)]
+pub struct Patch {
+    pub sx: usize,
+    pub sy: usize,
+    pub side: usize,
+    pub orig_w: usize,
+    pub orig_h: usize,
+    /// [r, g, b, alpha] per pixel (side * side)
+    pub data: Vec<[f32; 4]>,
+}
+
+impl Patch {
+    pub fn save(&self, path: &Path) -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let mut buf = Vec::with_capacity(28 + self.data.len() * 16);
+        buf.extend_from_slice(b"OLPT");
+        buf.extend_from_slice(&1u32.to_le_bytes()); // version 1
+        buf.extend_from_slice(&(self.sx as u32).to_le_bytes());
+        buf.extend_from_slice(&(self.sy as u32).to_le_bytes());
+        buf.extend_from_slice(&(self.side as u32).to_le_bytes());
+        buf.extend_from_slice(&(self.orig_w as u32).to_le_bytes());
+        buf.extend_from_slice(&(self.orig_h as u32).to_le_bytes());
+        buf.extend_from_slice(bytemuck::cast_slice(&self.data));
+        fs::write(path, buf).map_err(es)
+    }
+
+    pub fn load(path: &Path) -> Result<Self, String> {
+        let bytes = fs::read(path).map_err(es)?;
+        if bytes.len() < 28 || &bytes[0..4] != b"OLPT" {
+            return Err("invalid patch file".into());
+        }
+        let read_u32 = |offset: usize| -> usize {
+            u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize
+        };
+        let sx = read_u32(8);
+        let sy = read_u32(12);
+        let side = read_u32(16);
+        let orig_w = read_u32(20);
+        let orig_h = read_u32(24);
+        let expected_floats = side * side * 4;
+        let data_bytes = &bytes[28..];
+        if data_bytes.len() < expected_floats * 4 {
+            return Err("patch file data truncated".into());
+        }
+        let floats: &[f32] = bytemuck::cast_slice(&data_bytes[..expected_floats * 4]);
+        let data: Vec<[f32; 4]> = floats.chunks_exact(4).map(|c| [c[0], c[1], c[2], c[3]]).collect();
+        Ok(Patch { sx, sy, side, orig_w, orig_h, data })
+    }
+}
+
+pub fn composite_patch(px: &mut [Px], w: usize, h: usize, patch: &Patch, g: [f32; 3]) {
+    if patch.orig_w == 0 || patch.orig_h == 0 || patch.side == 0 {
+        return;
+    }
+    let scale_x = w as f32 / patch.orig_w as f32;
+    let scale_y = h as f32 / patch.orig_h as f32;
+    let rx = (patch.sx as f32 * scale_x).round() as usize;
+    let ry = (patch.sy as f32 * scale_y).round() as usize;
+    let rside_w = ((patch.side as f32 * scale_x).round() as usize).min(w.saturating_sub(rx));
+    let rside_h = ((patch.side as f32 * scale_y).round() as usize).min(h.saturating_sub(ry));
+    if rside_w == 0 || rside_h == 0 {
+        return;
+    }
+
+    if scale_x == 1.0 && scale_y == 1.0 && rside_w == patch.side && rside_h == patch.side {
+        for y in 0..patch.side {
+            let row_offset = (ry + y) * w + rx;
+            let patch_row = y * patch.side;
+            for x in 0..patch.side {
+                let p = patch.data[patch_row + x];
+                let alpha = p[3];
+                if alpha > 0.0 {
+                    let dest = &mut px[row_offset + x];
+                    dest[0] += alpha * (p[0] * g[0] - dest[0]);
+                    dest[1] += alpha * (p[1] * g[1] - dest[1]);
+                    dest[2] += alpha * (p[2] * g[2] - dest[2]);
+                }
+            }
+        }
+    } else {
+        for y in 0..rside_h {
+            let py = ((y as f32 / rside_h as f32) * (patch.side - 1) as f32).clamp(0.0, (patch.side - 1) as f32) as usize;
+            let dest_y = (ry + y) * w;
+            let patch_row = py * patch.side;
+            for x in 0..rside_w {
+                let px_idx = ((x as f32 / rside_w as f32) * (patch.side - 1) as f32).clamp(0.0, (patch.side - 1) as f32) as usize;
+                let p = patch.data[patch_row + px_idx];
+                let alpha = p[3];
+                if alpha > 0.0 {
+                    let dest = &mut px[dest_y + rx + x];
+                    dest[0] += alpha * (p[0] * g[0] - dest[0]);
+                    dest[1] += alpha * (p[1] * g[1] - dest[1]);
+                    dest[2] += alpha * (p[2] * g[2] - dest[2]);
+                }
+            }
+        }
+    }
+}
+
+pub struct DenoisedCache {
+    pub w: usize,
+    pub h: usize,
+    pub px: Vec<Px>,
+}
+
+impl DenoisedCache {
+    pub fn save(&self, path: &Path) -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let mut buf = Vec::with_capacity(16 + self.px.len() * 12);
+        buf.extend_from_slice(b"OLDN");
+        buf.extend_from_slice(&1u32.to_le_bytes()); // version 1
+        buf.extend_from_slice(&(self.w as u32).to_le_bytes());
+        buf.extend_from_slice(&(self.h as u32).to_le_bytes());
+        let floats: &[f32] = bytemuck::cast_slice(&self.px);
+        buf.extend_from_slice(bytemuck::cast_slice(floats));
+        fs::write(path, buf).map_err(es)
+    }
+
+    pub fn load(path: &Path) -> Result<Self, String> {
+        let bytes = fs::read(path).map_err(es)?;
+        if bytes.len() < 16 || &bytes[0..4] != b"OLDN" {
+            return Err("invalid denoise cache file".into());
+        }
+        let read_u32 = |offset: usize| -> usize {
+            u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize
+        };
+        let w = read_u32(8);
+        let h = read_u32(12);
+        let expected_floats = w * h * 3;
+        let data_bytes = &bytes[16..];
+        if data_bytes.len() < expected_floats * 4 {
+            return Err("denoise cache file truncated".into());
+        }
+        let floats: &[f32] = bytemuck::cast_slice(&data_bytes[..expected_floats * 4]);
+        let px: Vec<Px> = floats.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
+        Ok(DenoisedCache { w, h, px })
+    }
+}
+
+#[derive(Default, Clone)]
 pub struct Opts {
     /// Crop tool active: straighten but keep the full frame.
     pub skip_crop: bool,
@@ -1255,15 +1422,17 @@ pub struct Opts {
     pub full_frame: bool,
     /// Tint this mask's coverage red.
     pub overlay_mask: Option<usize>,
+    /// Cache directory for AI layers (denoise, inpaint patches).
+    pub ai_cache_dir: Option<PathBuf>,
 }
 
 pub fn render(src: &Img, d: &Develop, o: &Opts) -> Img {
     let (w, h) = (src.w, src.h);
-    let (mut px, wts) = tones(&src.px, w, h, d, o.overlay_mask);
+    let (mut px, wts) = tones(&src.px, w, h, d, o.overlay_mask, o.ai_cache_dir.as_deref());
     // 8. mask tuning: the mask's own settings on top of the result, inside the mask only
     for (m, wt) in d.masks.iter().zip(&wts) {
         if let (true, Some(t), Some(wt)) = (m.enabled, &m.tuning, wt) {
-            let (tp, _) = tones(&px, w, h, t, None);
+            let (tp, _) = tones(&px, w, h, t, None, None);
             px.par_iter_mut().zip(tp).zip(wt).for_each(|((p, q), &a)| *p = lerp(*p, q, a));
         }
     }
@@ -1279,7 +1448,7 @@ pub fn render(src: &Img, d: &Develop, o: &Opts) -> Img {
 
 /// Stages 1–7 (everything before geometry), plus each mask's coverage (None for a disabled
 /// mask that is not the overlay).
-fn tones(src: &[Px], w: usize, h: usize, d: &Develop, overlay: Option<usize>) -> (Vec<Px>, Vec<Option<Vec<f32>>>) {
+fn tones(src: &[Px], w: usize, h: usize, d: &Develop, overlay: Option<usize>, ai_cache_dir: Option<&Path>) -> (Vec<Px>, Vec<Option<Vec<f32>>>) {
     // 1. white balance + exposure
     let wb = wb_gains(d.white_balance.temperature_k, d.white_balance.tint);
     let g = wb.map(|v| v * d.basic_tone.exposure.exp2());
@@ -1291,6 +1460,8 @@ fn tones(src: &[Px], w: usize, h: usize, d: &Develop, overlay: Option<usize>) ->
     // pass, only when nothing sits between them.
     let simple = d.masks.is_empty()
         && d.retouch.is_empty()
+        && d.ai_removals.is_empty()
+        && (!d.ai_denoise.enabled || d.ai_denoise.strength <= 0.0)
         && d.lens == Lens::default()
         && d.calibration == Calibration::default()
         && d.presence.dehaze == 0.0
@@ -1315,12 +1486,56 @@ fn tones(src: &[Px], w: usize, h: usize, d: &Develop, overlay: Option<usize>) ->
     let pro_gpu = pro_gpu && gpu_done;
     let mut px: Vec<Px> = on_gpu.unwrap_or_else(|| src.par_iter().map(|p| [p[0] * g[0], p[1] * g[1], p[2] * g[2]]).collect());
     if !gpu_done {
+        // AI Denoise blending if available
+        if let Some(dir) = ai_cache_dir {
+            if d.ai_denoise.enabled && d.ai_denoise.strength > 0.0 {
+                let cache_file = dir.join(format!("denoise_{}.bin", d.ai_denoise.model));
+                if let Ok(denoised) = DenoisedCache::load(&cache_file) {
+                    let f = (d.ai_denoise.strength / 100.0).clamp(0.0, 1.0);
+                    if denoised.w == w && denoised.h == h {
+                        px.par_iter_mut().zip(&denoised.px).for_each(|(p, dn)| {
+                            p[0] += f * (dn[0] * g[0] - p[0]);
+                            p[1] += f * (dn[1] * g[1] - p[1]);
+                            p[2] += f * (dn[2] * g[2] - p[2]);
+                        });
+                    } else if denoised.w > 0 && denoised.h > 0 {
+                        let dw = denoised.w;
+                        let dh = denoised.h;
+                        let sx = dw as f32 / w as f32;
+                        let sy = dh as f32 / h as f32;
+                        for y in 0..h {
+                            let dy = ((y as f32 * sy).round() as usize).min(dh - 1);
+                            let row_offset = y * w;
+                            let d_offset = dy * dw;
+                            for x in 0..w {
+                                let dx = ((x as f32 * sx).round() as usize).min(dw - 1);
+                                let dn = denoised.px[d_offset + dx];
+                                let p = &mut px[row_offset + x];
+                                p[0] += f * (dn[0] * g[0] - p[0]);
+                                p[1] += f * (dn[1] * g[1] - p[1]);
+                                p[2] += f * (dn[2] * g[2] - p[2]);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         // 1a. lens corrections on the full frame, camera calibration
         lens(&mut px, w, h, &d.lens);
         calibrate(&mut px, &d.calibration);
         // 1b. object removal
         for r in &d.retouch {
             heal(&mut px, w, h, r);
+        }
+        if let Some(dir) = ai_cache_dir {
+            for r in &d.ai_removals {
+                if r.enabled {
+                    let patch_file = dir.join(&r.patch_file);
+                    if let Ok(patch) = Patch::load(&patch_file) {
+                        composite_patch(&mut px, w, h, &patch, g);
+                    }
+                }
+            }
         }
         // 2. dehaze
         if d.presence.dehaze != 0.0 {
@@ -3414,6 +3629,7 @@ pub fn estimate_ca(img: &Img) -> [f32; 2] {
 /// Auto tab picks one per photo from what it shows (auto::photo_type).
 pub const PROFILES: &[&str] = &[
     "natural", "neutral", "vivid", "portrait", "landscape", "bw", "film", "moody", "street", "food", "architecture", "night", "nature",
+    "teal_orange", "soft_editorial", "dark_moody", "analog_film", "fine_art_bw",
 ];
 
 /// A profile's look on top of the auto result: numbers add to it, everything else is set. Colour mixer
@@ -3490,6 +3706,94 @@ fn look(profile: &str) -> Option<Value> {
             "presence": { "texture": 10, "clarity": 5, "vibrance": 30 },
             "color_mixer": { "hue": [0, 0, 0, -5, 0, 0, 0, 0], "saturation": [0, 0, 10, 5, 0, 0, 0, 0], "luminance": [0, 0, 0, 5, 0, 0, 0, 0] },
             "effects": { "vignette": -15 }
+        }),
+        // The five Unsplash looks from "Rust Photo Color Profiles Research": temperature slider ×25 K,
+        // curves ×255; grain size/roughness and vignette midpoint/feather add to their defaults
+        // (25/50, 50/50). ponytail: the research's sharpening is left out, a look resets the Detail
+        // panel and would wipe the user's noise reduction.
+        // urban, night, sports, fashion: teal shadows, amber highlights, deep shadows, held highlights
+        "teal_orange" => json!({
+            "white_balance": { "temperature_k": -200, "tint": -4 },
+            "basic_tone": { "exposure": 0.05, "contrast": 24, "highlights": -30, "shadows": -15, "whites": 12, "blacks": -10 },
+            "presence": { "clarity": 20, "vibrance": 22, "saturation": -5 },
+            "color_mixer": {
+                "hue": [8, -6, -18, 15, -10, -18, -20, -10],
+                "saturation": [15, 20, -15, -40, 25, 25, -30, -25],
+                "luminance": [5, 10, 6, -15, -10, -15, -10, -5]
+            },
+            "tone_curve": {
+                "point_luma": [[0, 5], [56, 43], [128, 128], [199, 212], [255, 250]],
+                "point_red": [[0, 0], [64, 54], [191, 201], [255, 255]],
+                "point_blue": [[0, 8], [64, 77], [191, 181], [255, 247]]
+            },
+            "effects": { "vignette": -22, "vignette_midpoint": -5, "vignette_feather": 15 },
+            "grain": { "amount": 8, "roughness": -10 }
+        }),
+        // portrait, wedding, interiors: airy high key, warm yellow-green midtones, skin kept luminous
+        "soft_editorial" => json!({
+            "white_balance": { "temperature_k": 250, "tint": -6 },
+            "basic_tone": { "exposure": 0.35, "contrast": -12, "highlights": -25, "shadows": 30, "whites": 8, "blacks": 12 },
+            "presence": { "clarity": -8, "vibrance": 24, "saturation": -8 },
+            "color_mixer": {
+                "hue": [6, 4, -10, -12, 5, -8, 0, 0],
+                "saturation": [-6, -8, -20, -30, -15, -25, -25, -20],
+                "luminance": [10, 18, 12, 8, 10, 10, 5, 5]
+            },
+            "tone_curve": {
+                "point_luma": [[0, 8], [64, 71], [128, 138], [204, 212], [255, 252]],
+                "point_red": [[0, 0], [51, 46], [153, 158], [255, 255]],
+                "point_green": [[0, 3], [128, 133], [255, 255]],
+                "point_blue": [[0, 5], [128, 122], [255, 250]]
+            },
+            "effects": { "vignette": -5, "vignette_midpoint": 10, "vignette_feather": 30 },
+            "grain": { "amount": 4, "size": -5, "roughness": -20 }
+        }),
+        // forest, mountain, library: low key, compressed highlights, pine greens, muted yellows
+        "dark_moody" => json!({
+            "white_balance": { "temperature_k": 150, "tint": 4 },
+            "basic_tone": { "exposure": -0.45, "contrast": 18, "highlights": -55, "shadows": 15, "whites": -25, "blacks": -18 },
+            "presence": { "clarity": 28, "vibrance": 10, "saturation": -18 },
+            "color_mixer": {
+                "hue": [5, -5, -25, 22, -8, -10, 0, 0],
+                "saturation": [-10, 8, -45, -55, -35, -30, -40, -40],
+                "luminance": [-8, -4, -15, -25, -18, -20, -15, -15]
+            },
+            "tone_curve": {
+                "point_luma": [[0, 10], [46, 36], [128, 112], [209, 189], [255, 224]],
+                "point_green": [[0, 0], [128, 125], [255, 250]],
+                "point_blue": [[0, 5], [77, 82], [255, 242]]
+            },
+            "effects": { "vignette": -32, "vignette_midpoint": -10, "vignette_feather": 10 },
+            "grain": { "amount": 18, "size": 5 }
+        }),
+        // travel, candid, golden hour: lifted black toe, rolled-off whites, golden warmth, heavy grain
+        "analog_film" => json!({
+            "white_balance": { "temperature_k": 400, "tint": 8 },
+            "basic_tone": { "exposure": 0.15, "contrast": -10, "highlights": -35, "shadows": 25, "whites": -12, "blacks": 22 },
+            "presence": { "clarity": -14, "vibrance": 18, "saturation": -6 },
+            "color_mixer": {
+                "hue": [8, 4, -12, -15, -12, -14, 10, 5],
+                "saturation": [-10, 6, 12, -25, -10, -15, -20, -15],
+                "luminance": [5, 8, 8, -10, -5, -8, 0, 0]
+            },
+            "tone_curve": {
+                "point_luma": [[0, 17], [51, 54], [128, 133], [204, 207], [255, 238]],
+                "point_red": [[0, 5], [128, 135], [255, 252]],
+                "point_green": [[0, 8], [128, 130], [255, 250]],
+                "point_blue": [[0, 13], [128, 120], [255, 235]]
+            },
+            "effects": { "vignette": -25, "vignette_feather": 20 },
+            "grain": { "amount": 38, "size": 17, "roughness": 10 }
+        }),
+        // architecture, street noir: zone-system S-curve; the mixer darkens skies like a red filter
+        "fine_art_bw" => json!({
+            "profile": "Monochrome",
+            "basic_tone": { "contrast": 35, "highlights": -15, "shadows": -15, "whites": 20, "blacks": -25 },
+            "presence": { "clarity": 35 },
+            "color_mixer": { "luminance": [18, 20, 15, -15, -38, -42, -20, 5] },
+            "tone_curve": { "point_luma": [[0, 0], [51, 33], [128, 128], [204, 222], [255, 255]] },
+            "effects": { "vignette": -28, "vignette_midpoint": -8, "vignette_feather": 5 },
+            "grain": { "amount": 26, "size": 10, "roughness": 5 }
         }),
         _ => return None,
     })
@@ -4265,6 +4569,43 @@ mod tests {
     }
 
     #[test]
+    fn hdr_merge_exposures_keeps_a_bright_sky_bright_and_textured() {
+        // a cloudy sky above the clip (1.2-2.0, flat white as shot) over dark textured ground
+        let (w, h) = (240, 160);
+        let px: Vec<Px> = (0..w * h)
+            .map(|i| {
+                let (x, y) = ((i % w) as f32, (i / w) as f32);
+                let v = if y < 96.0 { 1.6 * (1.0 + 0.25 * (x / 9.0).sin() * (y / 7.0).sin()) } else { 0.04 * if (i % w) % 6 < 3 { 1.0 } else { 1.4 } };
+                [v * 0.9, v, v * 1.15]
+            })
+            .collect();
+        let run = |x: Hdr| {
+            let mut p = px.clone();
+            hdr(&mut p, w, h, &x);
+            p
+        };
+        // display brightness of the sky (well inside it) and of the ground, and the clouds' contrast
+        let stats = |p: &[Px]| {
+            let disp = |i: usize| srgb_oetf(luma(p[i]).clamp(0.0, 1.0));
+            let sky: Vec<f32> = (10..80).flat_map(|y| (10..230).map(move |x| y * w + x)).map(disp).collect();
+            let mean = sky.iter().sum::<f32>() / sky.len() as f32;
+            let sd = (sky.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / sky.len() as f32).sqrt();
+            let ground = (110..150).flat_map(|y| (10..230).map(move |x| y * w + x)).map(disp).sum::<f32>() / (40 * 220) as f32;
+            (mean, sd, ground)
+        };
+        let fusion = Hdr { enabled: true, ..Default::default() };
+        let (sky, clouds, ground) = stats(&run(fusion.clone()));
+        assert!(sky > 0.75 && sky > ground + 0.3, "the sky stays bright: sky {sky}, ground {ground}");
+        assert!(clouds > 0.03, "the clouds come back: {clouds}");
+        let (grey, ..) = stats(&run(Hdr { natural: 0.0, ..fusion.clone() }));
+        // the range limit already keeps the darkest shot from greying it; Natural lifts it a little more
+        assert!(sky > grey + 0.01, "Natural keeps the sky brighter than plain fusion: {sky} vs {grey}");
+        // a far wider bracket than the photo needs ends the same
+        let (wide, ..) = stats(&run(Hdr { frames: 7.0, ev_spacing: 2.0, exposedness: 164.0, ..fusion }));
+        assert!((wide - sky).abs() < 0.08, "7 shots at ±6 EV: {wide} vs {sky}");
+    }
+
+    #[test]
     fn pro_adjustments_and_image_rotation() {
         let src = gradient();
         let run = |d: &Develop| render(&src, d, &Opts::default());
@@ -4365,43 +4706,6 @@ mod tests {
     }
 
     #[test]
-    fn hdr_merge_exposures_keeps_a_bright_sky_bright_and_textured() {
-        // a cloudy sky above the clip (1.2-2.0, flat white as shot) over dark textured ground
-        let (w, h) = (240, 160);
-        let px: Vec<Px> = (0..w * h)
-            .map(|i| {
-                let (x, y) = ((i % w) as f32, (i / w) as f32);
-                let v = if y < 96.0 { 1.6 * (1.0 + 0.25 * (x / 9.0).sin() * (y / 7.0).sin()) } else { 0.04 * if (i % w) % 6 < 3 { 1.0 } else { 1.4 } };
-                [v * 0.9, v, v * 1.15]
-            })
-            .collect();
-        let run = |x: Hdr| {
-            let mut p = px.clone();
-            hdr(&mut p, w, h, &x);
-            p
-        };
-        // display brightness of the sky (well inside it) and of the ground, and the clouds' contrast
-        let stats = |p: &[Px]| {
-            let disp = |i: usize| srgb_oetf(luma(p[i]).clamp(0.0, 1.0));
-            let sky: Vec<f32> = (10..80).flat_map(|y| (10..230).map(move |x| y * w + x)).map(disp).collect();
-            let mean = sky.iter().sum::<f32>() / sky.len() as f32;
-            let sd = (sky.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / sky.len() as f32).sqrt();
-            let ground = (110..150).flat_map(|y| (10..230).map(move |x| y * w + x)).map(disp).sum::<f32>() / (40 * 220) as f32;
-            (mean, sd, ground)
-        };
-        let fusion = Hdr { enabled: true, ..Default::default() };
-        let (sky, clouds, ground) = stats(&run(fusion.clone()));
-        assert!(sky > 0.75 && sky > ground + 0.3, "the sky stays bright: sky {sky}, ground {ground}");
-        assert!(clouds > 0.03, "the clouds come back: {clouds}");
-        let (grey, ..) = stats(&run(Hdr { natural: 0.0, ..fusion.clone() }));
-        // the range limit already keeps the darkest shot from greying it; Natural lifts it a little more
-        assert!(sky > grey + 0.01, "Natural keeps the sky brighter than plain fusion: {sky} vs {grey}");
-        // a far wider bracket than the photo needs ends the same
-        let (wide, ..) = stats(&run(Hdr { frames: 7.0, ev_spacing: 2.0, exposedness: 164.0, ..fusion }));
-        assert!((wide - sky).abs() < 0.08, "7 shots at ±6 EV: {wide} vs {sky}");
-    }
-
-    #[test]
     fn auto_neutralises_a_cast_brightens_and_profiles_repeat() {
         // grey steps over colour patches, underexposed under the warm light a 3200K white balance corrects
         let (w, h) = (120, 80);
@@ -4438,6 +4742,65 @@ mod tests {
         assert_eq!((film.levels.rgb.black, film.grain.amount), (20.0, 20.0));
         assert_eq!(auto(&img, &film, "natural").unwrap().grain.amount, 20.0, "natural leaves the film grain alone");
         assert!(auto(&img, &cur, "bw").unwrap().profile == "Monochrome" && auto(&img, &cur, "nope").is_err());
+        for p in PROFILES {
+            let d = auto(&img, &cur, p).unwrap();
+            assert_eq!(auto(&img, &d, p).unwrap(), d, "{p} applied twice");
+        }
+        let film = auto(&img, &cur, "analog_film").unwrap();
+        assert_eq!((film.grain.size, film.effects.vignette_feather), (42.0, 70.0));
+    }
+
+    #[test]
+    fn test_patch_serialization_and_compositing() {
+        let dir = std::env::temp_dir().join(format!("ols-patch-test-{}", std::process::id()));
+        let patch_path = dir.join("test_patch.bin");
+        let patch = Patch {
+            sx: 10,
+            sy: 10,
+            side: 4,
+            orig_w: 64,
+            orig_h: 48,
+            data: vec![[0.8, 0.2, 0.1, 1.0]; 16],
+        };
+        patch.save(&patch_path).unwrap();
+        let loaded = Patch::load(&patch_path).unwrap();
+        assert_eq!(loaded.sx, 10);
+        assert_eq!(loaded.sy, 10);
+        assert_eq!(loaded.side, 4);
+        assert_eq!(loaded.orig_w, 64);
+        assert_eq!(loaded.orig_h, 48);
+        assert_eq!(loaded.data.len(), 16);
+        assert_eq!(loaded.data[0], [0.8, 0.2, 0.1, 1.0]);
+
+        // Composite onto an image
+        let mut img = gradient();
+        composite_patch(&mut img.px, img.w, img.h, &loaded, [1.0, 1.0, 1.0]);
+        // Pixel at (10, 10) should match patch
+        let idx = 10 * img.w + 10;
+        assert!((img.px[idx][0] - 0.8).abs() < 1e-4);
+        assert!((img.px[idx][1] - 0.2).abs() < 1e-4);
+        assert!((img.px[idx][2] - 0.1).abs() < 1e-4);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_denoised_cache_serialization() {
+        let dir = std::env::temp_dir().join(format!("ols-denoise-test-{}", std::process::id()));
+        let cache_path = dir.join("test_denoise.bin");
+        let cache = DenoisedCache {
+            w: 4,
+            h: 4,
+            px: vec![[0.5, 0.5, 0.5]; 16],
+        };
+        cache.save(&cache_path).unwrap();
+        let loaded = DenoisedCache::load(&cache_path).unwrap();
+        assert_eq!(loaded.w, 4);
+        assert_eq!(loaded.h, 4);
+        assert_eq!(loaded.px.len(), 16);
+        assert_eq!(loaded.px[0], [0.5, 0.5, 0.5]);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -4474,11 +4837,11 @@ mod gpu_tests {
             let d: Develop = serde_json::from_value(v).unwrap();
             crate::gpu::set_enabled(false);
             let t0 = std::time::Instant::now();
-            let (cpu, _) = tones(&src, w, h, &d, None);
+            let (cpu, _) = tones(&src, w, h, &d, None, None);
             let t_cpu = t0.elapsed();
             crate::gpu::set_enabled(true);
             let t0 = std::time::Instant::now();
-            let (gpu, _) = tones(&src, w, h, &d, None);
+            let (gpu, _) = tones(&src, w, h, &d, None, None);
             eprintln!("  cpu {t_cpu:?}, gpu {:?}, bit-identical px: {}", t0.elapsed(), cpu.iter().zip(&gpu).filter(|(a, b)| a == b).count());
             let bad = cpu.iter().zip(&gpu).filter(|(a, b)| (0..3).any(|c| !((a[c] - b[c]).abs() <= 2e-3 * (1.0 + a[c].abs())))).count();
             let frac = bad as f64 / cpu.len() as f64;

@@ -197,10 +197,10 @@ export function Library(p: Props) {
             label="All Photographs"
             hue="blue"
             icon={<Icon d={ICONS.photos} />}
-            active={!f.folder && !f.immich_album && !f.ids && !f.in_bin && f.view !== "bin" && !p.loadingFolder}
+            active={(f.view === "all" || (!f.folder && !f.immich_album && !f.ids && !f.in_bin && f.view !== "bin")) && f.view !== "loading" && !p.loadingFolder}
             loading={p.loadingFolder?.viewId === "all"}
             progress={p.loadingFolder?.viewId === "all" ? p.loadingFolder.progress : undefined}
-            onClick={() => (p.onShowAll ? p.onShowAll() : show({}))}
+            onClick={() => (p.onShowAll ? p.onShowAll() : show({ view: "all" }))}
           />
           <FolderRow
             label="Bin"
@@ -242,7 +242,7 @@ export function Library(p: Props) {
                   hue="amber"
                   icon={<Icon d={ICONS.folder} />}
                   count={n}
-                  active={f.folder === folder}
+                  active={f.folder === folder || f.view === `folder:${folder}`}
                   loading={isCurLoading}
                   progress={isCurLoading ? p.loadingFolder?.progress : undefined}
                   onClick={() => p.onOpenFolder(folder)}
@@ -267,7 +267,7 @@ export function Library(p: Props) {
                     </span>
                   ),
                   count: count(d.path) || undefined,
-                  active: f.view === `drive:${d.id}`,
+                  active: f.view === `drive:${d.id}` || f.folder === d.path,
                   loading: isCurLoading,
                   progress: isCurLoading ? p.loadingFolder?.progress : undefined,
                   onClick: () => p.onOpenDrive(d).then(checkDrives),
@@ -705,7 +705,7 @@ export function Library(p: Props) {
             onOpenCompare={p.onOpenCompare}
             onVirtualCopy={p.onVirtualCopy}
             selectedIds={p.selected}
-            folderName={f.folder ? short(f.folder) : f.view === "bin" ? "Bin" : "All Photographs"}
+            folderName={f.folder ? short(f.folder) : f.view === "bin" ? "Bin" : f.view === "loading" ? "" : "All Photographs"}
           />
         ) : p.loadingFolder && p.photos.length === 0 ? (
           <FolderLoadingScreen loading={p.loadingFolder} />
@@ -912,7 +912,7 @@ function FolderNode({
     title: path,
     icon: <Icon d={ICONS.folder} />,
     count: p.folders.find(([d]) => d === path)?.[1],
-    active: p.filter.view === `folder:${path}`,
+    active: p.filter.view === `folder:${path}` || p.filter.folder === path,
     loading,
     progress: loading ? p.loadingFolder?.progress : undefined,
     onClick: () => p.onOpenFolder(path),
