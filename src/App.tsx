@@ -162,6 +162,10 @@ export default function App() {
 
     const subs = [
       listen("catalog-changed", () => reloadRef.current()),
+      listen<{ new_dir: string; is_custom: boolean; mode: string }>("storage-location-changed", () => {
+        void api.settings().then(setSettings);
+        reloadRef.current();
+      }),
       listen<{ id: number }>("thumb-changed", async (e) => {
         const ph = await api.photo(e.payload.id);
         if (ph) {

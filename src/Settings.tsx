@@ -1,8 +1,9 @@
-import { ask } from "@tauri-apps/plugin-dialog";
+import { ask, open } from "@tauri-apps/plugin-dialog";
+import { listen } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
 import { useEffect, useState } from "react";
 import { Agent, Log } from "./Agent";
-import { api, AppInfo, CleanUp, JobProgress, Settings, size, Source, StorageReport } from "./api";
+import { api, AppInfo, CleanUp, JobProgress, Settings, size, Source, StorageMoveMode, StorageReport, StorageValidation } from "./api";
 import { Btn } from "./controls";
 import { Duplicate, Locations } from "./Storage";
 import { AiModelsSettings } from "./AiModels";
@@ -15,12 +16,12 @@ const num = (n: number) => n.toLocaleString();
 const plural = (n: number, word: string) => `${num(n)} ${word}${n === 1 ? "" : "s"}`;
 const short = (folder: string) => folder.split(/[\\/]/).slice(-2).join("/");
 
-export type SettingsTab = "appearance" | "locations" | "duplicate" | "usage" | "ai" | "agent" | "about";
+export type SettingsTab = "appearance" | "locations" | "duplicate" | "storage" | "usage" | "ai" | "agent" | "about";
 const TABS: [SettingsTab, string][] = [
   ["appearance", "Appearance"],
   ["locations", "Locations"],
   ["duplicate", "Duplicate"],
-  ["usage", "Usage & clean up"],
+  ["storage", "Storage"],
   ["ai", "AI models"],
   ["agent", "Agent & MCP"],
   ["about", "About"],
@@ -55,7 +56,7 @@ export function SettingsView(p: {
       {p.settings && p.tab === "locations" && <Locations settings={p.settings} setSettings={p.setSettings} onConnect={p.onConnect} onAuto={p.onAuto} />}
       {p.settings && p.tab === "duplicate" && <Duplicate settings={p.settings} selected={p.selected} jobs={p.jobs} />}
       {p.settings && p.tab === "ai" && <AiModelsSettings settings={p.settings} setSettings={p.setSettings} />}
-      {p.tab === "usage" && <Usage onSettingsChanged={reload} onGoToAiModels={() => p.setTab("ai")} />}
+      {(p.tab === "storage" || p.tab === "usage") && <Usage onSettingsChanged={reload} onGoToAiModels={() => p.setTab("ai")} />}
       {p.tab === "agent" && (
         <Agent
           info={p.info ?? null}
@@ -633,8 +634,115 @@ function Usage({ onSettingsChanged, onGoToAiModels }: { onSettingsChanged: () =>
   const [analysisTab, setAnalysisTab] = useState<AnalysisTab>("overview");
   const [folderSearch, setFolderSearch] = useState("");
   const [folderSort, setFolderSort] = useState<"bytes" | "photos" | "name">("bytes");
+  const [pendingRelocate, setPendingRelocate] = useState<StorageValidation | null>(null);
+  const [cleanupOld, setCleanupOld] = useState(false);
+  const [reconnectBusy, setReconnectBusy] = useState(false);
+  const [relocating, setRelocating] = useState<{ phase: string; file: string; done_bytes: number; total_bytes: number } | null>(null);
 
   useEffect(() => void api.storage().then(setR, (e) => setNote(`Could not measure storage: ${e}`)), []);
+
+  useEffect(() => {
+    const unlistenPromise = listen<{ phase: string; file?: string; done_bytes?: number; total_bytes?: number; message?: string }>(
+      "storage-move-progress",
+      (event) => {
+        const p = event.payload;
+        setRelocating((prev) => ({
+          phase: p.phase || prev?.phase || "copying",
+          file: p.file || prev?.file || "",
+          done_bytes: p.done_bytes ?? prev?.done_bytes ?? 0,
+          total_bytes: p.total_bytes ?? prev?.total_bytes ?? 0,
+        }));
+      }
+    );
+    return () => {
+      void unlistenPromise.then((unlisten) => unlisten());
+    };
+  }, []);
+
+  const handlePickNewLocation = async () => {
+    try {
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: "Select New Storage Location for OpenLight Studio",
+      });
+      if (!selected || typeof selected !== "string") return;
+      const check = await api.validateStorageLocation(selected);
+      if (!check.valid) {
+        await ask(check.error || "The selected folder cannot be used.", {
+          title: "Invalid Storage Location",
+          kind: "error",
+        });
+        return;
+      }
+      setPendingRelocate(check);
+      setCleanupOld(false);
+    } catch (e) {
+      setNote(`Location selection failed: ${e}`);
+    }
+  };
+
+  const handleConfirmRelocate = async (mode: StorageMoveMode) => {
+    if (!pendingRelocate?.target) return;
+    const target = pendingRelocate.target;
+    const isResettingToDefault = target === r?.default_data_dir;
+    setRelocating({
+      phase: "starting",
+      file: "",
+      done_bytes: 0,
+      total_bytes: (mode === "copy" || mode === "move") ? (pendingRelocate.current_bytes ?? r?.total ?? 0) : 0,
+    });
+    setNote("");
+    try {
+      const res = isResettingToDefault
+        ? await api.resetStorageLocation(mode, cleanupOld)
+        : await api.moveStorageLocation(target, mode, cleanupOld);
+      setPendingRelocate(null);
+      setCleanupOld(false);
+      onSettingsChanged();
+      const next = await api.storage();
+      setR(next);
+      setNote(`Storage successfully updated: ${res.data_dir}. (${mode} mode)`);
+    } catch (e) {
+      setNote(`Failed to update storage: ${e}`);
+    } finally {
+      setRelocating(null);
+    }
+  };
+
+  const handleResetLocation = async () => {
+    if (!r?.default_data_dir) return;
+    try {
+      const check = await api.validateStorageLocation(r.default_data_dir);
+      if (!check.valid) {
+        await ask(check.error || "The default folder cannot be validated.", {
+          title: "Invalid Storage Location",
+          kind: "error",
+        });
+        return;
+      }
+      setPendingRelocate(check);
+      setCleanupOld(false);
+    } catch (e) {
+      setNote(`Default location check failed: ${e}`);
+    }
+  };
+
+  const handleSyncFolders = async () => {
+    setReconnectBusy(true);
+    setNote("Scanning library folders for photos and adjustments…");
+    try {
+      const count = await api.syncLibraryFolders();
+      const next = await api.storage();
+      setR(next);
+      setNote(`Library scan complete: ${num(count)} photo(s) synchronized and reconnected.`);
+      onSettingsChanged();
+    } catch (e) {
+      setNote(`Sync failed: ${e}`);
+    } finally {
+      setReconnectBusy(false);
+    }
+  };
   if (!r) return <p className="p-4 text-[12px] text-neutral-500">{note || "Measuring storage…"}</p>;
 
   const run = async (key: string, title: string, job: () => Promise<number>, confirm?: string) => {
@@ -778,14 +886,65 @@ function Usage({ onSettingsChanged, onGoToAiModels }: { onSettingsChanged: () =>
   return (
     <div className="flex min-h-0 flex-1 gap-4 overflow-y-auto p-4 text-[12px]">
       <div className="flex w-[500px] shrink-0 flex-col gap-4">
+        {note && (
+          <div className="rounded-md border border-neutral-700 bg-neutral-900/90 px-3 py-2 text-[11px] text-neutral-300 flex items-center justify-between shadow-sm">
+            <span>{note}</span>
+            <button type="button" onClick={() => setNote("")} className="text-neutral-500 hover:text-neutral-300 ml-2">✕</button>
+          </div>
+        )}
         <section className={card}>
-          <div className="flex items-baseline justify-between">
+          <div className="flex items-baseline justify-between mb-2">
             <h2 className="font-semibold text-neutral-100">Storage</h2>
             <span className="tabular-nums font-semibold text-neutral-200">{size(r.total)}</span>
           </div>
-          <p className="mb-3 truncate font-mono text-[11px] text-neutral-500 select-text" title={r.data_dir}>
-            {r.data_dir}
-          </p>
+
+          <div className="mb-3 rounded-md border border-neutral-800 bg-neutral-950/70 p-2.5">
+            <div className="flex items-center justify-between gap-2 mb-1">
+              <span className="text-[11px] font-medium text-neutral-400">Library Location</span>
+              {r.is_custom_location ? (
+                <span className="rounded bg-sky-950 px-1.5 py-0.5 text-[10px] font-medium text-sky-300 border border-sky-800/60">
+                  Custom Location
+                </span>
+              ) : (
+                <span className="rounded bg-neutral-800 px-1.5 py-0.5 text-[10px] text-neutral-400">
+                  Default OS Location
+                </span>
+              )}
+            </div>
+            <p className="truncate font-mono text-[11px] text-neutral-300 select-text mb-2.5" title={r.data_dir}>
+              {r.data_dir}
+            </p>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={handlePickNewLocation}
+                disabled={!!relocating}
+                className="rounded bg-neutral-800 px-2.5 py-1 text-[11px] font-medium text-neutral-200 hover:bg-neutral-700 hover:text-white border border-neutral-700/80 transition-colors cursor-pointer"
+              >
+                Change Location…
+              </button>
+              {r.is_custom_location && (
+                <button
+                  type="button"
+                  onClick={handleResetLocation}
+                  disabled={!!relocating}
+                  className="rounded px-2.5 py-1 text-[11px] text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800 transition-colors cursor-pointer"
+                >
+                  Reset to Default
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={handleSyncFolders}
+                disabled={reconnectBusy || !!relocating}
+                className="rounded px-2.5 py-1 text-[11px] text-sky-400 hover:text-sky-300 hover:bg-sky-950/40 border border-sky-800/60 transition-colors cursor-pointer ml-auto flex items-center gap-1"
+                title="Scan and reconnect library photo folders"
+              >
+                <span>⚡</span>
+                <span>{reconnectBusy ? "Scanning…" : "Scan & Reconnect Library"}</span>
+              </button>
+            </div>
+          </div>
           <div className="flex h-3 overflow-hidden rounded bg-neutral-800">
             {parts.map(([label, n, color]) => (
               <div key={label} className={color} style={{ width: `${(n / Math.max(1, r.total)) * 100}%` }} title={`${label}: ${size(n)}`} />
@@ -1048,6 +1207,29 @@ function Usage({ onSettingsChanged, onGoToAiModels }: { onSettingsChanged: () =>
             ))}
           </div>
         </div>
+
+        {/* Empty Catalog Notice / Quick Reconnect */}
+        {s.total_photos === 0 && (
+          <div className="rounded-lg border border-sky-800/80 bg-sky-950/40 p-3.5 flex flex-wrap items-center justify-between gap-3 shadow-sm">
+            <div className="space-y-0.5">
+              <div className="flex items-center gap-1.5 font-semibold text-sky-200 text-xs">
+                <span>⚡</span>
+                <span>Catalog has 0 indexed photos</span>
+              </div>
+              <p className="text-[11px] text-sky-300/80 leading-relaxed">
+                Previews, thumbnails, and sidecars exist in storage. Scan and reconnect your photo folders to load full library statistics.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={handleSyncFolders}
+              disabled={reconnectBusy}
+              className="shrink-0 rounded bg-sky-600 px-3.5 py-1.5 text-xs font-medium text-white hover:bg-sky-500 disabled:opacity-50 cursor-pointer shadow-xs transition-colors flex items-center gap-1.5"
+            >
+              <span>{reconnectBusy ? "Scanning Folders…" : "⚡ Reconnect & Scan Library"}</span>
+            </button>
+          </div>
+        )}
 
         {/* Global Summary Metric Tiles */}
         <div className="grid grid-cols-4 gap-2">
@@ -1423,6 +1605,197 @@ function Usage({ onSettingsChanged, onGoToAiModels }: { onSettingsChanged: () =>
           </div>
         )}
       </section>
+
+      {/* Relocation Confirmation & Progress Modal */}
+      {pendingRelocate && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-xs">
+          <div className="w-full max-w-xl rounded-xl border border-neutral-700 bg-neutral-900 p-5 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-neutral-800 pb-3">
+              <h3 className="text-sm font-semibold text-neutral-100 flex items-center gap-2">
+                <span>📁</span>
+                <span>Storage Location Configuration</span>
+              </h3>
+              {!relocating && (
+                <button
+                  type="button"
+                  onClick={() => setPendingRelocate(null)}
+                  className="text-neutral-400 hover:text-neutral-200 text-lg leading-none cursor-pointer"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+
+            <div className="space-y-2.5 rounded-lg border border-neutral-800 bg-neutral-950/70 p-3 text-[11px]">
+              <div>
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-neutral-500">Current Storage</span>
+                <p className="font-mono text-neutral-300 truncate mt-0.5 select-text" title={pendingRelocate.current_dir}>
+                  {pendingRelocate.current_dir} ({size(pendingRelocate.current_bytes ?? r.total)})
+                </p>
+              </div>
+              <div className="pt-2 border-t border-neutral-800/60">
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-emerald-400">Target Location</span>
+                <p className="font-mono text-emerald-300 font-medium truncate mt-0.5 select-text" title={pendingRelocate.target}>
+                  {pendingRelocate.target}
+                </p>
+              </div>
+            </div>
+
+            {relocating ? (
+              <div className="space-y-2.5 rounded-lg border border-sky-800/80 bg-sky-950/40 p-4 text-sky-200">
+                <div className="flex justify-between text-xs font-medium">
+                  <span>
+                    {relocating.phase === "checkpoint"
+                      ? "Flushing database transactions…"
+                      : relocating.phase === "switching"
+                      ? "Opening existing catalog…"
+                      : relocating.phase === "fresh"
+                      ? "Initializing fresh library…"
+                      : relocating.phase === "done"
+                      ? "Finishing…"
+                      : "Transferring files to new location…"}
+                  </span>
+                  <span className="font-mono text-sky-300">
+                    {relocating.total_bytes > 0
+                      ? `${Math.round(((relocating.done_bytes || 0) / relocating.total_bytes) * 100)}%`
+                      : "Working…"}
+                  </span>
+                </div>
+                <div className="h-2 w-full overflow-hidden rounded-full bg-neutral-800">
+                  <div
+                    className="h-full bg-sky-500 transition-all duration-200"
+                    style={{
+                      width: `${relocating.total_bytes > 0 ? Math.min(100, Math.max(5, ((relocating.done_bytes || 0) / relocating.total_bytes) * 100)) : 100}%`,
+                    }}
+                  />
+                </div>
+                {relocating.file && (
+                  <p className="truncate font-mono text-[10px] text-neutral-400">
+                    Copying: {relocating.file} ({size(relocating.done_bytes)} of {size(relocating.total_bytes)})
+                  </p>
+                )}
+                <p className="text-[10px] text-sky-400/80">Please keep OpenLight Studio open while switching storage.</p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <p className="text-[11px] text-neutral-300 font-medium">
+                  Choose how you want to configure this location:
+                </p>
+
+                {/* Option 1: Copy Everything */}
+                <div className="rounded-lg border border-neutral-800 bg-neutral-950/60 p-3.5 hover:border-neutral-700 transition-colors">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2 font-semibold text-neutral-100 text-xs">
+                        <span className="text-sky-400">📦</span>
+                        <span>Copy everything to new location</span>
+                        <span className="rounded bg-sky-950 px-1.5 py-0.5 text-[10px] text-sky-400 border border-sky-800/60 font-mono">
+                          {size(pendingRelocate.current_bytes ?? r.total)}
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-neutral-400 leading-relaxed">
+                        Transfers all catalog data (<code className="font-mono">catalog.olcat</code>), edit history, rendered previews/thumbnails, neural models, and settings.
+                      </p>
+                      <label className="flex items-center gap-2 pt-1 text-[11px] text-neutral-300 cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={cleanupOld}
+                          onChange={(e) => setCleanupOld(e.target.checked)}
+                          className="rounded border-neutral-700 bg-neutral-900 text-sky-500 focus:ring-sky-500/20"
+                        />
+                        <span>Delete files from previous location after successful copy</span>
+                      </label>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleConfirmRelocate("copy")}
+                      className="shrink-0 rounded bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-500 cursor-pointer shadow-sm transition-colors"
+                    >
+                      Copy & Switch
+                    </button>
+                  </div>
+                </div>
+
+                {/* Option 2: Use Existing Configuration & Catalog */}
+                <div
+                  className={`rounded-lg border p-3.5 transition-colors ${
+                    pendingRelocate.has_existing_catalog
+                      ? "border-amber-800/80 bg-amber-950/30 hover:border-amber-700"
+                      : "border-neutral-800/50 bg-neutral-950/30 opacity-60"
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2 font-semibold text-neutral-100 text-xs">
+                        <span className="text-amber-400">📂</span>
+                        <span>Use existing configuration & catalog</span>
+                        {pendingRelocate.has_existing_catalog && (
+                          <span className="rounded bg-amber-950 px-1.5 py-0.5 text-[10px] text-amber-300 border border-amber-800/60 font-mono">
+                            Found {size(pendingRelocate.existing_catalog_bytes ?? 0)}
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-[11px] text-neutral-400 leading-relaxed">
+                        {pendingRelocate.has_existing_catalog
+                          ? `Existing catalog detected (${pendingRelocate.existing_photos_count != null ? `${num(pendingRelocate.existing_photos_count)} photo(s)` : "catalog.olcat"}). Open it directly without transferring or overwriting anything.`
+                          : "No existing catalog.olcat was found in the target folder."}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleConfirmRelocate("existing")}
+                      disabled={!pendingRelocate.has_existing_catalog}
+                      className="shrink-0 rounded bg-amber-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-500 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer shadow-sm transition-colors"
+                    >
+                      Use Existing
+                    </button>
+                  </div>
+                </div>
+
+                {/* Option 3: Start Fresh */}
+                <div className="rounded-lg border border-neutral-800 bg-neutral-950/60 p-3.5 hover:border-neutral-700 transition-colors">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2 font-semibold text-neutral-100 text-xs">
+                        <span className="text-emerald-400">✨</span>
+                        <span>Start fresh from a new start</span>
+                        <span className="rounded bg-neutral-800 px-1.5 py-0.5 text-[10px] text-neutral-400 font-mono">
+                          New Library
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-neutral-400 leading-relaxed">
+                        Initializes a fresh, empty library at the target location. All current catalog photos and data remain safely preserved at the current location.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleConfirmRelocate("fresh")}
+                      className="shrink-0 rounded bg-neutral-800 px-3 py-1.5 text-xs font-medium text-neutral-200 hover:bg-neutral-700 hover:text-white border border-neutral-700 cursor-pointer transition-colors"
+                    >
+                      Start Fresh
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <div className="flex items-center justify-between border-t border-neutral-800 pt-3">
+              <p className="text-[10px] text-neutral-500">
+                Your original RAW/JPEG photo files are never moved; they remain in their original folders.
+              </p>
+              {!relocating && (
+                <button
+                  type="button"
+                  onClick={() => setPendingRelocate(null)}
+                  className="rounded bg-neutral-800 px-3 py-1.5 text-xs text-neutral-300 hover:bg-neutral-700 cursor-pointer"
+                >
+                  Cancel
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

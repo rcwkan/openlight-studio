@@ -368,6 +368,8 @@ export type CatalogDetails = { db: number; wal: number; shm: number; free: numbe
 /** Sizes in bytes. `folders` are local folders; an offline one is not there at all (e.g. an unplugged drive). */
 export type StorageReport = {
   data_dir: string;
+  default_data_dir?: string;
+  is_custom_location?: boolean;
   total: number;
   catalog: number;
   catalog_details?: CatalogDetails;
@@ -408,6 +410,32 @@ export type StorageReport = {
   ai: { photos: number; edits: number };
   folders: { folder: string; photos: number; bytes: number; missing: number; online: boolean }[];
   clean: Record<CleanUp, { count: number; bytes: number }>;
+};
+
+export type StorageValidation = {
+  valid: boolean;
+  error?: string;
+  is_same?: boolean;
+  has_existing_catalog?: boolean;
+  has_existing_config?: boolean;
+  existing_catalog_bytes?: number;
+  existing_photos_count?: number | null;
+  is_empty?: boolean;
+  target?: string;
+  current_dir?: string;
+  current_bytes?: number;
+  default_dir?: string;
+  is_custom?: boolean;
+};
+
+export type StorageMoveMode = "copy" | "move" | "existing" | "switch" | "fresh";
+
+export type StorageMoveResult = {
+  success: boolean;
+  data_dir: string;
+  is_custom: boolean;
+  total_bytes: number;
+  message: string;
 };
 
 function parseRender(buf: ArrayBuffer): Rendered {
@@ -483,7 +511,8 @@ export const api = {
   /** Heal a circle at (x, y) of the full frame; radius is a fraction of the long edge. Commits one history step. */
   healSpot: (id: number, x: number, y: number, radius: number) => invoke<Develop>("heal_spot", { id, x, y, radius }),
   /** Auto fine tune to a profile (natural | neutral | vivid | portrait | landscape | bw | film | moody); not saved */
-  autoDevelop: (id: number, develop: Develop, profile: string) => invoke<Develop>("auto_develop", { id, develop, profile }),
+  autoDevelop: (id: number, develop: Develop, profile: string, strength?: number) =>
+    invoke<Develop>("auto_develop", { id, develop, profile, strength: strength != null ? strength / 100 : 1.0 }),
   /** the develop profile for what the photo shows, and the AI's error when it fell back to keywords */
   photoType: (id: number) => invoke<[string, string | null]>("photo_type", { id }),
   autoWhiteBalance: (id: number) => invoke<Develop["white_balance"]>("auto_white_balance", { id }),
@@ -493,7 +522,8 @@ export const api = {
   autoHdr: (id: number) => invoke<Develop["hdr"]>("auto_hdr", { id }),
   /** Heal away the AI-selected objects of selection `mask` and drop it. Commits one history step. */
   removeSelection: (id: number, mask: number) => invoke<Develop>("remove_selection", { id, mask }),
-  save: (id: number, develop: Develop, label: string) => invoke<Develop>("save_develop", { id, develop, label }),
+  save: (id: number, develop: Develop, label: string, replacePrefix?: string) =>
+    invoke<Develop>("save_develop", { id, develop, label, replacePrefix: replacePrefix ?? null }),
   history: (id: number) => invoke<HistoryEntry[]>("get_history", { id }),
   gotoHistory: (id: number, hid: number) => invoke<Develop>("goto_history", { id, hid }),
   deleteHistory: (id: number, hid: number) => invoke<Develop | null>("delete_history", { id, hid }),
@@ -531,6 +561,13 @@ export const api = {
   adobeImport: () => invoke<RemoteImport>("adobe_import"),
   remoteDisconnect: (source: Source) => invoke<Settings>("remote_disconnect", { source }),
   storage: () => invoke<StorageReport>("storage_report"),
+  validateStorageLocation: (target: string) => invoke<StorageValidation>("validate_storage_location", { target }),
+  moveStorageLocation: (target: string, mode: StorageMoveMode, cleanup_old?: boolean) =>
+    invoke<StorageMoveResult>("move_storage_location", { target, mode, cleanupOld: cleanup_old ?? false }),
+  resetStorageLocation: (mode: StorageMoveMode = "copy", cleanup_old?: boolean) =>
+    invoke<StorageMoveResult>("reset_storage_location", { mode, cleanupOld: cleanup_old ?? false }),
+  syncLibraryFolders: (folders?: string[]) =>
+    invoke<number>("sync_library_folders", { folders: folders ?? null }),
   /** Returns how many files, photos or history steps went */
   cleanUp: (what: CleanUp | string) => invoke<number>("clean_up", { what }),
   /** Run an auto function on photos; `job` names it for cancelJob */

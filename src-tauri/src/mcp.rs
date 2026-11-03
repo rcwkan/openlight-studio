@@ -385,9 +385,10 @@ fn call_tool(core: &Arc<Core>, name: &str, a: &Value) -> Value {
         }
         "develop_auto" => {
             let profile = a["profile"].as_str().unwrap_or("natural");
+            let strength = a["strength"].as_f64().map(|s| (s / 100.0) as f32).unwrap_or(1.0);
             let mut out = vec![];
             for id in parse_ids(&a["photo_ids"])? {
-                let mut d = develop::auto(&*core.proxy(&core.photo(id)?.path)?, &core.develop(id)?, profile)?;
+                let mut d = develop::auto_with_strength(&*core.proxy(&core.photo(id)?.path)?, &core.develop(id)?, profile, strength)?;
                 d.ai_provenance_log.push(provenance(core, "mcp", &format!("develop_auto: {profile}")));
                 core.commit(id, &d, &format!("AI: auto {profile}"))?;
                 out.push(json!({ "photo_id": id.to_string(), "white_balance": d.white_balance, "tone": d.basic_tone, "presence": d.presence }));

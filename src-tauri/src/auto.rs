@@ -1377,7 +1377,7 @@ pub fn enhance(core: &Arc<Core>, ids: &[i64], s: &EnhanceSettings, job: &Job) ->
                     let alpha = crate::brush::snap(&proxy, &s.remove_strokes)?;
                     let hole = aimodel::hole_from_alpha(&alpha, proxy.w, proxy.h, img.w, img.h).ok_or("nothing is selected to remove")?;
                     job.progress("Removing the object", 0, 1);
-                    aimodel::inpaint(&core.dir, &s.ai_model, img, &hole, s.remove_grow.clamp(0.0, 40.0).round() as usize, &s.remove_prompt, &|done, total| {
+                    aimodel::inpaint(&core.dir(), &s.ai_model, img, &hole, s.remove_grow.clamp(0.0, 40.0).round() as usize, &s.remove_prompt, &|done, total| {
                         job.progress("Filling in", done, total);
                         !job.cancelled()
                     })?
@@ -1386,7 +1386,7 @@ pub fn enhance(core: &Arc<Core>, ids: &[i64], s: &EnhanceSettings, job: &Job) ->
                 };
                 let img = if s.denoise {
                     let vram = aimodel::hardware().vram_mb;
-                    aimodel::denoise(&core.dir, &s.ai_model, img, s.ai_strength, vram, &|done, total| {
+                    aimodel::denoise(&core.dir(), &s.ai_model, img, s.ai_strength, vram, &|done, total| {
                         job.progress("AI denoising", done, total);
                         !job.cancelled()
                     })?

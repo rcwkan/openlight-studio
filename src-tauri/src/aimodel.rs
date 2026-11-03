@@ -115,6 +115,25 @@ const MODELS: &[Spec] = &[
         unzip: false,
     },
     Spec {
+        id: "moebius",
+        kind: "inpaint",
+        name: "Moebius (RemovalModel) · Object removal",
+        blurb: "0.2B lightweight diffusion inpainting model with learned embedding conditioning for realistic object removal without text prompts.",
+        license: "Apache-2.0 (Moebius, Duan & Xu et al.; ONNX conversion by SimonW)",
+        repo: "simonw/Moebius-ONNX",
+        files: &[
+            ("unet.onnx", 906_698_976, "e3f90f52f72378339b990459fadb29a68d3c7b5c6851545ba42774f489160b08"),
+            ("vae_decoder.onnx", 198_078_671, "d90ef0b7f6c8c8b7234459c8b449d70be0033bf1576c842e8b9991baf3934280"),
+            ("vae_encoder.onnx", 136_757_093, "b8b81d41e757222a0707665ba9d826703987855e5bed056036b90b988968042f"),
+        ],
+        min_vram_mb: 2500,
+        rank: 150,
+        multiple: 8,
+        dims: None,
+        gpu: true,
+        unzip: false,
+    },
+    Spec {
         id: "sd15-inpaint",
         kind: "generate",
         name: "Stable Diffusion 1.5 · Generative fill",
@@ -139,7 +158,10 @@ const MODELS: &[Spec] = &[
 ];
 
 fn spec(id: &str) -> Result<&'static Spec, String> {
-    MODELS.iter().find(|m| m.id == id).ok_or_else(|| format!("unknown AI model: {id}"))
+    MODELS
+        .iter()
+        .find(|m| m.id == id || (m.id == "moebius" && (id == "moebius-removal" || id == "Moebius" || id == "moebius-onnx")))
+        .ok_or_else(|| format!("unknown AI model: {id}"))
 }
 
 fn dir(data: &Path, s: &Spec) -> PathBuf {
@@ -259,12 +281,17 @@ pub fn models(data: &Path, hw: &Hardware) -> Vec<ModelInfo> {
                 match hw.vram_mb {
                     Some(v) if m.kind == "generate" => format!("Fits {} ({:.0} GB): about 10 seconds per removal on the GPU, and the most natural result of the removal models.", hw.gpu.as_deref().unwrap_or("your GPU"), v as f32 / 1024.0),
                     _ if m.kind == "generate" => "Best match for this machine (needs about 4 GB of GPU memory).".to_string(),
+                    _ if m.id == "moebius" => "A fast 0.2B diffusion model running on GPU with learned conditioning for realistic object removal.".to_string(),
                     _ if m.kind == "inpaint" => "A fast alternative that runs on the CPU (about 2 seconds per removal) and only continues what is around the object.".to_string(),
                     Some(v) => format!("Best quality for {}: runs at {} px tiles in {:.0} GB.", hw.gpu.as_deref().unwrap_or("your GPU"), tile_for(Some(v)), v as f32 / 1024.0),
                     None => "Best match for this machine (GPU memory could not be read).".to_string(),
                 }
             } else if fits {
-                "Runs on your GPU; lower quality than the recommended one.".to_string()
+                if m.id == "moebius" {
+                    "Runs on your GPU; fast 0.2B diffusion inpainting with learned conditioning.".to_string()
+                } else {
+                    "Runs on your GPU; lower quality than the recommended one.".to_string()
+                }
             } else {
                 format!("Needs about {:.0} GB of GPU memory.", m.min_vram_mb as f32 / 1024.0)
             };
@@ -340,6 +367,8 @@ pub fn remove(data: &Path, id: &str) -> Result<(), String> {
         }
     }
     *SESSION.lock().unwrap() = None;
+    *SD.lock().unwrap() = None;
+    crate::moebius::reset();
     Ok(())
 }
 
@@ -443,12 +472,12 @@ fn open_session(path: &Path, dims: Option<[&str; 3]>, tile: usize, gpu: bool) ->
 }
 
 #[cfg(target_os = "macos")]
-fn perf_cores() -> Option<usize> {
+pub(crate) fn perf_cores() -> Option<usize> {
     let o = Command::new("sysctl").args(["-n", "hw.perflevel0.physicalcpu"]).output().ok()?;
     String::from_utf8_lossy(&o.stdout).trim().parse().ok().filter(|&n| n > 0)
 }
 #[cfg(not(target_os = "macos"))]
-fn perf_cores() -> Option<usize> {
+pub(crate) fn perf_cores() -> Option<usize> {
     None
 }
 
@@ -484,6 +513,7 @@ pub fn denoise(data: &Path, id: &str, img: Img, strength: f32, vram_mb: Option<u
     if guard.as_ref().is_none_or(|(m, t, _)| m != id || *t != tile) {
         *guard = None; // free the old model's GPU memory first: only one model is ever loaded
         *SD.lock().unwrap() = None;
+        crate::moebius::reset();
         *guard = Some((id.to_string(), tile, open_session(&dir(data, s).join(s.files[0].0), s.dims, tile, s.gpu)?));
     }
     let session = &mut guard.as_mut().unwrap().2;
@@ -551,6 +581,7 @@ fn lama(data: &Path, s: &Spec, rgb_in: &[f32], m_in: Vec<f32>) -> Result<Vec<f32
     if guard.as_ref().is_none_or(|(m, t, _)| m != id || *t != LAMA) {
         *guard = None;
         *SD.lock().unwrap() = None;
+        crate::moebius::reset();
         *guard = Some((id.to_string(), LAMA, open_session(&dir(data, s).join(s.files[0].0), s.dims, LAMA, s.gpu)?));
     }
     let session = &mut guard.as_mut().unwrap().2;
@@ -585,6 +616,11 @@ fn lama(data: &Path, s: &Spec, rgb_in: &[f32], m_in: Vec<f32>) -> Result<Vec<f32
 
 static SD: Mutex<Option<crate::sdfill::Sd>> = Mutex::new(None);
 
+pub(crate) fn clear_other_sessions() {
+    *SESSION.lock().unwrap() = None;
+    *SD.lock().unwrap() = None;
+}
+
 /// Stable Diffusion (about 2 GB of GPU memory). Like every model it stays loaded until a different one is needed.
 fn generate(data: &Path, s: &Spec, rgb_in: &[f32], m_in: &[f32], prompt: &str, tick: &dyn Fn(usize, usize) -> bool) -> Result<Vec<f32>, String> {
     let mut session = SESSION.lock().unwrap(); // always SESSION before SD, so jobs cannot deadlock
@@ -592,6 +628,7 @@ fn generate(data: &Path, s: &Spec, rgb_in: &[f32], m_in: &[f32], prompt: &str, t
     if guard.as_ref().is_none_or(|m| m.id() != s.id) {
         *guard = None;
         *session = None; // one model on the GPU at a time
+        crate::moebius::reset();
         *guard = Some(crate::sdfill::Sd::load(crate::sdfill::env()?, &dir(data, s), s.id)?);
     }
     let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64);
@@ -695,6 +732,8 @@ pub fn inpaint_patch(data: &Path, id: &str, img: &Img, hole: &Hole, grow: usize,
 
     let filled = if s.kind == "generate" {
         generate(data, s, &rgb_in, &m_in, prompt, tick)?
+    } else if s.id == "moebius" || s.id.starts_with("moebius") {
+        crate::moebius::fill(data, s.id, s.gpu, &rgb_in, &m_in, tick)?
     } else {
         if !tick(1, 3) {
             return Err("cancelled".into());
@@ -912,6 +951,26 @@ sd15-inpaint: mean error in the hole {err:.3} (was {:.3}) in {:?}", 0.95 - 0.45,
         let t0 = std::time::Instant::now();
         download(&crate::data_dir(), &id, &|d, t| eprint!("downloading {} / {} MB   ", d >> 20, t >> 20)).unwrap();
         eprintln!("\n{id} downloaded, verified and unpacked in {:?}", t0.elapsed());
+    }
+
+    #[test]
+    fn moebius_spec() {
+        let m = spec("moebius").expect("moebius should be registered");
+        assert_eq!(m.kind, "inpaint");
+        assert_eq!(m.repo, "simonw/Moebius-ONNX");
+        assert_eq!(m.name, "Moebius (RemovalModel) · Object removal");
+        assert_eq!(m.files.len(), 3);
+        assert!(m.files.iter().any(|f| f.0 == "unet.onnx"));
+        assert!(m.files.iter().any(|f| f.0 == "vae_encoder.onnx"));
+        assert!(m.files.iter().any(|f| f.0 == "vae_decoder.onnx"));
+
+        // Alias check
+        assert_eq!(spec("moebius-removal").unwrap().id, "moebius");
+
+        // Verify models() lists Moebius for the UI
+        let hw = Hardware { gpu: Some("Apple M4 Max".into()), vram_mb: Some(128 * 1024), device: "CoreML".into() };
+        let all = models(Path::new("/tmp"), &hw);
+        assert!(all.iter().any(|m| m.id == "moebius"));
     }
 }
 

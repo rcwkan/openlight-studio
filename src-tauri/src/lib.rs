@@ -8,6 +8,7 @@ mod develop;
 mod enhance;
 mod gpu;
 mod mcp;
+mod moebius;
 mod remote;
 mod sdfill;
 mod storage;
@@ -20,7 +21,7 @@ use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, MutexGuard, OnceLock, atomic::AtomicBool},
+    sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock, atomic::AtomicBool},
 };
 use tauri::{Emitter, Manager};
 
@@ -105,17 +106,89 @@ pub fn new_token() -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
+/// Default catalog location in standard OS application data directory.
+pub fn default_data_dir() -> PathBuf {
+    #[cfg(test)]
+    {
+        std::env::temp_dir().join("openlight-test-default")
+    }
+    #[cfg(not(test))]
+    {
+        dirs::data_dir().unwrap_or_else(std::env::temp_dir).join(APP_ID)
+    }
+}
+
+/// Pointer file stored in default application data directory referencing custom storage folder.
+pub fn pointer_file() -> PathBuf {
+    default_data_dir().join("storage_location.txt")
+}
+
+/// Check if a custom storage directory is configured via environment variable or pointer file.
+pub fn configured_data_dir() -> Option<PathBuf> {
+    if let Some(custom) = std::env::var_os("OPENLIGHT_DATA_DIR") {
+        return Some(PathBuf::from(custom));
+    }
+    let p = pointer_file();
+    if let Ok(content) = fs::read_to_string(&p) {
+        let trimmed = content.trim();
+        if !trimmed.is_empty() {
+            let path = PathBuf::from(trimmed);
+            return Some(path);
+        }
+    }
+    if let Some(config_dir) = dirs::config_dir() {
+        let alt = config_dir.join(APP_ID).join("storage_location.txt");
+        if alt != p {
+            if let Ok(content) = fs::read_to_string(&alt) {
+                let trimmed = content.trim();
+                if !trimmed.is_empty() {
+                    let path = PathBuf::from(trimmed);
+                    return Some(path);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Catalog location; `OPENLIGHT_DATA_DIR` selects another catalog folder.
 pub fn data_dir() -> PathBuf {
-    std::env::var_os("OPENLIGHT_DATA_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| dirs::data_dir().unwrap_or_else(std::env::temp_dir).join(APP_ID))
+    configured_data_dir().unwrap_or_else(default_data_dir)
+}
+
+/// Persist custom storage pointer file, or remove if reverting to default.
+pub fn persist_storage_location(target: Option<&Path>) -> Result<(), String> {
+    let def = default_data_dir();
+    let p = pointer_file();
+    match target {
+        Some(t) if t != def => {
+            let _ = fs::create_dir_all(&def);
+            fs::write(&p, t.to_string_lossy().as_bytes()).map_err(es)?;
+            if let Some(config_dir) = dirs::config_dir() {
+                let alt_dir = config_dir.join(APP_ID);
+                if alt_dir != def {
+                    let _ = fs::create_dir_all(&alt_dir);
+                    let _ = fs::write(alt_dir.join("storage_location.txt"), t.to_string_lossy().as_bytes());
+                }
+            }
+        }
+        _ => {
+            let _ = fs::remove_file(&p);
+            if let Some(config_dir) = dirs::config_dir() {
+                let alt_dir = config_dir.join(APP_ID);
+                if alt_dir != def {
+                    let _ = fs::remove_file(alt_dir.join("storage_location.txt"));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Shared engine state used by the GUI commands, the MCP server and the AI router.
 pub struct Core {
     db: Mutex<rusqlite::Connection>,
-    pub dir: PathBuf,
+    dir: RwLock<PathBuf>,
     pub settings: Mutex<Settings>,
     pub selection: Mutex<Vec<i64>>,
     pub mcp_status: Mutex<String>,
@@ -135,7 +208,7 @@ impl Core {
         let core = Core {
             db: Mutex::new(catalog::open(&dir.join("catalog.olcat"))?),
             settings: Mutex::new(Settings::load(&dir)),
-            dir,
+            dir: RwLock::new(dir),
             selection: Default::default(),
             mcp_status: Mutex::new("not started".into()),
             jobs: Default::default(),
@@ -148,13 +221,45 @@ impl Core {
         Ok(core)
     }
 
+    pub fn dir(&self) -> PathBuf {
+        self.dir.read().unwrap().clone()
+    }
+
+    pub fn switch_storage_engine(&self, new_dir: PathBuf, new_db: rusqlite::Connection) -> Result<(), String> {
+        fs::create_dir_all(new_dir.join("thumbs")).map_err(es)?;
+        {
+            let mut db_guard = self.db.lock().unwrap();
+            let mut dir_guard = self.dir.write().unwrap();
+            *db_guard = new_db;
+            *dir_guard = new_dir.clone();
+        }
+        // If the new directory has its own settings.json, load it;
+        // otherwise preserve the current settings so preferences and credentials aren't lost
+        let new_settings = if new_dir.join("settings.json").is_file() {
+            Settings::load(&new_dir)
+        } else {
+            self.settings.lock().unwrap().clone()
+        };
+        *self.settings.lock().unwrap() = new_settings;
+        self.save_settings()?;
+        self.cache.lock().unwrap().clear();
+        *self.full.lock().unwrap() = None;
+        if let Some(app) = self.app.get() {
+            let _ = app.asset_protocol_scope().allow_directory(new_dir.join("thumbs"), true);
+            let _ = app.emit("storage-location-changed", serde_json::json!({
+                "new_dir": new_dir.to_string_lossy(),
+            }));
+        }
+        Ok(())
+    }
+
     pub fn db(&self) -> MutexGuard<'_, rusqlite::Connection> {
         self.db.lock().unwrap()
     }
 
     pub fn save_settings(&self) -> Result<(), String> {
         gpu::set_enabled(self.settings.lock().unwrap().gpu_accel);
-        let path = self.dir.join("settings.json");
+        let path = self.dir().join("settings.json");
         let s = serde_json::to_string_pretty(&*self.settings.lock().unwrap()).map_err(es)?;
         fs::write(&path, s).map_err(es)?;
         #[cfg(unix)]
@@ -166,7 +271,7 @@ impl Core {
     }
 
     pub fn thumb_path(&self, id: i64) -> PathBuf {
-        self.dir.join("thumbs").join(format!("{id}.jpg"))
+        self.dir().join("thumbs").join(format!("{id}.jpg"))
     }
 
     pub fn emit(&self, event: &str, payload: Value) {
@@ -228,7 +333,7 @@ impl Core {
     }
 
     pub fn ai_cache_dir(&self, id: i64) -> PathBuf {
-        let p = self.dir.join("cache").join("ai").join(id.to_string());
+        let p = self.dir().join("cache").join("ai").join(id.to_string());
         let _ = fs::create_dir_all(&p);
         p
     }
@@ -246,7 +351,17 @@ impl Core {
 
     /// Persist an edit as one history step (one undo = one GUI gesture or one AI/MCP call).
     pub fn commit(self: &Arc<Self>, id: i64, d: &Develop, label: &str) -> Result<(), String> {
-        catalog::save_develop(&self.db(), id, d, label)?;
+        self.commit_with_replace(id, d, label, None)
+    }
+
+    pub fn commit_with_replace(
+        self: &Arc<Self>,
+        id: i64,
+        d: &Develop,
+        label: &str,
+        replace_prefix: Option<&str>,
+    ) -> Result<(), String> {
+        catalog::save_develop_ext(&self.db(), id, d, label, replace_prefix)?;
         self.refresh(id, d)
     }
 
@@ -418,9 +533,10 @@ type St<'a> = tauri::State<'a, Arc<Core>>;
 #[tauri::command]
 fn app_info(core: St) -> Value {
     let s = core.settings.lock().unwrap();
+    let dir = core.dir();
     json!({
-        "data_dir": core.dir,
-        "thumbs_dir": core.dir.join("thumbs"),
+        "data_dir": dir,
+        "thumbs_dir": dir.join("thumbs"),
         "exe": std::env::current_exe().ok(),
         "mcp_url": format!("http://127.0.0.1:{}/mcp", s.mcp_port),
         "mcp_status": *core.mcp_status.lock().unwrap(),
@@ -593,8 +709,8 @@ fn heal_spot(core: St, id: i64, x: f32, y: f32, radius: f32) -> Result<Develop, 
 
 /// Auto fine tune to a profile (develop::PROFILES): white balance and tone measured on the photo plus the look.
 #[tauri::command(async)]
-fn auto_develop(core: St, id: i64, develop: Develop, profile: String) -> Result<Develop, String> {
-    develop::auto(&*core.proxy(&core.photo(id)?.path)?, &develop, &profile)
+fn auto_develop(core: St, id: i64, develop: Develop, profile: String, strength: Option<f32>) -> Result<Develop, String> {
+    develop::auto_with_strength(&*core.proxy(&core.photo(id)?.path)?, &develop, &profile, strength.unwrap_or(1.0))
 }
 
 /// The profile for what photo `id` shows (auto::photo_type_of), asking the active AI provider; with the
@@ -649,10 +765,16 @@ fn remove_selection(core: St, id: i64, mask: usize) -> Result<Develop, String> {
 }
 
 #[tauri::command(async)]
-fn save_develop(core: St, id: i64, develop: Develop, label: String) -> Result<Develop, String> {
+fn save_develop(
+    core: St,
+    id: i64,
+    develop: Develop,
+    label: String,
+    replace_prefix: Option<String>,
+) -> Result<Develop, String> {
     let mut d = develop;
     d.clamp();
-    core.commit(id, &d, &label)?;
+    core.commit_with_replace(id, &d, &label, replace_prefix.as_deref())?;
     Ok(d)
 }
 
@@ -737,7 +859,7 @@ fn save_settings(core: St, mut settings: Settings) -> Result<(), String> {
 #[tauri::command(async)]
 fn ai_models(core: St) -> Value {
     let hw = aimodel::hardware();
-    let models = aimodel::models(&core.dir, &hw);
+    let models = aimodel::models(&core.dir(), &hw);
     json!({ "hardware": hw, "models": models })
 }
 
@@ -746,7 +868,7 @@ fn ai_models(core: St) -> Value {
 fn ai_download(core: St, id: String) -> Result<(), String> {
     let c = core.inner().clone();
     let model = id.clone();
-    aimodel::download(&core.dir, &id, &|done, total| c.emit("ai-model-progress", json!({ "id": model, "done": done, "total": total })))
+    aimodel::download(&core.dir(), &id, &|done, total| c.emit("ai-model-progress", json!({ "id": model, "done": done, "total": total })))
 }
 
 /// Snaps brush strokes painted over an object to the object, for the confirm step. Reply: u32 frame width and
@@ -778,7 +900,7 @@ fn snap_object(core: St, id: i64, strokes: Vec<brush::Stroke>) -> Result<tauri::
 
 #[tauri::command(async)]
 fn ai_remove(core: St, id: String) -> Result<(), String> {
-    aimodel::remove(&core.dir, &id)
+    aimodel::remove(&core.dir(), &id)
 }
 
 #[tauri::command(async)]
@@ -802,7 +924,7 @@ fn ai_inpaint_inplace(
     let hole = aimodel::hole_from_alpha(&alpha, proxy.w, proxy.h, img.w, img.h).ok_or("nothing is selected to remove")?;
 
     job.progress("Preparing hole & context", 0, 25);
-    let patch = aimodel::inpaint_patch(&core.dir, &model, &img, &hole, grow.min(40), &prompt, &|done, total| {
+    let patch = aimodel::inpaint_patch(&core.dir(), &model, &img, &hole, grow.min(40), &prompt, &|done, total| {
         let label = if total > 3 {
             format!("Diffusion step {} of {}", (done + 1).min(total), total)
         } else if total == 3 {
@@ -862,7 +984,7 @@ fn ai_denoise_inplace(
     let vram = aimodel::hardware().vram_mb;
 
     job.progress("Starting AI denoise", 0, 1);
-    let denoised_img = aimodel::denoise(&core.dir, &model, img, 100.0, vram, &|done, total| {
+    let denoised_img = aimodel::denoise(&core.dir(), &model, img, 100.0, vram, &|done, total| {
         let label = if total > 1 {
             format!("Denoising tile {} of {}", (done + 1).min(total), total)
         } else {
@@ -1045,6 +1167,26 @@ fn clean_up(core: St, what: String) -> Result<usize, String> {
     storage::clean(&core, &what)
 }
 
+#[tauri::command(async)]
+fn validate_storage_location(core: St, target: String) -> Result<Value, String> {
+    storage::validate_location(&core, &target)
+}
+
+#[tauri::command(async)]
+fn move_storage_location(core: St, target: String, mode: String, cleanup_old: Option<bool>) -> Result<Value, String> {
+    storage::switch_storage_location(&core, PathBuf::from(target), &mode, cleanup_old.unwrap_or(false))
+}
+
+#[tauri::command(async)]
+fn reset_storage_location(core: St, mode: String, cleanup_old: Option<bool>) -> Result<Value, String> {
+    storage::reset_storage_location(&core, &mode, cleanup_old.unwrap_or(false))
+}
+
+#[tauri::command(async)]
+fn sync_library_folders(core: St, folders: Option<Vec<String>>) -> Result<usize, String> {
+    storage::sync_folders(&core, folders)
+}
+
 #[tauri::command]
 fn network_add(core: St, drive: storage::NetworkDrive) -> Result<Settings, String> {
     storage::add_drive(&core, drive)
@@ -1140,7 +1282,7 @@ pub fn run() {
         .menu(app_menu)
         .setup(move |app| {
             let _ = core.app.set(app.handle().clone());
-            app.asset_protocol_scope().allow_directory(core.dir.join("thumbs"), true)?;
+            app.asset_protocol_scope().allow_directory(core.dir().join("thumbs"), true)?;
             app.manage(core.clone());
             mcp::start_http(core.clone());
             Ok(())
@@ -1210,6 +1352,10 @@ pub fn run() {
             remote_disconnect,
             storage_report,
             clean_up,
+            validate_storage_location,
+            move_storage_location,
+            reset_storage_location,
+            sync_library_folders,
             auto_run,
             auto_defaults,
             cancel_job,

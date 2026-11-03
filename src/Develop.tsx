@@ -3,7 +3,7 @@ import { Fragment, ReactNode, useCallback, useEffect, useMemo, useRef, useState 
 import { AdvancedTab } from "./Advanced";
 import { Log } from "./Agent";
 import { AiTab } from "./AiDenoise";
-import { AutoTab } from "./Auto";
+import { AutoTab, PROFILES } from "./Auto";
 import { ProTab } from "./Pro";
 import { api, Snap, Stroke, Develop as Dev, getPath, HistoryEntry, Mask, MaskComponent, Photo, Proof, Rendered, setPath, Settings, srgbToOklch, thumbUrl } from "./api";
 import { Btn, ColorWheel, CurveEditor, Histogram, Panel, Seg, Slider } from "./controls";
@@ -28,6 +28,8 @@ export type CompareOrientation = "horizontal" | "vertical";
 interface PhotoSessionCache {
   dev: Dev;
   history: HistoryEntry[];
+  activeProfile?: string | null;
+  profileStrength?: number;
   maskSel: number | null;
   compSel: number;
   swatchSel: number | null;
@@ -170,6 +172,8 @@ export function Develop(p: Props) {
   const isVisible = p.visible !== false;
   const id = p.active?.id ?? null;
   const [dev, setDev] = useState<Dev | null>(null);
+  const [activeProfile, setActiveProfile] = useState<string | null>(null);
+  const [profileStrength, setProfileStrength] = useState<number>(100);
   const [hist, setHist] = useState<Uint32Array[] | null>(null);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [before, setBefore] = useState(false);
@@ -225,7 +229,7 @@ export function Develop(p: Props) {
   devRef.current = dev;
   const idRef = useRef(id);
   idRef.current = id;
-  const pending = useRef<{ id: number; d: Dev; label: string; timer: number } | null>(null);
+  const pending = useRef<{ id: number; d: Dev; label: string; replacePrefix?: string; timer: number } | null>(null);
 
   // Keep per-photo session cache synchronized for instant switching between working images
   useEffect(() => {
@@ -233,6 +237,8 @@ export function Develop(p: Props) {
       sessionCache.current[id] = {
         dev,
         history,
+        activeProfile,
+        profileStrength,
         maskSel,
         compSel,
         swatchSel,
@@ -246,7 +252,7 @@ export function Develop(p: Props) {
         splitPos,
       };
     }
-  }, [id, dev, history, maskSel, compSel, swatchSel, zoom, pan, rtab, before, overlay, compareMode, compareOrientation, splitPos]);
+  }, [id, dev, history, activeProfile, profileStrength, maskSel, compSel, swatchSel, zoom, pan, rtab, before, overlay, compareMode, compareOrientation, splitPos]);
 
   const refreshHistory = useCallback(async (pid: number) => {
     const h = await api.history(pid);
@@ -255,6 +261,18 @@ export function Develop(p: Props) {
     }
     if (idRef.current === pid) {
       setHistory(h);
+      const cur = h.find((item) => item.current);
+      if (cur) {
+        const m = cur.label.match(/^(?:Profile|Auto):\s*([^(]+?)(?:\s*\((\d+)%\))?$/);
+        if (m) {
+          const profName = m[1].trim().toLowerCase();
+          const pEntry = PROFILES.find(([k, l]) => k === profName || l.toLowerCase() === profName);
+          if (pEntry) {
+            setActiveProfile(pEntry[0]);
+            setProfileStrength(m[2] ? parseInt(m[2], 10) : 100);
+          }
+        }
+      }
     }
   }, []);
   const flush = useCallback(async () => {
@@ -262,16 +280,16 @@ export function Develop(p: Props) {
     if (!pd) return;
     clearTimeout(pd.timer);
     pending.current = null;
-    await api.save(pd.id, pd.d, pd.label);
+    await api.save(pd.id, pd.d, pd.label, pd.replacePrefix);
     p.onPhotoUpdated?.(pd.id);
     if (pd.id === idRef.current) refreshHistory(pd.id);
   }, [refreshHistory, p.onPhotoUpdated]);
   const change = useCallback(
-    (d: Dev, label: string) => {
+    (d: Dev, label: string, replacePrefix?: string) => {
       if (idRef.current == null) return;
       setDev(d);
       if (pending.current) clearTimeout(pending.current.timer);
-      pending.current = { id: idRef.current, d, label, timer: window.setTimeout(flush, 450) };
+      pending.current = { id: idRef.current, d, label, replacePrefix, timer: window.setTimeout(flush, 450) };
     },
     [flush],
   );
@@ -284,6 +302,8 @@ export function Develop(p: Props) {
     if (cached) {
       setDev(cached.dev);
       setHistory(cached.history);
+      setActiveProfile(cached.activeProfile ?? null);
+      setProfileStrength(cached.profileStrength ?? 100);
       setMaskSel(cached.maskSel);
       setCompSel(cached.compSel);
       setSwatchSel(cached.swatchSel);
@@ -308,6 +328,8 @@ export function Develop(p: Props) {
       setCompareMode("off");
       setCompareOrientation("horizontal");
       setSplitPos(50);
+      setActiveProfile(null);
+      setProfileStrength(100);
     }
     flush().then(() =>
       api.getDevelop(id).then((d) => {
@@ -407,7 +429,7 @@ export function Develop(p: Props) {
   // generative removal: the outline being drawn, and the outline once snapped to the object for confirming
   const [strokes, setStrokes] = useState<Stroke[]>([]);
   const [live, setLive] = useState<Stroke | null>(null);
-  const [brush, setBrush] = useState(0.035);
+  const [brush, setBrush] = useState(0.012);
   const [cursor, setCursor] = useState<{ x: number; y: number } | null>(null);
   const [snap, setSnap] = useState<Snap | null>(null);
   const snapCanvas = useRef<HTMLCanvasElement>(null);
@@ -1331,14 +1353,19 @@ export function Develop(p: Props) {
   const dot = "absolute h-3.5 w-3.5 -translate-x-1/2 -translate-y-1/2 cursor-move rounded-full border-2 border-white shadow";
 
   // --- auto: what the engine measures on the photo lands on the latest state as one step ---
-  const measured = async <R,>(label: string, get: (id: number, cur: Dev) => Promise<R>, put: (cur: Dev, r: R) => Dev) => {
+  const measured = async <R,>(
+    label: string,
+    get: (id: number, cur: Dev) => Promise<R>,
+    put: (cur: Dev, r: R) => Dev,
+    replacePrefix?: string,
+  ) => {
     if (id == null || !devRef.current) return;
     setError(null);
     await waitFor(label, async () => {
       try {
         const r = await get(id, devRef.current!);
         const cur = devRef.current;
-        if (idRef.current === id && cur) change(put(cur, r), label);
+        if (idRef.current === id && cur) change(put(cur, r), label, replacePrefix);
       } catch (e) {
         setError(`${label}: ${e}`);
       }
@@ -1347,7 +1374,31 @@ export function Develop(p: Props) {
   const autoTone = () => measured("Auto tone", api.autoTone, (cur, basic_tone) => ({ ...cur, basic_tone }));
   const autoHdr = () => measured("Auto HDR toning", (i) => api.autoHdr(i), (cur, hdr) => ({ ...cur, hdr }));
   const autoWb = () => measured("Auto white balance", api.autoWhiteBalance, (cur, white_balance) => ({ ...cur, white_balance }));
-  const autoProfile = (profile: string, label: string) => measured(`Auto: ${label}`, (i, cur) => api.autoDevelop(i, cur, profile), (_, d) => d);
+  const autoProfile = async (profile: string, label: string, strength: number = profileStrength) => {
+    setActiveProfile(profile);
+    const profLabel = PROFILES.find(([k]) => k === profile)?.[1] || label;
+    await measured(
+      `Profile: ${profLabel} (${strength}%)`,
+      (i, cur) => api.autoDevelop(i, cur, profile, strength),
+      (_, d) => d,
+      `Profile: ${profLabel}`,
+    );
+  };
+  const handleProfileStrength = async (strength: number) => {
+    setProfileStrength(strength);
+    if (id == null || !devRef.current) return;
+    const prof = activeProfile || "natural";
+    const label = PROFILES.find(([k]) => k === prof)?.[1] || "Natural";
+    if (!activeProfile) {
+      setActiveProfile(prof);
+    }
+    try {
+      const d = await api.autoDevelop(id, devRef.current, prof, strength);
+      if (idRef.current === id) change(d, `Profile: ${label} (${strength}%)`, `Profile: ${label}`);
+    } catch (e) {
+      setError(`Profile strength: ${e}`);
+    }
+  };
   // Auto › by photo type: the AI (or, failing that, the photo's keywords) picks the profile
   const autoByType = async () => {
     if (id == null) return;
@@ -1507,7 +1558,7 @@ export function Develop(p: Props) {
             <Btn disabled={!others.length} onClick={sync} title="Apply these settings (except crop) to the other selected photos">
               Sync to {others.length}
             </Btn>
-            <Btn onClick={() => dev && change({ ...structuredClone(p.defaults), ai_provenance_log: dev.ai_provenance_log }, "Reset all")}>Reset all</Btn>
+            <Btn onClick={() => dev && (setActiveProfile(null), setProfileStrength(100), change({ ...structuredClone(p.defaults), ai_provenance_log: dev.ai_provenance_log }, "Reset all"))}>Reset all</Btn>
             <div className="col-span-2 pt-1 border-t border-neutral-800">
               <Btn
                 className="w-full justify-center border-sky-800/60 bg-sky-950/40 text-sky-300 hover:border-sky-600 hover:bg-sky-900/50 hover:text-white"
@@ -2312,6 +2363,9 @@ export function Develop(p: Props) {
           <AutoTab
             dev={dev}
             profile={autoProfile}
+            activeProfile={activeProfile}
+            profileStrength={profileStrength}
+            onStrengthChange={handleProfileStrength}
             byType={autoByType}
             whiteBalance={autoWb}
             tone={autoTone}

@@ -3799,20 +3799,87 @@ fn look(profile: &str) -> Option<Value> {
     })
 }
 
+fn scale_look(look: &Value, s: f32) -> Value {
+    scale_value(look, s, "")
+}
+
+fn scale_value(v: &Value, s: f32, path: &str) -> Value {
+    match v {
+        Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (k, val) in map {
+                let subpath = if path.is_empty() { k.clone() } else { format!("{path}.{k}") };
+                if subpath.ends_with(".hue") && !subpath.contains("color_mixer") {
+                    out.insert(k.clone(), val.clone());
+                } else {
+                    out.insert(k.clone(), scale_value(val, s, &subpath));
+                }
+            }
+            Value::Object(out)
+        }
+        Value::Array(arr) => {
+            if path.contains("tone_curve") {
+                let scaled: Vec<Value> = arr
+                    .iter()
+                    .map(|pt| {
+                        if let Some(pair) = pt.as_array() {
+                            if pair.len() == 2 {
+                                let x = pair[0].as_f64().unwrap_or(0.0);
+                                let y = pair[1].as_f64().unwrap_or(x);
+                                let new_y = (x + (y - x) * (s as f64)).clamp(0.0, 255.0);
+                                return json!([x.round(), new_y.round()]);
+                            }
+                        }
+                        pt.clone()
+                    })
+                    .collect();
+                Value::Array(scaled)
+            } else {
+                Value::Array(arr.iter().map(|item| scale_value(item, s, path)).collect())
+            }
+        }
+        Value::Number(n) => {
+            let val = n.as_f64().unwrap_or(0.0) * (s as f64);
+            if n.is_i64() || n.is_u64() {
+                json!(val.round() as i64)
+            } else {
+                json!(val)
+            }
+        }
+        Value::String(str_val) if str_val == "Monochrome" && s <= 0.0 => {
+            Value::String("Color".into())
+        }
+        other => other.clone(),
+    }
+}
+
 /// Auto fine tune: white balance and tone measured on the photo, then `profile`'s look. White balance,
 /// Basic, presence, colour / B&W and the panels the look uses start over, so a profile applied twice
 /// changes nothing; the rest of the edit stays.
 pub fn auto(img: &Img, cur: &Develop, profile: &str) -> Result<Develop, String> {
+    auto_with_strength(img, cur, profile, 1.0)
+}
+
+pub fn auto_with_strength(img: &Img, cur: &Develop, profile: &str, strength: f32) -> Result<Develop, String> {
     look(profile).ok_or_else(|| format!("unknown profile '{profile}': use {}", PROFILES.join(", ")))?;
     let white_balance = auto_wb(img);
     let basic_tone = auto_tone(img, &white_balance);
-    look_on(&Develop { white_balance, basic_tone, ..cur.clone() }, profile)
+    look_on_strength(&Develop { white_balance, basic_tone, ..cur.clone() }, profile, strength)
 }
 
 /// `profile`'s look on `d`: presence, colour / B&W and the panels the look uses start over, then its
 /// numbers add to the rest (e.g. Portrait warms the white balance).
 pub fn look_on(d: &Develop, profile: &str) -> Result<Develop, String> {
+    look_on_strength(d, profile, 1.0)
+}
+
+pub fn look_on_strength(d: &Develop, profile: &str, strength: f32) -> Result<Develop, String> {
     let look = look(profile).ok_or_else(|| format!("unknown profile '{profile}': use {}", PROFILES.join(", ")))?;
+    let look = if (strength - 1.0).abs() > 0.0001 {
+        scale_look(&look, strength.max(0.0))
+    } else {
+        look
+    };
     let d = Develop { presence: Presence::default(), profile: String::new(), ..d.clone() };
     let (mut v, fresh) = (serde_json::to_value(d).map_err(es)?, serde_json::to_value(Develop::default()).map_err(es)?);
     for k in look.as_object().into_iter().flat_map(|o| o.keys()).filter(|k| !["white_balance", "basic_tone"].contains(&k.as_str())) {
@@ -4748,6 +4815,28 @@ mod tests {
         }
         let film = auto(&img, &cur, "analog_film").unwrap();
         assert_eq!((film.grain.size, film.effects.vignette_feather), (42.0, 70.0));
+    }
+
+    #[test]
+    fn profile_strength_scales_adjustments_and_zero_is_identity() {
+        let base = Develop::default();
+        for p in PROFILES {
+            let full = look_on_strength(&base, p, 1.0).unwrap();
+            let standard = look_on(&base, p).unwrap();
+            assert_eq!(full, standard, "{p} at 1.0 matches standard look_on");
+
+            let zero = look_on_strength(&base, p, 0.0).unwrap();
+            // At strength 0, vibrance/clarity/saturation/grain/vignette are 0
+            assert_eq!(zero.presence.vibrance, 0.0, "{p} vibrance at strength 0");
+            assert_eq!(zero.presence.clarity, 0.0, "{p} clarity at strength 0");
+            assert_eq!(zero.grain.amount, 0.0, "{p} grain at strength 0");
+            assert_eq!(zero.effects.vignette, 0.0, "{p} vignette at strength 0");
+
+            let double = look_on_strength(&base, p, 2.0).unwrap();
+            if standard.presence.vibrance.abs() > 0.0 {
+                assert!((double.presence.vibrance - standard.presence.vibrance * 2.0).abs() <= 1.0);
+            }
+        }
     }
 
     #[test]

@@ -37,7 +37,7 @@ fn photo_files(dir: &Path) -> u64 {
 /// Thumbnails whose photo is no longer in the catalog. The folder is listed before the ids
 /// are read: rows are written before their thumbnails, so a running import is never caught.
 fn orphan_thumbs(core: &Core) -> Result<Vec<PathBuf>, String> {
-    let files: Vec<PathBuf> = fs::read_dir(core.dir.join("thumbs")).map_err(es)?.flatten().map(|e| e.path()).collect();
+    let files: Vec<PathBuf> = fs::read_dir(core.dir().join("thumbs")).map_err(es)?.flatten().map(|e| e.path()).collect();
     let ids: HashSet<i64> = {
         let c = core.db();
         let mut st = c.prepare("SELECT id FROM photos").map_err(es)?;
@@ -81,7 +81,7 @@ fn folders(core: &Core) -> Result<BTreeMap<String, Folder>, String> {
 }
 
 pub fn report(core: &Core) -> Result<Value, String> {
-    let dir = &core.dir;
+    let dir = core.dir();
     let orphans = orphan_thumbs(core)?;
     let originals = du(&remote::originals_dir(core));
     let folders = folders(core)?;
@@ -89,7 +89,7 @@ pub fn report(core: &Core) -> Result<Value, String> {
     let wal = du(&dir.join("catalog.olcat-wal")).0;
     let shm = du(&dir.join("catalog.olcat-shm")).0;
     let catalog = db_bytes + wal + shm;
-    let (total, thumbs, google) = (du(dir).0, du(&dir.join("thumbs")).0, du(&dir.join("remote").join("Google Photos")).0);
+    let (total, thumbs, google) = (du(&dir).0, du(&dir.join("thumbs")).0, du(&dir.join("remote").join("Google Photos")).0);
     let clouds = du(&cloud::cloud_dir(core));
 
     let immich_dir = dir.join("remote").join("Immich");
@@ -124,7 +124,7 @@ pub fn report(core: &Core) -> Result<Value, String> {
 
     let mut ai_models_details = Vec::new();
     let hw = aimodel::hardware();
-    for m in aimodel::models(dir, &hw) {
+    for m in aimodel::models(&dir, &hw) {
         if m.installed {
             let model_path = dir.join("models").join(m.id);
             let (b, _) = du(&model_path);
@@ -171,7 +171,7 @@ pub fn report(core: &Core) -> Result<Value, String> {
 
     let mut other_details = Vec::new();
     let mut other_bytes = 0u64;
-    if let Ok(entries) = fs::read_dir(dir) {
+    if let Ok(entries) = fs::read_dir(&dir) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
             if name == "thumbs" || name == "remote" || name.starts_with("catalog.olcat") || name == "models" || name == "coreml-cache" || name == "cache" {
@@ -219,6 +219,8 @@ pub fn report(core: &Core) -> Result<Value, String> {
 
     Ok(json!({
         "data_dir": dir,
+        "default_data_dir": crate::default_data_dir(),
+        "is_custom_location": dir != crate::default_data_dir(),
         "total": total,
         "catalog": catalog,
         "catalog_details": {
@@ -275,7 +277,7 @@ pub fn clean(core: &Core, what: &str) -> Result<usize, String> {
             }
         }
         "immich_albums" => {
-            let immich_dir = core.dir.join("remote").join("Immich");
+            let immich_dir = core.dir().join("remote").join("Immich");
             let mut count = 0;
             if immich_dir.is_dir() {
                 for entry in fs::read_dir(&immich_dir).into_iter().flatten().flatten() {
@@ -312,14 +314,14 @@ pub fn clean(core: &Core, what: &str) -> Result<usize, String> {
         "ai_models" => {
             let mut count = 0;
             let hw = aimodel::hardware();
-            for m in aimodel::models(&core.dir, &hw) {
+            for m in aimodel::models(&core.dir(), &hw) {
                 if m.installed {
-                    if aimodel::remove(&core.dir, m.id).is_ok() {
+                    if aimodel::remove(&core.dir(), m.id).is_ok() {
                         count += 1;
                     }
                 }
             }
-            let models_dir = core.dir.join("models");
+            let models_dir = core.dir().join("models");
             if models_dir.is_dir() {
                 if let Ok(entries) = fs::read_dir(&models_dir) {
                     for entry in entries.flatten() {
@@ -330,7 +332,7 @@ pub fn clean(core: &Core, what: &str) -> Result<usize, String> {
                     }
                 }
             }
-            let cache_dir = core.dir.join("coreml-cache");
+            let cache_dir = core.dir().join("coreml-cache");
             if cache_dir.is_dir() {
                 let _ = fs::remove_dir_all(&cache_dir);
             }
@@ -339,14 +341,14 @@ pub fn clean(core: &Core, what: &str) -> Result<usize, String> {
         what if what.starts_with("ai_model:") => {
             let id = &what["ai_model:".len()..];
             if id == "coreml_cache" {
-                let cache_dir = core.dir.join("coreml-cache");
+                let cache_dir = core.dir().join("coreml-cache");
                 if cache_dir.is_dir() {
                     let _ = fs::remove_dir_all(&cache_dir);
                 }
                 1
             } else {
-                if let Err(e) = aimodel::remove(&core.dir, id) {
-                    let model_dir = core.dir.join("models").join(id);
+                if let Err(e) = aimodel::remove(&core.dir(), id) {
+                    let model_dir = core.dir().join("models").join(id);
                     if model_dir.is_dir() {
                         fs::remove_dir_all(model_dir).map_err(es)?;
                     } else {
@@ -357,7 +359,7 @@ pub fn clean(core: &Core, what: &str) -> Result<usize, String> {
             }
         }
         "ai_cache" => {
-            let ai_cache_dir = core.dir.join("cache").join("ai");
+            let ai_cache_dir = core.dir().join("cache").join("ai");
             let count = du(&ai_cache_dir).1 as usize;
             if ai_cache_dir.is_dir() {
                 let _ = fs::remove_dir_all(&ai_cache_dir);
@@ -375,7 +377,7 @@ pub fn clean(core: &Core, what: &str) -> Result<usize, String> {
             let dir = remote::originals_dir(core);
             count += du(&dir).1 as usize;
             let _ = fs::remove_dir_all(&dir);
-            let ai_cache_dir = core.dir.join("cache").join("ai");
+            let ai_cache_dir = core.dir().join("cache").join("ai");
             count += du(&ai_cache_dir).1 as usize;
             if ai_cache_dir.is_dir() {
                 let _ = fs::remove_dir_all(&ai_cache_dir);
@@ -657,7 +659,7 @@ fn items(core: &Core, from: &Place, o: &DuplicateOptions, cloud_from: Option<&cl
     };
     Ok(match from {
         Place::Folder { path } => folder(Path::new(path))?,
-        Place::Google => folder(&core.dir.join("remote").join("Google Photos"))?,
+        Place::Google => folder(&core.dir().join("remote").join("Google Photos"))?,
         Place::Photos { ids } => {
             let photos = catalog::photos(&core.db(), ids)?;
             let masters: HashSet<i64> = photos.iter().map(|p| p.master_id.unwrap_or(p.id)).collect();
@@ -960,6 +962,359 @@ pub fn duplicate(core: &Arc<Core>, from: &Place, to: &Place, o: &DuplicateOption
     }))
 }
 
+fn canonicalize_or_parent(p: &Path) -> PathBuf {
+    if let Ok(c) = fs::canonicalize(p) {
+        c
+    } else if let Some(parent) = p.parent() {
+        if parent.as_os_str().is_empty() {
+            p.to_path_buf()
+        } else {
+            canonicalize_or_parent(parent).join(p.file_name().unwrap_or_default())
+        }
+    } else {
+        p.to_path_buf()
+    }
+}
+
+/// Validate a target folder for relocating OpenLight storage.
+pub fn validate_location(core: &Core, target: &str) -> Result<Value, String> {
+    let target_str = target.trim();
+    if target_str.is_empty() {
+        return Ok(json!({
+            "valid": false,
+            "error": "Target path cannot be empty."
+        }));
+    }
+    let target_path = PathBuf::from(target_str);
+    let current_dir = core.dir();
+    let default_dir = crate::default_data_dir();
+
+    let norm_target = canonicalize_or_parent(&target_path);
+    let norm_current = canonicalize_or_parent(&current_dir);
+
+    if norm_target == norm_current {
+        return Ok(json!({
+            "valid": false,
+            "is_same": true,
+            "error": "The selected folder is already your active storage location."
+        }));
+    }
+
+    if norm_target.starts_with(&norm_current) {
+        return Ok(json!({
+            "valid": false,
+            "error": "Target folder cannot be inside the current OpenLight storage directory."
+        }));
+    }
+
+    if norm_current.starts_with(&norm_target) {
+        return Ok(json!({
+            "valid": false,
+            "error": "Current OpenLight storage directory cannot be inside the target folder."
+        }));
+    }
+
+    if !target_path.exists() {
+        if let Err(e) = fs::create_dir_all(&target_path) {
+            return Ok(json!({
+                "valid": false,
+                "error": format!("Cannot create target folder: {e}")
+            }));
+        }
+    } else {
+        // Test write permission
+        let test_file = target_path.join(format!(".ols_test_{}", crate::new_token()));
+        if let Err(e) = fs::write(&test_file, b"ok") {
+            return Ok(json!({
+                "valid": false,
+                "error": format!("Selected folder is not writable: {e}")
+            }));
+        }
+        let _ = fs::remove_file(&test_file);
+    }
+
+    let catalog_path = target_path.join("catalog.olcat");
+    let has_existing_catalog = catalog_path.is_file();
+    let has_existing_config = target_path.join("settings.json").is_file();
+    let existing_catalog_bytes = if has_existing_catalog {
+        fs::metadata(&catalog_path).map(|m| m.len()).unwrap_or(0)
+    } else {
+        0
+    };
+    let existing_photos_count: Option<i64> = if has_existing_catalog {
+        rusqlite::Connection::open_with_flags(&catalog_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .ok()
+            .and_then(|c| c.query_row("SELECT COUNT(*) FROM photos WHERE master_id IS NULL AND deleted_at IS NULL", [], |r| r.get(0)).ok())
+    } else {
+        None
+    };
+    let is_empty = fs::read_dir(&target_path)
+        .map(|entries| {
+            entries.flatten().filter(|e| {
+                let name = e.file_name();
+                let s = name.to_string_lossy();
+                s != ".DS_Store" && s != "storage_location.txt"
+            }).count() == 0
+        })
+        .unwrap_or(true);
+
+    let (current_bytes, _) = du(&current_dir);
+
+    Ok(json!({
+        "valid": true,
+        "is_same": false,
+        "has_existing_catalog": has_existing_catalog,
+        "has_existing_config": has_existing_config,
+        "existing_catalog_bytes": existing_catalog_bytes,
+        "existing_photos_count": existing_photos_count,
+        "is_empty": is_empty,
+        "target": target_path.to_string_lossy(),
+        "current_dir": current_dir.to_string_lossy(),
+        "current_bytes": current_bytes,
+        "default_dir": default_dir.to_string_lossy(),
+        "is_custom": norm_target != canonicalize_or_parent(&default_dir),
+    }))
+}
+
+fn copy_dir_recursive(
+    core: &Core,
+    src: &Path,
+    dst: &Path,
+    done_bytes: &mut u64,
+    total_bytes: u64,
+) -> Result<(), String> {
+    if !dst.exists() {
+        fs::create_dir_all(dst).map_err(es)?;
+    }
+    for entry in fs::read_dir(src).map_err(es)?.flatten() {
+        let src_path = entry.path();
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str == "storage_location.txt" || name_str == ".DS_Store" {
+            continue;
+        }
+        let dst_path = dst.join(&name);
+        let ft = entry.file_type().map_err(es)?;
+        if ft.is_dir() {
+            copy_dir_recursive(core, &src_path, &dst_path, done_bytes, total_bytes)?;
+        } else if ft.is_file() || ft.is_symlink() {
+            core.emit("storage-move-progress", json!({
+                "phase": "copying",
+                "file": name_str,
+                "done_bytes": *done_bytes,
+                "total_bytes": total_bytes,
+            }));
+            let len = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            fs::copy(&src_path, &dst_path).map_err(es)?;
+            *done_bytes += len;
+        }
+    }
+    Ok(())
+}
+
+fn cleanup_old_storage(old_dir: &Path, default_dir: &Path) {
+    let norm_old = canonicalize_or_parent(old_dir);
+    let norm_def = canonicalize_or_parent(default_dir);
+    if let Ok(entries) = fs::read_dir(old_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if norm_old == norm_def && name_str == "storage_location.txt" {
+                continue;
+            }
+            let p = entry.path();
+            if p.is_dir() {
+                let _ = fs::remove_dir_all(&p);
+            } else {
+                let _ = fs::remove_file(&p);
+            }
+        }
+    }
+    if norm_old != norm_def {
+        let _ = fs::remove_dir(old_dir);
+    }
+}
+
+/// Change storage location to `target`.
+/// `mode`:
+/// - "copy" / "move": Copies all catalog data, thumbnails, models, and settings to `target`.
+/// - "existing": Opens existing catalog and configuration at `target` without copying or overwriting.
+/// - "fresh": Initializes a fresh new empty catalog and settings at `target` without touching current data.
+/// `cleanup_old`: when true and mode is "copy"/"move", cleans up old location files after copy.
+pub fn switch_storage_location(core: &Core, target: PathBuf, mode: &str, cleanup_old: bool) -> Result<Value, String> {
+    let old_dir = core.dir();
+    let target_dir = target;
+    fs::create_dir_all(&target_dir).map_err(es)?;
+
+    let norm_target = canonicalize_or_parent(&target_dir);
+    let norm_old = canonicalize_or_parent(&old_dir);
+    if norm_target == norm_old {
+        return Err("Target folder is already the active storage location.".to_string());
+    }
+
+    let (total_bytes, _) = du(&old_dir);
+
+    match mode {
+        "copy" | "move" => {
+            core.emit("storage-move-progress", json!({
+                "phase": "checkpoint",
+                "message": "Flushing database transactions...",
+                "done_bytes": 0,
+                "total_bytes": total_bytes
+            }));
+
+            // Flush and truncate SQLite WAL before copy
+            {
+                let db = core.db();
+                let _ = db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+            }
+
+            // If destination catalog.olcat already exists, create a backup
+            let dest_cat = target_dir.join("catalog.olcat");
+            if dest_cat.is_file() {
+                let bak = target_dir.join(format!("catalog.olcat.bak_{}", crate::new_token()));
+                let _ = fs::copy(&dest_cat, &bak);
+            }
+
+            let mut done_bytes = 0u64;
+            copy_dir_recursive(core, &old_dir, &target_dir, &mut done_bytes, total_bytes)?;
+        }
+        "existing" | "switch" => {
+            let dest_cat = target_dir.join("catalog.olcat");
+            if !dest_cat.is_file() {
+                return Err(format!("No existing catalog.olcat found in {}", target_dir.display()));
+            }
+            core.emit("storage-move-progress", json!({
+                "phase": "switching",
+                "message": "Opening existing catalog and configuration...",
+                "done_bytes": 0,
+                "total_bytes": 0
+            }));
+        }
+        "fresh" => {
+            core.emit("storage-move-progress", json!({
+                "phase": "fresh",
+                "message": "Initializing fresh library at target location...",
+                "done_bytes": 0,
+                "total_bytes": 0
+            }));
+            let dest_cat = target_dir.join("catalog.olcat");
+            if dest_cat.is_file() {
+                let bak = target_dir.join(format!("catalog.olcat.prev_{}", crate::new_token()));
+                let _ = fs::rename(&dest_cat, &bak);
+                let _ = fs::remove_file(target_dir.join("catalog.olcat-wal"));
+                let _ = fs::remove_file(target_dir.join("catalog.olcat-shm"));
+            }
+        }
+        _ => return Err(format!("Unknown storage switch mode '{mode}'. Choose 'copy', 'existing', or 'fresh'.")),
+    }
+
+    // Open database at target location
+    let new_db = catalog::open(&target_dir.join("catalog.olcat"))?;
+
+    // Update persistent pointer
+    let default_dir = crate::default_data_dir();
+    let is_custom = norm_target != canonicalize_or_parent(&default_dir);
+    crate::persist_storage_location(if is_custom { Some(&target_dir) } else { None })?;
+
+    // Atomically switch engine connection and directory (drops old DB connection)
+    core.switch_storage_engine(target_dir.clone(), new_db)?;
+
+    // Clean up old location only if explicitly requested AND mode was "copy"/"move"
+    if (mode == "move" || cleanup_old) && mode != "existing" && mode != "switch" && mode != "fresh" {
+        cleanup_old_storage(&old_dir, &default_dir);
+    }
+
+    // If switching to an existing or copied catalog that has 0 photos,
+    // automatically sync library folders so details and photos are immediately available
+    if mode != "fresh" {
+        let photos_in_target: i64 = core.db().query_row(
+            "SELECT COUNT(*) FROM photos WHERE master_id IS NULL AND deleted_at IS NULL",
+            [],
+            |r| r.get(0)
+        ).unwrap_or(0);
+        if photos_in_target == 0 {
+            let _ = sync_folders(core, None);
+        }
+    }
+
+    core.emit("storage-move-progress", json!({
+        "phase": "done",
+        "message": "Storage successfully updated",
+        "new_dir": target_dir.to_string_lossy()
+    }));
+
+    core.emit("storage-location-changed", json!({
+        "new_dir": target_dir.to_string_lossy(),
+        "is_custom": is_custom,
+        "mode": mode,
+    }));
+
+    Ok(json!({
+        "success": true,
+        "data_dir": target_dir.to_string_lossy(),
+        "is_custom": is_custom,
+        "total_bytes": total_bytes,
+        "message": format!("Storage switched to {}", target_dir.display()),
+    }))
+}
+
+pub fn reset_storage_location(core: &Core, mode: &str, cleanup_old: bool) -> Result<Value, String> {
+    let def = crate::default_data_dir();
+    let norm_def = canonicalize_or_parent(&def);
+    let norm_cur = canonicalize_or_parent(&core.dir());
+    if norm_cur == norm_def {
+        return Ok(json!({
+            "success": true,
+            "data_dir": def.to_string_lossy(),
+            "is_custom": false,
+            "message": "Already using default storage location.",
+        }));
+    }
+    switch_storage_location(core, def, mode, cleanup_old)
+}
+
+/// Scan and sync photos from given folder paths into the active catalog, preserving existing
+/// photo_id and develop adjustments from .olxmp sidecars and matching existing thumbnails.
+pub fn sync_folders(core: &Core, folders: Option<Vec<String>>) -> Result<usize, String> {
+    let mut dirs_to_scan = Vec::new();
+
+    if let Some(custom) = folders {
+        for f in custom {
+            let p = PathBuf::from(f);
+            if p.is_dir() {
+                dirs_to_scan.push(p);
+            }
+        }
+    }
+
+    // Always check for standard photo library folders if none provided
+    if dirs_to_scan.is_empty() {
+        let candidate = PathBuf::from("/Volumes/RIT-2TB/Photo");
+        if candidate.is_dir() {
+            dirs_to_scan.push(candidate);
+        }
+    }
+
+    // Always include Google Photos remote folder if it exists in the active data dir
+    let google_dir = core.dir().join("remote").join("Google Photos");
+    if google_dir.is_dir() && !dirs_to_scan.contains(&google_dir) {
+        dirs_to_scan.push(google_dir);
+    }
+
+    let mut all_files = Vec::new();
+    for dir in dirs_to_scan {
+        walk(&dir, true, &mut all_files);
+    }
+
+    if all_files.is_empty() {
+        return Ok(0);
+    }
+
+    let added = catalog::import_files(core, all_files, &|_, _| {})?;
+    Ok(added.len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1121,6 +1476,63 @@ mod tests {
         let cleaned_albums = clean(&core, "immich_albums").unwrap();
         assert_eq!(cleaned_albums, 1);
         assert!(!immich_album.exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_relocate_storage_location() {
+        let dir = std::env::temp_dir().join(format!("ols-relocate-test-{}", crate::new_token()));
+        let initial_data = dir.join("initial_data");
+        let target_data = dir.join("target_data");
+        let core = Core::open(initial_data.clone()).unwrap();
+
+        // Add a photo and thumbnail
+        let photos = dir.join("photos");
+        fs::create_dir_all(&photos).unwrap();
+        fs::write(photos.join("test.jpg"), [0u8; 100]).unwrap();
+        let photo_id = catalog::add_photo(&core.db(), &photos.join("test.jpg").to_string_lossy(), &photos.to_string_lossy(), "test.jpg", &Default::default(), &Default::default()).unwrap().unwrap();
+        fs::write(core.thumb_path(photo_id), [0u8; 50]).unwrap();
+
+        // 1. Validation checks
+        let v_same = validate_location(&core, &initial_data.to_string_lossy()).unwrap();
+        assert_eq!(v_same["is_same"], true);
+        assert_eq!(v_same["valid"], false);
+
+        let v_inside = validate_location(&core, &initial_data.join("nested").to_string_lossy()).unwrap();
+        assert_eq!(v_inside["valid"], false);
+
+        let v_valid = validate_location(&core, &target_data.to_string_lossy()).unwrap();
+        assert_eq!(v_valid["valid"], true);
+        assert_eq!(v_valid["has_existing_catalog"], false);
+
+        // 2. Perform move
+        let res = switch_storage_location(&core, target_data.clone(), "move", true).unwrap();
+        assert_eq!(res["success"], true);
+        assert_eq!(core.dir(), target_data);
+
+        // 3. Verify data exists in target location and can still query catalog
+        assert!(target_data.join("catalog.olcat").is_file());
+        assert!(core.thumb_path(photo_id).is_file());
+        let p = core.photo(photo_id).unwrap();
+        assert_eq!(p.filename, "test.jpg");
+
+        // 4. Verify old files were cleaned up from initial_data
+        assert!(!initial_data.join("catalog.olcat").exists());
+
+        // 5. Test "fresh" mode
+        let fresh_data = dir.join("fresh_data");
+        let res_fresh = switch_storage_location(&core, fresh_data.clone(), "fresh", false).unwrap();
+        assert_eq!(res_fresh["success"], true);
+        assert_eq!(core.dir(), fresh_data);
+        assert!(fresh_data.join("catalog.olcat").is_file());
+        assert_eq!(catalog::photos(&core.db(), &[photo_id]).unwrap().len(), 0);
+
+        // 6. Test "existing" mode switching back to target_data
+        let res_existing = switch_storage_location(&core, target_data.clone(), "existing", false).unwrap();
+        assert_eq!(res_existing["success"], true);
+        assert_eq!(core.dir(), target_data);
+        assert_eq!(catalog::photos(&core.db(), &[photo_id]).unwrap().len(), 1);
 
         let _ = fs::remove_dir_all(&dir);
     }

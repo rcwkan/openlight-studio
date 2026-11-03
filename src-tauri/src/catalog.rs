@@ -429,10 +429,46 @@ fn set_state(c: &Connection, id: i64, json: &str, hid: i64, edited: bool) -> Res
 
 /// New history step; drops any redo branch.
 pub fn save_develop(c: &Connection, id: i64, d: &Develop, label: &str) -> Result<(), String> {
+    save_develop_ext(c, id, d, label, None)
+}
+
+/// Save develop state to history, optionally replacing/updating the current step in-place
+/// if its label matches `replace_prefix` (e.g. continuous profile strength adjustments).
+pub fn save_develop_ext(
+    c: &Connection,
+    id: i64,
+    d: &Develop,
+    label: &str,
+    replace_prefix: Option<&str>,
+) -> Result<(), String> {
     let json = serde_json::to_string(d).map_err(es)?;
     let pos: Option<i64> = c
         .query_row("SELECT history_pos FROM photos WHERE id = ?", [id], |r| r.get(0))
         .map_err(|_| format!("photo {id} not found"))?;
+
+    if let (Some(cur_hid), Some(prefix)) = (pos, replace_prefix) {
+        if !prefix.is_empty() {
+            let cur_label: Option<String> = c
+                .query_row("SELECT label FROM history WHERE id = ? AND photo_id = ?", params![cur_hid, id], |r| r.get(0))
+                .ok();
+            if let Some(cur) = cur_label {
+                let matches = cur.starts_with(prefix)
+                    || (prefix.starts_with("Profile: ")
+                        && (cur == format!("Auto: {}", &prefix["Profile: ".len()..])
+                            || cur.starts_with(&format!("Auto: {} (", &prefix["Profile: ".len()..]))));
+                if matches {
+                    c.execute("DELETE FROM history WHERE photo_id = ? AND id > ?", params![id, cur_hid]).map_err(es)?;
+                    c.execute(
+                        "UPDATE history SET label = ?, develop_json = ?, created_at = datetime('now') WHERE id = ?",
+                        params![label, json, cur_hid],
+                    )
+                    .map_err(es)?;
+                    return set_state(c, id, &json, cur_hid, *d != Develop::default());
+                }
+            }
+        }
+    }
+
     if let Some(pos) = pos {
         c.execute("DELETE FROM history WHERE photo_id = ? AND id > ?", params![id, pos]).map_err(es)?;
     }
@@ -755,9 +791,18 @@ pub fn sidecar_json(p: &Photo, d: &Develop) -> String {
 }
 
 pub fn read_sidecar(path: &Path) -> Option<Develop> {
+    read_sidecar_with_id(path).map(|(_, d)| d)
+}
+
+pub fn read_sidecar_with_id(path: &Path) -> Option<(Option<i64>, Develop)> {
     let s = fs::read_to_string(sidecar_path(&path.to_string_lossy())).ok()?;
     let v: Value = serde_json::from_str(&s).ok()?;
-    serde_json::from_value(v.get("pipeline")?.clone()).ok()
+    let d: Develop = serde_json::from_value(v.get("pipeline")?.clone()).ok()?;
+    let id: Option<i64> = v.get("photo_id")
+        .and_then(|p| p.as_str())
+        .and_then(|p| p.strip_prefix("ols:"))
+        .and_then(|p| p.parse().ok());
+    Some((id, d))
 }
 
 /// Masters only (virtual copies live in the catalog, as in Lightroom); Immich photos keep
@@ -790,32 +835,74 @@ pub struct Meta {
 
 /// New master row with its first history step; None when `path` is already in the catalog.
 pub fn add_photo(c: &Connection, path: &str, folder: &str, filename: &str, m: &Meta, d: &Develop) -> Result<Option<i64>, String> {
+    add_photo_with_id(c, None, path, folder, filename, m, d)
+}
+
+/// New master row with an optionally specified id; None when `path` is already in the catalog.
+pub fn add_photo_with_id(
+    c: &Connection,
+    specified_id: Option<i64>,
+    path: &str,
+    folder: &str,
+    filename: &str,
+    m: &Meta,
+    d: &Develop,
+) -> Result<Option<i64>, String> {
     let json = serde_json::to_string(d).map_err(es)?;
-    let n = c
-        .execute(
-            "INSERT OR IGNORE INTO photos (path, folder, filename, captured_at, camera, lens, iso, aperture, shutter,
-               focal_length, develop_json, edited_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? THEN datetime('now') END)",
-            params![
-                path,
-                folder,
-                filename,
-                m.captured_at,
-                m.camera,
-                m.lens,
-                m.iso,
-                m.aperture,
-                m.shutter,
-                m.focal_length,
-                json,
-                *d != Develop::default(),
-            ],
-        )
-        .map_err(es)?;
+    let (n, id) = if let Some(req_id) = specified_id.filter(|&id| {
+        // Only use specified_id if no row with this ID already exists
+        !c.query_row("SELECT 1 FROM photos WHERE id = ?", [id], |_| Ok(true)).unwrap_or(false)
+    }) {
+        let n = c
+            .execute(
+                "INSERT OR IGNORE INTO photos (id, path, folder, filename, captured_at, camera, lens, iso, aperture, shutter,
+                   focal_length, develop_json, edited_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? THEN datetime('now') END)",
+                params![
+                    req_id,
+                    path,
+                    folder,
+                    filename,
+                    m.captured_at,
+                    m.camera,
+                    m.lens,
+                    m.iso,
+                    m.aperture,
+                    m.shutter,
+                    m.focal_length,
+                    json,
+                    *d != Develop::default(),
+                ],
+            )
+            .map_err(es)?;
+        (n, req_id)
+    } else {
+        let n = c
+            .execute(
+                "INSERT OR IGNORE INTO photos (path, folder, filename, captured_at, camera, lens, iso, aperture, shutter,
+                   focal_length, develop_json, edited_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? THEN datetime('now') END)",
+                params![
+                    path,
+                    folder,
+                    filename,
+                    m.captured_at,
+                    m.camera,
+                    m.lens,
+                    m.iso,
+                    m.aperture,
+                    m.shutter,
+                    m.focal_length,
+                    json,
+                    *d != Develop::default(),
+                ],
+            )
+            .map_err(es)?;
+        (n, c.last_insert_rowid())
+    };
     if n == 0 {
         return Ok(None);
     }
-    let id = c.last_insert_rowid();
     c.execute("INSERT INTO history (photo_id, label, develop_json) VALUES (?, 'Import', ?)", params![id, json]).map_err(es)?;
     c.execute("UPDATE photos SET history_pos = ? WHERE id = ?", params![c.last_insert_rowid(), id]).map_err(es)?;
     Ok(Some(id))
@@ -968,13 +1055,13 @@ pub fn import_files(core: &Core, mut files: Vec<PathBuf>, progress: &(dyn Fn(usi
         let (batch, tail) = rest.split_at(size.min(rest.len()));
         rest = tail;
         size = 32;
-        let metas: Vec<(PathBuf, Meta, Develop)> = pool.install(|| {
+        let metas: Vec<(PathBuf, Meta, Option<i64>, Develop)> = pool.install(|| {
             batch
                 .par_iter()
                 .map(|p| {
                     let m = read_exif(p);
-                    let d = read_sidecar(p).unwrap_or_default();
-                    (p.clone(), m, d)
+                    let (sid, d) = read_sidecar_with_id(p).unwrap_or_else(|| (None, read_sidecar(p).unwrap_or_default()));
+                    (p.clone(), m, sid, d)
                 })
                 .collect()
         });
@@ -982,10 +1069,10 @@ pub fn import_files(core: &Core, mut files: Vec<PathBuf>, progress: &(dyn Fn(usi
         {
             let mut c = core.db();
             let tx = c.transaction().map_err(es)?;
-            for (p, m, d) in &metas {
+            for (p, m, sid, d) in &metas {
                 let folder = p.parent().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
                 let name = p.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
-                if let Some(id) = add_photo(&tx, &p.to_string_lossy(), &folder, &name, m, d)? {
+                if let Some(id) = add_photo_with_id(&tx, *sid, &p.to_string_lossy(), &folder, &name, m, d)? {
                     added.push((id, p.clone(), m.orientation));
                 }
             }
@@ -995,7 +1082,15 @@ pub fn import_files(core: &Core, mut files: Vec<PathBuf>, progress: &(dyn Fn(usi
             added
                 .par_iter()
                 .filter_map(|(id, p, o)| {
-                    let r = make_thumb(p, *o).and_then(|(t, w, h)| write_jpeg(&core.thumb_path(*id), &t).map(|_| (w, h)));
+                    let thumb_p = core.thumb_path(*id);
+                    let r = if thumb_p.is_file() {
+                        // Reuse existing thumbnail from disk if present
+                        image::image_dimensions(&thumb_p).map(|(w, h)| (w, h)).or_else(|_| {
+                            make_thumb(p, *o).map(|(_, w, h)| (w, h))
+                        })
+                    } else {
+                        make_thumb(p, *o).and_then(|(t, w, h)| write_jpeg(&thumb_p, &t).map(|_| (w, h)))
+                    };
                     progress(done.fetch_add(1, Ordering::Relaxed) + 1, total);
                     match r {
                         Ok((w, h)) => Some((*id, w, h)),
@@ -1223,5 +1318,72 @@ mod tests {
         assert_eq!(h.len(), 1);
         assert_eq!(h[0]["label"], "Import");
         assert!(h[0]["current"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn test_save_develop_replace_profile_strength() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(SCHEMA).unwrap();
+
+        c.execute(
+            "INSERT INTO photos (id, path, folder, filename, width, height) VALUES (1, '/photos/a.jpg', '/photos', 'a.jpg', 6000, 4000)",
+            [],
+        )
+        .unwrap();
+
+        let mut d = Develop::default();
+        save_develop(&c, 1, &d, "Import").unwrap();
+        assert_eq!(history(&c, 1).unwrap().len(), 1);
+
+        // Apply profile at 100%
+        d.basic_tone.exposure = 0.2;
+        save_develop_ext(&c, 1, &d, "Profile: Landscape (100%)", Some("Profile: Landscape")).unwrap();
+        let h = history(&c, 1).unwrap();
+        assert_eq!(h.len(), 2);
+        assert_eq!(h[0]["label"], "Profile: Landscape (100%)");
+
+        // Adjust profile strength multiple times (e.g. 20%, 200%, 92%, 143%)
+        d.basic_tone.exposure = 0.04;
+        save_develop_ext(&c, 1, &d, "Profile: Landscape (20%)", Some("Profile: Landscape")).unwrap();
+        let h = history(&c, 1).unwrap();
+        assert_eq!(h.len(), 2, "Should keep single history entry when adjusting profile strength");
+        assert_eq!(h[0]["label"], "Profile: Landscape (20%)");
+
+        d.basic_tone.exposure = 0.3;
+        save_develop_ext(&c, 1, &d, "Profile: Landscape (143%)", Some("Profile: Landscape")).unwrap();
+        let h = history(&c, 1).unwrap();
+        assert_eq!(h.len(), 2, "Should still be 2 entries");
+        assert_eq!(h[0]["label"], "Profile: Landscape (143%)");
+
+        // Now apply another tuning (e.g. Exposure +0.5)
+        d.basic_tone.exposure = 0.8;
+        save_develop(&c, 1, &d, "Exposure +0.5").unwrap();
+        let h = history(&c, 1).unwrap();
+        assert_eq!(h.len(), 3, "New tuning creates new history entry");
+        assert_eq!(h[0]["label"], "Exposure +0.5");
+
+        // Adjusting profile strength now (after another tuning) creates a new history entry!
+        d.basic_tone.exposure = 0.9;
+        save_develop_ext(&c, 1, &d, "Profile: Landscape (120%)", Some("Profile: Landscape")).unwrap();
+        let h = history(&c, 1).unwrap();
+        assert_eq!(h.len(), 4, "Profile adjustment after another tuning creates a new entry");
+        assert_eq!(h[0]["label"], "Profile: Landscape (120%)");
+
+        // And adjusting again updates this new 4th entry
+        d.basic_tone.exposure = 0.85;
+        save_develop_ext(&c, 1, &d, "Profile: Landscape (110%)", Some("Profile: Landscape")).unwrap();
+        let h = history(&c, 1).unwrap();
+        assert_eq!(h.len(), 4);
+        assert_eq!(h[0]["label"], "Profile: Landscape (110%)");
+
+        // Test replacement when previous step was legacy "Auto: Landscape"
+        let d_auto = Develop::default();
+        save_develop(&c, 1, &d_auto, "Auto: Landscape").unwrap();
+        let h = history(&c, 1).unwrap();
+        let len_before = h.len();
+        save_develop_ext(&c, 1, &d_auto, "Profile: Landscape (143%)", Some("Profile: Landscape")).unwrap();
+        let h = history(&c, 1).unwrap();
+        assert_eq!(h.len(), len_before, "Should replace Auto: Landscape");
+        assert_eq!(h[0]["label"], "Profile: Landscape (143%)");
     }
 }
