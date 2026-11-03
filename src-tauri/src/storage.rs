@@ -962,7 +962,7 @@ pub fn duplicate(core: &Arc<Core>, from: &Place, to: &Place, o: &DuplicateOption
     }))
 }
 
-fn canonicalize_or_parent(p: &Path) -> PathBuf {
+pub(crate) fn canonicalize_or_parent(p: &Path) -> PathBuf {
     if let Ok(c) = fs::canonicalize(p) {
         c
     } else if let Some(parent) = p.parent() {

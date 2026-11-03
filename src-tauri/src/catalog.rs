@@ -433,7 +433,7 @@ pub fn save_develop(c: &Connection, id: i64, d: &Develop, label: &str) -> Result
 }
 
 /// Save develop state to history, optionally replacing/updating the current step in-place
-/// if its label matches `replace_prefix` (e.g. continuous profile strength adjustments).
+/// if its label matches `replace_prefix` (e.g. continuous slider or profile strength adjustments).
 pub fn save_develop_ext(
     c: &Connection,
     id: i64,
@@ -452,18 +452,23 @@ pub fn save_develop_ext(
                 .query_row("SELECT label FROM history WHERE id = ? AND photo_id = ?", params![cur_hid, id], |r| r.get(0))
                 .ok();
             if let Some(cur) = cur_label {
-                let matches = cur.starts_with(prefix)
-                    || (prefix.starts_with("Profile: ")
-                        && (cur == format!("Auto: {}", &prefix["Profile: ".len()..])
-                            || cur.starts_with(&format!("Auto: {} (", &prefix["Profile: ".len()..]))));
-                if matches {
-                    c.execute("DELETE FROM history WHERE photo_id = ? AND id > ?", params![id, cur_hid]).map_err(es)?;
-                    c.execute(
-                        "UPDATE history SET label = ?, develop_json = ?, created_at = datetime('now') WHERE id = ?",
-                        params![label, json, cur_hid],
-                    )
-                    .map_err(es)?;
-                    return set_state(c, id, &json, cur_hid, *d != Develop::default());
+                const PROTECTED: &[&str] = &["Import", "Virtual copy", "Save as new photo", "Duplicate"];
+                if !PROTECTED.contains(&cur.as_str()) {
+                    let matches = cur == prefix
+                        || cur == label
+                        || cur.starts_with(prefix)
+                        || (prefix.starts_with("Profile: ")
+                            && (cur == format!("Auto: {}", &prefix["Profile: ".len()..])
+                                || cur.starts_with(&format!("Auto: {} (", &prefix["Profile: ".len()..]))));
+                    if matches {
+                        c.execute("DELETE FROM history WHERE photo_id = ? AND id > ?", params![id, cur_hid]).map_err(es)?;
+                        c.execute(
+                            "UPDATE history SET label = ?, develop_json = ?, created_at = datetime('now') WHERE id = ?",
+                            params![label, json, cur_hid],
+                        )
+                        .map_err(es)?;
+                        return set_state(c, id, &json, cur_hid, *d != Develop::default());
+                    }
                 }
             }
         }
@@ -1083,14 +1088,8 @@ pub fn import_files(core: &Core, mut files: Vec<PathBuf>, progress: &(dyn Fn(usi
                 .par_iter()
                 .filter_map(|(id, p, o)| {
                     let thumb_p = core.thumb_path(*id);
-                    let r = if thumb_p.is_file() {
-                        // Reuse existing thumbnail from disk if present
-                        image::image_dimensions(&thumb_p).map(|(w, h)| (w, h)).or_else(|_| {
-                            make_thumb(p, *o).map(|(_, w, h)| (w, h))
-                        })
-                    } else {
-                        make_thumb(p, *o).and_then(|(t, w, h)| write_jpeg(&thumb_p, &t).map(|_| (w, h)))
-                    };
+                    // Always generate fresh thumbnail for newly added photo to avoid inheriting stale/mismatched thumbnails
+                    let r = make_thumb(p, *o).and_then(|(t, w, h)| write_jpeg(&thumb_p, &t).map(|_| (w, h)));
                     progress(done.fetch_add(1, Ordering::Relaxed) + 1, total);
                     match r {
                         Ok((w, h)) => Some((*id, w, h)),
@@ -1114,9 +1113,152 @@ pub fn import_files(core: &Core, mut files: Vec<PathBuf>, progress: &(dyn Fn(usi
     Ok(ids)
 }
 
+/// Regenerate thumbnails for specified photo IDs, a specific folder, or all catalog photos.
+/// Re-extracts or re-renders previews from source files and increments `thumb_v` to bust cache.
+pub fn regenerate_thumbnails(
+    core: &Core,
+    ids: Option<Vec<i64>>,
+    folder: Option<String>,
+    progress: &(dyn Fn(usize, usize) + Sync),
+) -> Result<usize, String> {
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(16).build().map_err(es)?;
+    let mut sql = "SELECT id, path, develop_json, edited_at, master_id FROM photos WHERE deleted_at IS NULL".to_string();
+    let mut args: Vec<Sql> = vec![];
+
+    if let Some(folder_path) = folder {
+        sql += " AND folder = ?";
+        args.push(folder_path.into());
+    } else if let Some(target_ids) = ids {
+        if target_ids.is_empty() {
+            return Ok(0);
+        }
+        sql += &format!(" AND id IN ({})", target_ids.iter().map(i64::to_string).collect::<Vec<_>>().join(","));
+    }
+
+    struct TargetPhoto {
+        id: i64,
+        path: String,
+        develop_json: String,
+        is_edited: bool,
+    }
+
+    let photos: Vec<TargetPhoto> = {
+        let c = core.db();
+        let mut st = c.prepare(&sql).map_err(es)?;
+        st.query_map(params_from_iter(args), |r| {
+            let is_edited = r.get::<_, Option<String>>(3)?.is_some() || r.get::<_, Option<i64>>(4)?.is_some();
+            Ok(TargetPhoto {
+                id: r.get(0)?,
+                path: r.get(1)?,
+                develop_json: r.get(2)?,
+                is_edited,
+            })
+        })
+        .map_err(es)?
+        .collect::<Result<_, _>>()
+        .map_err(es)?
+    };
+
+    let total = photos.len();
+    if total == 0 {
+        return Ok(0);
+    }
+    progress(0, total);
+
+    let done = AtomicUsize::new(0);
+    let mut updated: Vec<(i64, u32, u32)> = vec![];
+
+    for chunk in photos.chunks(32) {
+        let res: Vec<(i64, u32, u32)> = pool.install(|| {
+            chunk
+                .par_iter()
+                .filter_map(|ph| {
+                    let p = Path::new(&ph.path);
+                    if !p.is_file() {
+                        return None;
+                    }
+                    let orientation = exif_orientation(p);
+                    let thumb_p = core.thumb_path(ph.id);
+                    let res = if ph.is_edited {
+                        let dev = serde_json::from_str::<Develop>(&ph.develop_json).ok();
+                        if let Some(d) = dev.filter(|d| *d != Develop::default()) {
+                            if let Ok(proxy) = core.proxy(&ph.path) {
+                                let out = develop::render(&*proxy, &d, &develop::Opts {
+                                    ai_cache_dir: Some(core.ai_cache_dir(ph.id)),
+                                    ..Default::default()
+                                });
+                                let thumb = to_dynamic(&out).thumbnail(THUMB, THUMB);
+                                write_jpeg(&thumb_p, &thumb).map(|_| (proxy.w as u32, proxy.h as u32))
+                            } else {
+                                make_thumb(p, orientation).and_then(|(t, w, h)| write_jpeg(&thumb_p, &t).map(|_| (w, h)))
+                            }
+                        } else {
+                            make_thumb(p, orientation).and_then(|(t, w, h)| write_jpeg(&thumb_p, &t).map(|_| (w, h)))
+                        }
+                    } else {
+                        make_thumb(p, orientation).and_then(|(t, w, h)| write_jpeg(&thumb_p, &t).map(|_| (w, h)))
+                    };
+
+                    let cur = done.fetch_add(1, Ordering::Relaxed) + 1;
+                    progress(cur, total);
+
+                    match res {
+                        Ok((w, h)) => Some((ph.id, w, h)),
+                        Err(e) => {
+                            eprintln!("regenerate thumb {}: {e}", ph.path);
+                            None
+                        }
+                    }
+                })
+                .collect()
+        });
+
+        if !res.is_empty() {
+            let mut c = core.db();
+            let tx = c.transaction().map_err(es)?;
+            for (id, w, h) in &res {
+                let _ = tx.execute(
+                    "UPDATE photos SET thumb_v = thumb_v + 1, width = ?, height = ? WHERE id = ?",
+                    params![w, h, id],
+                );
+            }
+            tx.commit().map_err(es)?;
+            for (id, _, _) in &res {
+                core.emit("thumb-changed", json!({"id": id}));
+            }
+            updated.extend(res);
+        }
+    }
+
+    progress(total, total);
+    core.emit("catalog-changed", json!({}));
+    Ok(updated.len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_regenerate_thumbnails() {
+        let dir = std::env::temp_dir().join(format!("ols-test-regen-{}", crate::new_token()));
+        let core = Core::open(dir.clone()).unwrap();
+        let photos_dir = dir.join("photos");
+        fs::create_dir_all(&photos_dir).unwrap();
+        let photo_path = photos_dir.join("test.jpg");
+        let img = DynamicImage::new_rgb8(100, 100);
+        img.save(&photo_path).unwrap();
+
+        let id = add_photo(&core.db(), &photo_path.to_string_lossy(), &photos_dir.to_string_lossy(), "test.jpg", &Default::default(), &Default::default()).unwrap().unwrap();
+        assert_eq!(core.thumb_path(id).exists(), false);
+
+        let count = regenerate_thumbnails(&core, Some(vec![id]), None, &|_, _| {}).unwrap();
+        assert_eq!(count, 1);
+        assert!(core.thumb_path(id).is_file());
+
+        let p = core.photo(id).unwrap();
+        assert_eq!(p.thumb_v, 1);
+    }
 
     #[test]
     fn test_filter_and_save_as_new_photo() {
@@ -1385,5 +1527,74 @@ mod tests {
         let h = history(&c, 1).unwrap();
         assert_eq!(h.len(), len_before, "Should replace Auto: Landscape");
         assert_eq!(h[0]["label"], "Profile: Landscape (143%)");
+    }
+
+    #[test]
+    fn test_save_develop_consecutive_tuning_coalesces() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(SCHEMA).unwrap();
+
+        c.execute(
+            "INSERT INTO photos (id, path, folder, filename, width, height) VALUES (1, '/photos/a.jpg', '/photos', 'a.jpg', 6000, 4000)",
+            [],
+        )
+        .unwrap();
+
+        let mut d = Develop::default();
+        save_develop(&c, 1, &d, "Import").unwrap();
+        assert_eq!(history(&c, 1).unwrap().len(), 1);
+
+        // Adjusting "Natural" first time creates 1 history entry
+        d.hdr.natural = 50.0;
+        save_develop_ext(&c, 1, &d, "Natural", Some("Natural")).unwrap();
+        let h = history(&c, 1).unwrap();
+        assert_eq!(h.len(), 2);
+        assert_eq!(h[0]["label"], "Natural");
+
+        // Repeatedly adjusting "Natural" coalesces in-place into the same history entry
+        d.hdr.natural = 70.0;
+        save_develop_ext(&c, 1, &d, "Natural", Some("Natural")).unwrap();
+        let h = history(&c, 1).unwrap();
+        assert_eq!(h.len(), 2, "Second Natural tweak must coalesce in-place");
+
+        d.hdr.natural = 85.0;
+        save_develop_ext(&c, 1, &d, "Natural", Some("Natural")).unwrap();
+        let h = history(&c, 1).unwrap();
+        assert_eq!(h.len(), 2, "Third Natural tweak coalesces in-place");
+        assert_eq!(h[0]["label"], "Natural");
+
+        // Now change another tuning: "Contrast"
+        d.hdr.contrast_weight = 30.0;
+        save_develop_ext(&c, 1, &d, "Contrast", Some("Contrast")).unwrap();
+        let h = history(&c, 1).unwrap();
+        assert_eq!(h.len(), 3, "Changing another tuning must create a new history step");
+        assert_eq!(h[0]["label"], "Contrast");
+
+        // Repeatedly adjusting "Contrast" coalesces into this Contrast step
+        d.hdr.contrast_weight = 60.0;
+        save_develop_ext(&c, 1, &d, "Contrast", Some("Contrast")).unwrap();
+        let h = history(&c, 1).unwrap();
+        assert_eq!(h.len(), 3, "Repeated Contrast tweak coalesces");
+        assert_eq!(h[0]["label"], "Contrast");
+
+        // Adjusting "Natural" again after Contrast creates a new history entry
+        d.hdr.natural = 95.0;
+        save_develop_ext(&c, 1, &d, "Natural", Some("Natural")).unwrap();
+        let h = history(&c, 1).unwrap();
+        assert_eq!(h.len(), 4, "Tuning Natural again creates a new history step");
+        assert_eq!(h[0]["label"], "Natural");
+
+        // Tweaking it again coalesces into that step
+        d.hdr.natural = 100.0;
+        save_develop_ext(&c, 1, &d, "Natural", Some("Natural")).unwrap();
+        let h = history(&c, 1).unwrap();
+        assert_eq!(h.len(), 4);
+
+        // Discrete actions like "Add mask" do NOT coalesce
+        save_develop(&c, 1, &d, "Add mask").unwrap();
+        assert_eq!(history(&c, 1).unwrap().len(), 5);
+
+        save_develop(&c, 1, &d, "Add mask").unwrap();
+        assert_eq!(history(&c, 1).unwrap().len(), 6, "Adding a second mask must not overwrite the first");
     }
 }

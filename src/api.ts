@@ -568,6 +568,9 @@ export const api = {
     invoke<StorageMoveResult>("reset_storage_location", { mode, cleanupOld: cleanup_old ?? false }),
   syncLibraryFolders: (folders?: string[]) =>
     invoke<number>("sync_library_folders", { folders: folders ?? null }),
+  /** Re-extract or re-render thumbnails from source files on disk to fix missing or mismatched previews */
+  regenerateThumbnails: (opts?: { ids?: number[]; folder?: string }) =>
+    invoke<number>("regenerate_thumbnails", { ids: opts?.ids ?? null, folder: opts?.folder ?? null }),
   /** Open/reveal file or directory in OS native file manager (macOS Finder, Windows File Explorer, Linux file manager) */
   showInFolder: (path: string) => invoke<void>("show_in_folder", { path }),
   /** Returns how many files, photos or history steps went */

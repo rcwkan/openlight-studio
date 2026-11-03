@@ -120,35 +120,71 @@ pub fn default_data_dir() -> PathBuf {
 
 /// Pointer file stored in default application data directory referencing custom storage folder.
 pub fn pointer_file() -> PathBuf {
-    default_data_dir().join("storage_location.txt")
+    #[cfg(test)]
+    {
+        std::env::temp_dir().join("openlight-test-default").join("storage_location.txt")
+    }
+    #[cfg(not(test))]
+    {
+        default_data_dir().join("storage_location.txt")
+    }
 }
 
 /// Check if a custom storage directory is configured via environment variable or pointer file.
 pub fn configured_data_dir() -> Option<PathBuf> {
     if let Some(custom) = std::env::var_os("OPENLIGHT_DATA_DIR") {
-        return Some(PathBuf::from(custom));
-    }
-    let p = pointer_file();
-    if let Ok(content) = fs::read_to_string(&p) {
-        let trimmed = content.trim();
-        if !trimmed.is_empty() {
-            let path = PathBuf::from(trimmed);
-            return Some(path);
+        let p = PathBuf::from(custom);
+        if p.is_dir() {
+            return Some(p);
         }
     }
-    if let Some(config_dir) = dirs::config_dir() {
-        let alt = config_dir.join(APP_ID).join("storage_location.txt");
-        if alt != p {
-            if let Ok(content) = fs::read_to_string(&alt) {
-                let trimmed = content.trim();
-                if !trimmed.is_empty() {
-                    let path = PathBuf::from(trimmed);
+    #[cfg(test)]
+    {
+        let p = pointer_file();
+        if let Ok(content) = fs::read_to_string(&p) {
+            let trimmed = content.trim();
+            if !trimmed.is_empty() {
+                let path = PathBuf::from(trimmed);
+                if path.is_dir() {
                     return Some(path);
                 }
             }
         }
+        return None;
     }
-    None
+    #[cfg(not(test))]
+    {
+        let p = pointer_file();
+        if let Ok(content) = fs::read_to_string(&p) {
+            let trimmed = content.trim();
+            if !trimmed.is_empty() {
+                let path = PathBuf::from(trimmed);
+                if path.is_dir() {
+                    return Some(path);
+                } else {
+                    // Stale or temp directory that no longer exists - remove stale pointer file
+                    let _ = fs::remove_file(&p);
+                }
+            }
+        }
+        if let Some(config_dir) = dirs::config_dir() {
+            let alt = config_dir.join(APP_ID).join("storage_location.txt");
+            if alt != p {
+                if let Ok(content) = fs::read_to_string(&alt) {
+                    let trimmed = content.trim();
+                    if !trimmed.is_empty() {
+                        let path = PathBuf::from(trimmed);
+                        if path.is_dir() {
+                            return Some(path);
+                        } else {
+                            let _ = fs::remove_file(&alt);
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
 }
 
 /// Catalog location; `OPENLIGHT_DATA_DIR` selects another catalog folder.
@@ -158,31 +194,53 @@ pub fn data_dir() -> PathBuf {
 
 /// Persist custom storage pointer file, or remove if reverting to default.
 pub fn persist_storage_location(target: Option<&Path>) -> Result<(), String> {
-    let def = default_data_dir();
-    let p = pointer_file();
-    match target {
-        Some(t) if t != def => {
-            let _ = fs::create_dir_all(&def);
-            fs::write(&p, t.to_string_lossy().as_bytes()).map_err(es)?;
-            if let Some(config_dir) = dirs::config_dir() {
-                let alt_dir = config_dir.join(APP_ID);
-                if alt_dir != def {
-                    let _ = fs::create_dir_all(&alt_dir);
-                    let _ = fs::write(alt_dir.join("storage_location.txt"), t.to_string_lossy().as_bytes());
-                }
+    #[cfg(test)]
+    {
+        let def = default_data_dir();
+        let p = pointer_file();
+        match target {
+            Some(t) if t != def => {
+                let _ = fs::create_dir_all(&def);
+                fs::write(&p, t.to_string_lossy().as_bytes()).map_err(es)?;
+            }
+            _ => {
+                let _ = fs::remove_file(&p);
             }
         }
-        _ => {
+        return Ok(());
+    }
+    #[cfg(not(test))]
+    {
+        let def = default_data_dir();
+        let p = pointer_file();
+        let norm_def = storage::canonicalize_or_parent(&def);
+        let norm_target = target.map(storage::canonicalize_or_parent);
+        let is_custom = match &norm_target {
+            Some(t) => t != &norm_def,
+            None => false,
+        };
+
+        if is_custom {
+            if let Some(t) = target {
+                let _ = fs::create_dir_all(&def);
+                fs::write(&p, t.to_string_lossy().as_bytes()).map_err(es)?;
+                if let Some(config_dir) = dirs::config_dir() {
+                    let alt_dir = config_dir.join(APP_ID);
+                    if alt_dir != def {
+                        let _ = fs::create_dir_all(&alt_dir);
+                        let _ = fs::write(alt_dir.join("storage_location.txt"), t.to_string_lossy().as_bytes());
+                    }
+                }
+            }
+        } else {
             let _ = fs::remove_file(&p);
             if let Some(config_dir) = dirs::config_dir() {
                 let alt_dir = config_dir.join(APP_ID);
-                if alt_dir != def {
-                    let _ = fs::remove_file(alt_dir.join("storage_location.txt"));
-                }
+                let _ = fs::remove_file(alt_dir.join("storage_location.txt"));
             }
         }
+        Ok(())
     }
-    Ok(())
 }
 
 /// Shared engine state used by the GUI commands, the MCP server and the AI router.
@@ -1187,6 +1245,17 @@ fn sync_library_folders(core: St, folders: Option<Vec<String>>) -> Result<usize,
     storage::sync_folders(&core, folders)
 }
 
+#[tauri::command(async)]
+fn regenerate_thumbnails(
+    core: St,
+    ids: Option<Vec<i64>>,
+    folder: Option<String>,
+) -> Result<usize, String> {
+    catalog::regenerate_thumbnails(&core, ids, folder, &|done, total| {
+        core.emit("regenerate-thumbs-progress", json!({"done": done, "total": total}));
+    })
+}
+
 /// Reveal a file or folder in the OS native file manager (macOS Finder, Windows File Explorer, Linux file manager).
 #[tauri::command(async)]
 fn show_in_folder(path: String) -> Result<(), String> {
@@ -1215,9 +1284,9 @@ fn show_in_folder(path: String) -> Result<(), String> {
     {
         let mut cmd = std::process::Command::new("explorer");
         if p.is_file() {
-            cmd.arg(format!("/select,\"{}\"", path));
+            cmd.arg(format!("/select,{}", path.trim_matches('"')));
         } else {
-            cmd.arg(&path);
+            cmd.arg(path.trim_matches('"'));
         }
         cmd.spawn().map_err(|e| format!("Could not open File Explorer: {e}"))?;
     }
@@ -1435,6 +1504,7 @@ pub fn run() {
             move_storage_location,
             reset_storage_location,
             sync_library_folders,
+            regenerate_thumbnails,
             show_in_folder,
             auto_run,
             auto_defaults,

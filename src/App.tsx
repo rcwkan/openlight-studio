@@ -39,6 +39,7 @@ export default function App() {
   const [defaults, setDefaults] = useState<Dev | null>(null);
   const [logs, setLogs] = useState<Log[]>([]);
   const [status, setStatus] = useState("");
+  const [regenProgress, setRegenProgress] = useState<{ done: number; total: number } | null>(null);
   const [exportIds, setExportIds] = useState<number[] | null>(null);
   const [remote, setRemote] = useState<Source | null>(null);
   const [albumPages, setAlbumPages] = useState<{ album: string | null; next: number | null } | null>(null);
@@ -160,11 +161,38 @@ export default function App() {
       }, 200);
     })();
 
+    const handleContextMenu = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) {
+        return;
+      }
+      e.preventDefault();
+    };
+    window.addEventListener("contextmenu", handleContextMenu);
+
     const subs = [
       listen("catalog-changed", () => reloadRef.current()),
-      listen<{ new_dir: string; is_custom: boolean; mode: string }>("storage-location-changed", () => {
+      listen<{ new_dir: string; is_custom: boolean; mode: string }>("storage-location-changed", async (e) => {
+        try {
+          const info = await api.appInfo();
+          setInfo(info);
+          setThumbsDir(info.thumbs_dir);
+        } catch {
+          const sep = e.payload.new_dir.includes("\\") ? "\\" : "/";
+          setThumbsDir(`${e.payload.new_dir}${sep}thumbs`);
+        }
         void api.settings().then(setSettings);
         reloadRef.current();
+      }),
+      listen<{ done: number; total: number }>("regenerate-thumbs-progress", (e) => {
+        setRegenProgress(e.payload.done >= e.payload.total ? null : e.payload);
+        setStatus(`Regenerating thumbnails: ${e.payload.done} / ${e.payload.total}`);
+        if (e.payload.done >= e.payload.total) {
+          setTimeout(() => {
+            setStatus("");
+            setRegenProgress(null);
+          }, 2500);
+        }
       }),
       listen<{ id: number }>("thumb-changed", async (e) => {
         const ph = await api.photo(e.payload.id);
@@ -188,6 +216,7 @@ export default function App() {
     ];
     return () => {
       mounted = false;
+      window.removeEventListener("contextmenu", handleContextMenu);
       subs.forEach((s) => s.then((f) => f()));
     };
   }, []);
@@ -758,7 +787,7 @@ export default function App() {
 
   return (
     <div className="flex h-full flex-col">
-      <header className="flex h-10 shrink-0 items-center gap-5 border-b border-neutral-800 bg-neutral-950 px-4">
+      <header className="relative flex h-10 shrink-0 items-center gap-5 border-b border-neutral-800 bg-neutral-950 px-4">
         <span className="font-semibold tracking-wide text-neutral-100 flex items-center gap-2">
           <img
             src="/icon.png"
@@ -833,8 +862,19 @@ export default function App() {
             <span>✦ AI working on {busyAiIds.length} {busyAiIds.length === 1 ? "photo" : "photos"} in Develop…</span>
           </button>
         )}
-        <span className="ml-auto truncate text-[11px] text-neutral-400" title={status}>
+        <span className="ml-auto truncate text-[11px] text-neutral-400 flex items-center gap-2" title={status}>
           {status || background}
+          {regenProgress && regenProgress.total > 0 && (
+            <span className="flex items-center gap-1.5 font-mono text-[10px] text-sky-400">
+              <span className="inline-block w-16 h-1.5 rounded-full bg-neutral-800 overflow-hidden">
+                <span
+                  className="block h-full bg-gradient-to-r from-sky-500 to-indigo-500 transition-all duration-150"
+                  style={{ width: `${Math.min(100, Math.max(3, (regenProgress.done / regenProgress.total) * 100))}%` }}
+                />
+              </span>
+              <span>{Math.round((regenProgress.done / regenProgress.total) * 100)}%</span>
+            </span>
+          )}
         </span>
         {!status && culling && (
           <button className="text-[11px] text-neutral-500 hover:text-white" title="Stop culling the new photos; what is done stays" onClick={() => api.cancelJob(culling.job)}>
@@ -855,6 +895,14 @@ export default function App() {
           />
           <span className="font-mono text-[10px]">MCP</span>
         </button>
+        {regenProgress && regenProgress.total > 0 && (
+          <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-neutral-800/80 overflow-hidden">
+            <div
+              className="h-full bg-gradient-to-r from-sky-500 to-indigo-500 transition-all duration-150"
+              style={{ width: `${Math.min(100, Math.max(2, (regenProgress.done / regenProgress.total) * 100))}%` }}
+            />
+          </div>
+        )}
       </header>
 
       {module === "library" && (
