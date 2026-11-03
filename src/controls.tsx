@@ -12,10 +12,11 @@ type SliderProps = {
   /** Logarithmic track (white balance in Kelvin). */
   log?: boolean;
   track?: string;
+  format?: (v: number) => string;
   onChange: (v: number) => void;
 };
 
-export function Slider({ label, value, min, max, step = 1, def, digits = 0, log, track, onChange }: SliderProps) {
+export function Slider({ label, value, min, max, step = 1, def, digits = 0, log, track, format, onChange }: SliderProps) {
   const toUi = (v: number) => (log ? (Math.log(v / min) / Math.log(max / min)) * 1000 : v);
   const fromUi = (u: number) => (log ? Math.round((min * (max / min) ** (u / 1000)) / 10) * 10 : u);
   return (
@@ -31,8 +32,7 @@ export function Slider({ label, value, min, max, step = 1, def, digits = 0, log,
         onChange={(e) => onChange(fromUi(+e.target.value))}
       />
       <span className={`w-11 text-right tabular-nums ${value === def ? "text-neutral-500" : "text-neutral-200"}`}>
-        {value > 0 && min < 0 ? "+" : ""}
-        {value.toFixed(digits)}
+        {format ? format(value) : `${value > 0 && min < 0 ? "+" : ""}${value.toFixed(digits)}`}
       </span>
     </div>
   );

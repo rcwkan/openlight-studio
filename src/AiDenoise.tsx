@@ -234,10 +234,11 @@ export function AiTab(p: {
     if (photoId == null || !p.selection || !removalModel) return;
     setMsg(null);
     setRemoving(true);
+    const isMoebius = removalModel.id === "moebius" || removalModel.id.startsWith("moebius");
     setFillJob({
-      label: generative ? "Initializing diffusion model…" : "Preparing object removal…",
+      label: generative ? "Initializing diffusion model…" : isMoebius ? "Initializing Moebius model…" : "Preparing object removal…",
       done: 0,
-      total: generative ? 25 : 3,
+      total: generative ? 25 : isMoebius ? 19 : 3,
       percent: 0,
       startTime: Date.now(),
       elapsedSec: 0,
@@ -324,7 +325,7 @@ export function AiTab(p: {
             )}
           </div>
           <div className="mt-1">
-            <Slider label="Brush size" value={Math.round(p.brush * 1000)} min={5} max={120} def={35} onChange={(v) => p.setBrush(v / 1000)} />
+            <Slider label="Brush size" value={Math.round(p.brush * 1000)} min={5} max={120} def={12} onChange={(v) => p.setBrush(v / 1000)} />
           </div>
           {p.selection && (
             <div className="mt-2">
@@ -350,10 +351,10 @@ export function AiTab(p: {
               {removing && (
                 <AiProgressBar
                   title="Removing Object"
-                  label={fillJob?.label || (generative ? "Synthesizing generative fill…" : "Inpainting patch…")}
+                  label={fillJob?.label || (generative ? "Synthesizing generative fill…" : (removalModel.id === "moebius" || removalModel.id.startsWith("moebius")) ? "Synthesizing diffusion fill…" : "Inpainting patch…")}
                   done={fillJob?.done ?? 0}
-                  total={fillJob?.total ?? (generative ? 25 : 3)}
-                  percent={fillJob?.percent ?? (generative ? 0 : 33)}
+                  total={fillJob?.total ?? (generative ? 25 : (removalModel.id === "moebius" || removalModel.id.startsWith("moebius")) ? 19 : 3)}
+                  percent={fillJob?.percent ?? (generative ? 0 : (removalModel.id === "moebius" || removalModel.id.startsWith("moebius")) ? 0 : 33)}
                   modelName={removalModel.name}
                   elapsedSec={fillJob?.elapsedSec ?? 0}
                   onCancel={() => void api.cancelJob("ai-remove")}

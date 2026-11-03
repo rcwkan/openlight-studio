@@ -700,7 +700,7 @@ pub fn forget_folder(core: &Core, id: &str, path: &str) -> Result<Settings, Stri
 
 /// Downloads of all accounts.
 pub fn cloud_dir(core: &Core) -> PathBuf {
-    core.dir.join("remote").join("Cloud")
+    core.dir().join("remote").join("Cloud")
 }
 
 /// Where a cloud folder is downloaded to.

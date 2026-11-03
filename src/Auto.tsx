@@ -1,9 +1,9 @@
 import { ReactNode, useState } from "react";
 import { Develop as Dev } from "./api";
-import { Btn, Panel } from "./controls";
+import { Btn, Panel, Slider } from "./controls";
 
 /** id (develop::PROFILES), label, what it does */
-const PROFILES: [string, string, string][] = [
+export const PROFILES: [string, string, string][] = [
   ["natural", "Natural", "Balanced colour and tone (the same as ✦ Auto)"],
   ["neutral", "Neutral", "Flat and low contrast: a starting point for your own grade"],
   ["vivid", "Vivid", "More contrast, clarity and colour"],
@@ -30,7 +30,10 @@ const hint = "mt-1 text-[10px] text-neutral-500";
  *  and land as one history step each; ✦ AI ones send a prompt to the AI provider through the AI bar. */
 export function AutoTab(p: {
   dev: Dev;
-  profile: (id: string, label: string) => Promise<void>;
+  profile: (id: string, label: string, strength?: number) => Promise<void>;
+  activeProfile?: string | null;
+  profileStrength?: number;
+  onStrengthChange?: (strength: number) => void;
   /** the profile for what the photo shows (landscape, portrait, food…), picked by the AI provider */
   byType: () => Promise<void>;
   whiteBalance: () => Promise<void>;
@@ -48,13 +51,35 @@ export function AutoTab(p: {
   aiPrompt?: string;
 }) {
   const [busy, setBusy] = useState<string | null>(null);
-  const run = (key: string, label: ReactNode, f: () => Promise<void>, title: string, className = "") => (
+  const [localProfile, setLocalProfile] = useState<string | null>(null);
+  const [localStrength, setLocalStrength] = useState<number>(100);
+
+  const activeProfile = p.activeProfile !== undefined ? p.activeProfile : localProfile;
+  const strength = p.profileStrength !== undefined ? p.profileStrength : localStrength;
+
+  const onSelect = async (id: string, label: string) => {
+    setLocalProfile(id);
+    await p.profile(id, label, strength);
+  };
+
+  const onStrength = (v: number) => {
+    setLocalStrength(v);
+    if (p.onStrengthChange) {
+      p.onStrengthChange(v);
+    } else {
+      const profId = activeProfile || "natural";
+      const profLabel = PROFILES.find(([k]) => k === profId)?.[1] || "Natural";
+      p.profile(profId, profLabel, v);
+    }
+  };
+
+  const run = (key: string, label: ReactNode, f: () => Promise<void>, title: string, className = "", isActive = false) => (
     <Btn
       key={key}
       className={className}
       title={title}
       disabled={busy != null}
-      active={busy === key}
+      active={busy === key || isActive}
       onClick={async () => {
         setBusy(key);
         try {
@@ -87,12 +112,26 @@ export function AutoTab(p: {
     <>
       <Panel title="Auto fine tune">
         <div className="grid grid-cols-2 gap-1">
-          {run("auto", "✦ Auto", () => p.profile("natural", "Natural"), "White balance and tone measured on the photo")}
+          {run("auto", "✦ Auto", () => onSelect("natural", "Natural"), "White balance and tone measured on the photo", "", activeProfile === "natural")}
           {run("type", "✦ By photo type", p.byType, "The AI provider tells what the photo shows (landscape, portrait, street, food, architecture, night, nature, B&W), then tunes it to that type's profile")}
         </div>
         <div className={sub}>To a profile</div>
-        <div className="grid grid-cols-3 gap-1">{PROFILES.map(([id, label, title]) => run(id, label, () => p.profile(id, label), title))}</div>
-        <p className={hint}>Sets white balance, Basic and presence from the photo, then the profile's look. Your other edits stay.</p>
+        <div className="grid grid-cols-3 gap-1">
+          {PROFILES.map(([id, label, title]) => run(id, label, () => onSelect(id, label), title, "", activeProfile === id))}
+        </div>
+        <div className="mt-2.5">
+          <Slider
+            label="Strength"
+            value={strength}
+            min={0}
+            max={200}
+            step={1}
+            def={100}
+            format={(v) => `${v}%`}
+            onChange={onStrength}
+          />
+        </div>
+        <p className={hint}>Sets white balance, Basic and presence from the photo, then the profile's look at {strength}% strength. Your other edits stay.</p>
         <div className={sub}>One at a time</div>
         <div className="grid grid-cols-2 gap-1">
           {run("wb", "White balance", p.whiteBalance, "Neutralise a colour cast, judged from the near-grey surfaces")}

@@ -294,7 +294,7 @@ pub fn immich_original(core: &Core, id: &str) -> Result<PathBuf, String> {
 
 /// Cache of opened Immich photos; clearing it only means downloading them again.
 pub fn originals_dir(core: &Core) -> PathBuf {
-    core.dir.join("remote").join("Immich").join("originals")
+    core.dir().join("remote").join("Immich").join("originals")
 }
 
 /// The downloaded file of an Immich photo, if it was opened before (`Item` names it).
@@ -561,7 +561,7 @@ fn sync_local_photos_into(
     src_dir: &Path,
     dest_subfolder: &str,
 ) -> Result<Value, String> {
-    let dest = core.dir.join("remote").join(dest_subfolder);
+    let dest = core.dir().join("remote").join(dest_subfolder);
     fs::create_dir_all(&dest).map_err(es)?;
 
     let scan_root = if src_dir.join("originals").is_dir() {
@@ -781,17 +781,17 @@ pub fn upload(core: &Core, dest: &str, ids: &[i64], files: &[String]) -> Result<
         }
         "apple" => {
             let path = core.settings.lock().unwrap().apple_photos_path.clone();
-            let default_dest = core.dir.join("remote").join("Apple iCloud Photos").join("Exports");
+            let default_dest = core.dir().join("remote").join("Apple iCloud Photos").join("Exports");
             Box::new(move |_: i64, file: &str| copy_to_service_export(Path::new(&path), &default_dest, file))
         }
         "amazon" => {
             let path = core.settings.lock().unwrap().amazon_photos_path.clone();
-            let default_dest = core.dir.join("remote").join("Amazon Photos").join("Exports");
+            let default_dest = core.dir().join("remote").join("Amazon Photos").join("Exports");
             Box::new(move |_: i64, file: &str| copy_to_service_export(Path::new(&path), &default_dest, file))
         }
         "adobe" => {
             let path = core.settings.lock().unwrap().adobe_cloud_path.clone();
-            let default_dest = core.dir.join("remote").join("Adobe Cloud Photos").join("Exports");
+            let default_dest = core.dir().join("remote").join("Adobe Cloud Photos").join("Exports");
             Box::new(move |_: i64, file: &str| copy_to_service_export(Path::new(&path), &default_dest, file))
         }
         _ => return Err(format!("unknown upload destination '{dest}'")),
@@ -968,7 +968,7 @@ fn download(agent: &ureq::Agent, it: &Item, auth: (&str, &str), dir: &Path, stem
 
 /// Download what `remote/<folder…>` doesn't have yet, then import that folder.
 fn fetch_and_import(core: &Arc<Core>, folder: &[&str], skipped: usize, items: Vec<Item>, auth: (&str, &str)) -> Result<Value, String> {
-    let dir = folder.iter().fold(core.dir.join("remote"), |d, f| d.join(safe_name(f)));
+    let dir = folder.iter().fold(core.dir().join("remote"), |d, f| d.join(safe_name(f)));
     fs::create_dir_all(&dir).map_err(es)?;
     let have: HashSet<String> = fs::read_dir(&dir)
         .map_err(es)?
