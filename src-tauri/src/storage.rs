@@ -1290,9 +1290,10 @@ pub fn sync_folders(core: &Core, folders: Option<Vec<String>>) -> Result<usize, 
 
     // Always check for standard photo library folders if none provided
     if dirs_to_scan.is_empty() {
-        let candidate = PathBuf::from("/Volumes/RIT-2TB/Photo");
-        if candidate.is_dir() {
-            dirs_to_scan.push(candidate);
+        if let Some(pic) = dirs::picture_dir() {
+            if pic.is_dir() {
+                dirs_to_scan.push(pic);
+            }
         }
     }
 
