@@ -568,6 +568,8 @@ export const api = {
     invoke<StorageMoveResult>("reset_storage_location", { mode, cleanupOld: cleanup_old ?? false }),
   syncLibraryFolders: (folders?: string[]) =>
     invoke<number>("sync_library_folders", { folders: folders ?? null }),
+  /** Open/reveal file or directory in OS native file manager (macOS Finder, Windows File Explorer, Linux file manager) */
+  showInFolder: (path: string) => invoke<void>("show_in_folder", { path }),
   /** Returns how many files, photos or history steps went */
   cleanUp: (what: CleanUp | string) => invoke<number>("clean_up", { what }),
   /** Run an auto function on photos; `job` names it for cancelJob */
@@ -756,4 +758,14 @@ export const getFirstFolder = (
   }
   return folders[0]?.[0] ?? null;
 };
+
+/** Name of native OS file manager (Finder on macOS, File Explorer on Windows, Folder on Linux) */
+export function fileManagerName(): string {
+  if (typeof navigator !== "undefined") {
+    const ua = navigator.userAgent.toLowerCase();
+    if (ua.includes("mac")) return "Finder";
+    if (ua.includes("win")) return "File Explorer";
+  }
+  return "Folder";
+}
 

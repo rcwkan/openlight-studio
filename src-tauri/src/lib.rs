@@ -1187,6 +1187,85 @@ fn sync_library_folders(core: St, folders: Option<Vec<String>>) -> Result<usize,
     storage::sync_folders(&core, folders)
 }
 
+/// Reveal a file or folder in the OS native file manager (macOS Finder, Windows File Explorer, Linux file manager).
+#[tauri::command(async)]
+fn show_in_folder(path: String) -> Result<(), String> {
+    let p = PathBuf::from(&path);
+    if !p.exists() {
+        if let Some(parent) = p.parent() {
+            if parent.exists() {
+                return open_native_folder(parent);
+            }
+        }
+        return Err(format!("Path does not exist on disk: {path}"));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let mut cmd = std::process::Command::new("open");
+        if p.is_file() {
+            cmd.arg("-R").arg(&path);
+        } else {
+            cmd.arg(&path);
+        }
+        cmd.spawn().map_err(|e| format!("Could not open Finder: {e}"))?;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let mut cmd = std::process::Command::new("explorer");
+        if p.is_file() {
+            cmd.arg(format!("/select,\"{}\"", path));
+        } else {
+            cmd.arg(&path);
+        }
+        cmd.spawn().map_err(|e| format!("Could not open File Explorer: {e}"))?;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let target = if p.is_file() {
+            p.parent().unwrap_or(&p)
+        } else {
+            &p
+        };
+        std::process::Command::new("xdg-open")
+            .arg(target)
+            .spawn()
+            .map_err(|e| format!("Could not open File Manager: {e}"))?;
+    }
+
+    Ok(())
+}
+
+fn open_native_folder(p: &Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(p)
+            .spawn()
+            .map_err(|e| format!("Could not open Finder: {e}"))?;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(p)
+            .spawn()
+            .map_err(|e| format!("Could not open File Explorer: {e}"))?;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(p)
+            .spawn()
+            .map_err(|e| format!("Could not open File Manager: {e}"))?;
+    }
+
+    Ok(())
+}
+
 #[tauri::command]
 fn network_add(core: St, drive: storage::NetworkDrive) -> Result<Settings, String> {
     storage::add_drive(&core, drive)
@@ -1356,6 +1435,7 @@ pub fn run() {
             move_storage_location,
             reset_storage_location,
             sync_library_folders,
+            show_in_folder,
             auto_run,
             auto_defaults,
             cancel_job,

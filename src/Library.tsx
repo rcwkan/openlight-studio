@@ -1,7 +1,7 @@
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { ReactNode, useEffect, useId, useRef, useState } from "react";
-import { api, AutoFunction, CloudAccount, CloudFolder, Culling, Filter, flagName, FolderLoading, FolderProgress, ImmichAlbum, JobProgress, LABEL_COLORS, LABELS, NetworkDrive, Photo, Settings, Source, thumbUrl } from "./api";
+import { api, AutoFunction, CloudAccount, CloudFolder, Culling, fileManagerName, Filter, flagName, FolderLoading, FolderProgress, ImmichAlbum, JobProgress, LABEL_COLORS, LABELS, NetworkDrive, Photo, Settings, Source, thumbUrl } from "./api";
 import { AutoView, FUNCS } from "./AutoView";
 import { Btn, HUE, Hue, Icon, Panel, Stars } from "./controls";
 import { PhotoViewer } from "./PhotoViewer";
@@ -1257,7 +1257,21 @@ function Metadata(p: Props & { photo: Photo }) {
             .map(([k, v]) => (
               <div key={k} className="contents">
                 <dt className="text-neutral-500">{k}</dt>
-                <dd className="break-all text-neutral-200">{v}</dd>
+                {k === "Folder" ? (
+                  <dd className="break-all text-neutral-200 flex items-center justify-between gap-1 group">
+                    <span className="truncate" title={String(v)}>{v}</span>
+                    <button
+                      type="button"
+                      onClick={() => void api.showInFolder(ph.path)}
+                      className="shrink-0 text-neutral-400 hover:text-sky-400 p-0.5 rounded cursor-pointer transition-colors"
+                      title={`Open in ${fileManagerName()}`}
+                    >
+                      ↗
+                    </button>
+                  </dd>
+                ) : (
+                  <dd className="break-all text-neutral-200">{v}</dd>
+                )}
               </div>
             ))}
         </dl>
@@ -1301,6 +1315,12 @@ function Metadata(p: Props & { photo: Photo }) {
                 {ph.path.startsWith("immich://") ? "Save to Immich" : "Export"} {p.selected.length > 1 ? `${p.selected.length}` : ""}…
               </Btn>
               <Btn onClick={p.onVirtualCopy}>Virtual copy</Btn>
+              <Btn
+                onClick={() => void api.showInFolder(ph.path)}
+                title={`Open and reveal file in ${fileManagerName()}`}
+              >
+                Open in {fileManagerName()}
+              </Btn>
               {/* the ones that take photos away, on their own line under the everyday ones */}
               <div className="mt-1 flex w-full flex-wrap gap-1 border-t border-neutral-800 pt-2">
                 <Btn onClick={p.onMoveToBin} title="Move photo to Bin (can be restored later)" className="text-amber-400 hover:text-amber-300">

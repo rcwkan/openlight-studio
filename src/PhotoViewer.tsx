@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, Culling, flagName, LABEL_COLORS, LABELS, Photo, thumbUrl } from "./api";
+import { api, Culling, fileManagerName, flagName, LABEL_COLORS, LABELS, Photo, thumbUrl } from "./api";
 import { Btn, Icon, Stars } from "./controls";
 
 export interface PhotoViewerProps {
@@ -372,6 +372,9 @@ export function PhotoViewer({
       } else if (k === "c" && onOpenCompare) {
         e.preventDefault();
         onOpenCompare();
+      } else if (k === "o" && photo) {
+        e.preventDefault();
+        void api.showInFolder(photo.path);
       }
     };
 
@@ -429,9 +432,17 @@ export function PhotoViewer({
           </button>
 
           <div className="flex items-center gap-1.5 truncate text-[11px] text-neutral-400">
-            <span className="truncate font-medium text-neutral-300" title={photo.folder}>
-              📁 {folderName}
-            </span>
+            <button
+              type="button"
+              onClick={() => void api.showInFolder(photo.path)}
+              className="flex items-center gap-1 rounded hover:bg-neutral-800 px-1.5 py-0.5 text-neutral-300 hover:text-white transition-colors cursor-pointer group"
+              title={`Open in ${fileManagerName()} (Reveal file)`}
+            >
+              <span className="truncate font-medium text-neutral-300 group-hover:text-white" title={photo.folder}>
+                📁 {folderName}
+              </span>
+              <span className="text-[10px] text-neutral-500 group-hover:text-sky-400">↗</span>
+            </button>
             <span className="text-neutral-600">›</span>
             <span className="truncate font-semibold text-white" title={photo.filename}>
               {photo.filename}
@@ -496,6 +507,18 @@ export function PhotoViewer({
           <span className="font-mono text-[11px] text-neutral-400 tabular-nums">
             {currentIndex + 1} / {photos.length}
           </span>
+
+          <button
+            type="button"
+            onClick={() => void api.showInFolder(photo.path)}
+            className="flex items-center gap-1.5 rounded-md bg-neutral-800 hover:bg-neutral-700 text-neutral-200 px-2.5 py-1 text-xs border border-neutral-700/80 transition-colors shadow-xs cursor-pointer"
+            title={`Reveal photo in ${fileManagerName()} (Shortcut: O)`}
+          >
+            <svg className="h-3.5 w-3.5 text-neutral-300" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+            </svg>
+            <span className="hidden sm:inline">Open in {fileManagerName()}</span>
+          </button>
 
           <button
             onClick={() => openDevelop(photo.id)}
@@ -653,9 +676,15 @@ export function PhotoViewer({
 
             <div className="grid grid-cols-[80px_1fr] gap-x-2 gap-y-1 text-[11px]">
               <span className="text-neutral-500">Folder</span>
-              <span className="truncate text-neutral-300" title={photo.folder}>
-                {photo.folder}
-              </span>
+              <button
+                type="button"
+                onClick={() => void api.showInFolder(photo.path)}
+                className="text-left text-neutral-300 hover:text-sky-400 hover:underline truncate cursor-pointer flex items-center justify-between gap-1 group"
+                title={`Open folder in ${fileManagerName()}`}
+              >
+                <span className="truncate" title={photo.folder}>{photo.folder}</span>
+                <span className="text-[10px] text-neutral-500 group-hover:text-sky-400 shrink-0">↗</span>
+              </button>
 
               {photo.width && photo.height && (
                 <>
