@@ -11,7 +11,7 @@ if [ -f "$HOME/.cargo/env" ]; then
 fi
 for extra_dir in "$HOME/.cargo/bin" "/opt/homebrew/bin" "/usr/local/bin"; do
   if [ -d "$extra_dir" ] && [[ ":$PATH:" != *":$extra_dir:"* ]]; then
-    export PATH="$extra_dir:$PATH"
+    export PATH="$PATH:$extra_dir"
   fi
 done
 
