@@ -104,6 +104,22 @@ export type Level = { black: number; gamma: number; white: number; out_black: nu
 /** Selective Color families, in Photoshop's order */
 export const FAMILIES = ["reds", "yellows", "greens", "cyans", "blues", "magentas", "whites", "neutrals", "blacks"] as const;
 
+export type AiRemoval = {
+  id: string;
+  label: string;
+  model: string;
+  prompt: string;
+  enabled: boolean;
+  bounds: [number, number, number, number];
+  patch_file: string;
+};
+
+export type AiDenoise = {
+  enabled: boolean;
+  model: string;
+  strength: number;
+};
+
 export type Develop = {
   profile: string;
   white_balance: { temperature_k: number; tint: number };
@@ -186,6 +202,8 @@ export type Develop = {
   /** in the straightened, rotated frame */
   crop: { x: number; y: number; w: number; h: number; angle: number };
   retouch: Heal[];
+  ai_removals?: AiRemoval[];
+  ai_denoise?: AiDenoise;
   masks: Mask[];
   ai_provenance_log: { timestamp?: string; provider?: string; action?: string }[];
 };
@@ -340,9 +358,10 @@ export type Rendered = { hist: Uint32Array[]; image: ImageData };
 export type Proof = { gamut: string | null; clipping: boolean; spots: number | null };
 /** upload: send the renders to Immich / Google Photos / `cloud:<account id>` (into `upload_path`) instead of keeping them in `folder` */
 export type ExportReq = { ids: number[]; folder: string; format: string; color_space: string; quality: number; max_edge: number | null; upload?: string | null; upload_path?: string };
-export type CleanUp = "thumbs" | "originals" | "immich_albums" | "cloud" | "missing" | "history" | "compact" | "all";
+export type CleanUp = "thumbs" | "originals" | "immich_albums" | "cloud" | "ai_models" | "ai_cache" | "missing" | "history" | "compact" | "all";
 type Named = { name: string; count: number }[];
 export type ImmichAlbumStorage = { name: string; path: string; bytes: number; photos: number };
+export type AiModelDetail = { id: string; name: string; kind: string; bytes: number; size_mb: number };
 export type OtherDetail = { name: string; bytes: number };
 export type CatalogDetails = { db: number; wal: number; shm: number; free: number };
 
@@ -358,9 +377,32 @@ export type StorageReport = {
   immich_albums_bytes?: number;
   google: number;
   cloud?: number;
+  ai_models?: number;
+  ai_models_count?: number;
+  ai_models_details?: AiModelDetail[];
+  ai_cache?: { bytes: number; files: number };
   other?: number;
   other_details?: OtherDetail[];
-  summary: { total_photos: number; virtual_copies: number; edited: number; picks: number; rejects: number; rated_3_plus: number; cameras: Named; lenses: Named };
+  summary: {
+    total_photos: number;
+    virtual_copies: number;
+    edited: number;
+    picks: number;
+    rejects: number;
+    rated_3_plus: number;
+    cameras: Named;
+    lenses: Named;
+    ratings?: { rating: number; count: number }[];
+    flags?: { flag: number; count: number }[];
+    years?: { year: string; count: number }[];
+    iso_ranges?: { range: string; count: number }[];
+    aperture_ranges?: { range: string; count: number }[];
+    focal_ranges?: { range: string; count: number }[];
+    formats?: { ext: string; count: number }[];
+    raw_count?: number;
+    std_count?: number;
+    history_stats?: { total_steps: number; max_steps: number; avg_steps: number };
+  };
   immich_photos: number;
   history_steps: number;
   ai: { photos: number; edits: number };
@@ -454,6 +496,7 @@ export const api = {
   save: (id: number, develop: Develop, label: string) => invoke<Develop>("save_develop", { id, develop, label }),
   history: (id: number) => invoke<HistoryEntry[]>("get_history", { id }),
   gotoHistory: (id: number, hid: number) => invoke<Develop>("goto_history", { id, hid }),
+  deleteHistory: (id: number, hid: number) => invoke<Develop | null>("delete_history", { id, hid }),
   undoRedo: (id: number, dir: number) => invoke<Develop | null>("undo_redo", { id, dir }),
   export: (req: ExportReq) => invoke<string[]>("export_photos", { req }),
   settings: () => invoke<Settings>("get_settings"),
@@ -465,6 +508,12 @@ export const api = {
   /** AI selection: each clicked object at (x, y) of the full frame starts its own selection (or subtracts from `mask` on ⌥-click) */
   aiSelect: (id: number, x: number, y: number, provider: string, mask: number | null, subtract: boolean) =>
     invoke<{ develop: Develop; mask: number }>("ai_select", { id, x, y, provider, mask, subtract }),
+  aiInpaintInplace: (id: number, model: string, strokes: Stroke[], grow: number, prompt: string) =>
+    invoke<Develop>("ai_inpaint_inplace", { id, model, strokes, grow, prompt }),
+  aiDenoiseInplace: (id: number, model: string, strength: number) =>
+    invoke<Develop>("ai_denoise_inplace", { id, model, strength }),
+  aiDeleteRemoval: (id: number, removalId: string) =>
+    invoke<Develop>("ai_delete_removal", { id, removalId }),
   immichConnect: (url: string, key: string) => invoke<Settings>("immich_connect", { url, key }),
   immichAlbums: () => invoke<ImmichAlbum[]>("immich_albums"),
   /** Load one page of an album (null = favorites) into the catalog; page 1 starts it over */
@@ -483,7 +532,7 @@ export const api = {
   remoteDisconnect: (source: Source) => invoke<Settings>("remote_disconnect", { source }),
   storage: () => invoke<StorageReport>("storage_report"),
   /** Returns how many files, photos or history steps went */
-  cleanUp: (what: CleanUp) => invoke<number>("clean_up", { what }),
+  cleanUp: (what: CleanUp | string) => invoke<number>("clean_up", { what }),
   /** Run an auto function on photos; `job` names it for cancelJob */
   autoRun: (fn: AutoFunction, ids: number[], settings: object, job: string) => invoke<AutoResult>("auto_run", { function: fn, ids, settings, job }),
   cancelJob: (job: string) => invoke<boolean>("cancel_job", { job }),
@@ -618,3 +667,56 @@ const saveRoots = (r: string[]) => {
 };
 export const rememberRoot = (p: string) => saveRoots([...loadRoots().filter((r) => r !== p), p]);
 export const forgetRoot = (p: string) => saveRoots(loadRoots().filter((r) => r !== p));
+
+const LAST_FOLDER_KEY = "openlight.lastFolder";
+export const loadLastFolder = (): string | null => {
+  try {
+    return localStorage.getItem(LAST_FOLDER_KEY);
+  } catch {
+    return null;
+  }
+};
+export const rememberLastFolder = (folder: string | null) => {
+  try {
+    if (folder) {
+      localStorage.setItem(LAST_FOLDER_KEY, folder);
+    } else {
+      localStorage.removeItem(LAST_FOLDER_KEY);
+    }
+  } catch {
+    /* storage unavailable */
+  }
+};
+
+/**
+ * Returns the first item that appears in the Folders section of the sidebar:
+ * 1. The first added root folder (if any).
+ * 2. Otherwise, the first local catalog folder (excluding remote synced cloud folders and network drives).
+ * 3. Otherwise, the first network drive.
+ * 4. Otherwise, the first folder in the catalog list.
+ */
+export const getFirstFolder = (
+  roots: string[],
+  folders: [string, number][],
+  dataDir: string,
+  drives: NetworkDrive[] = []
+): string | null => {
+  if (roots.length > 0) {
+    return roots[0];
+  }
+  const sep = dataDir.includes("\\") ? "\\" : "/";
+  const remoteDir = dataDir ? `${dataDir}${sep}remote` : "";
+  const under = (folder: string, root: string) =>
+    Boolean(root) && (folder === root || folder.startsWith(root.replace(/[\\/]+$/, "") + sep));
+  const local = folders.filter(
+    ([folder]) => (!remoteDir || !under(folder, remoteDir)) && !drives.some((d) => under(folder, d.path))
+  );
+  if (local.length > 0) {
+    return local[0][0];
+  }
+  if (drives.length > 0) {
+    return drives[0].path;
+  }
+  return folders[0]?.[0] ?? null;
+};
+

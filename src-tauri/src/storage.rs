@@ -2,7 +2,7 @@
 //! duplicating photos from one place to another.
 
 use crate::{
-    Core, Settings, auto, catalog, cloud,
+    Core, Settings, aimodel, auto, catalog, cloud,
     develop::{self, es},
     remote,
 };
@@ -114,12 +114,67 @@ pub fn report(core: &Core) -> Result<Value, String> {
         }
     }
 
+    let models_dir = dir.join("models");
+    let (models_bytes, _) = du(&models_dir);
+    let cache_dir = dir.join("coreml-cache");
+    let (cache_bytes, _) = du(&cache_dir);
+    let ai_models_bytes = models_bytes + cache_bytes;
+    let ai_cache_dir = dir.join("cache").join("ai");
+    let (ai_cache_bytes, ai_cache_files) = du(&ai_cache_dir);
+
+    let mut ai_models_details = Vec::new();
+    let hw = aimodel::hardware();
+    for m in aimodel::models(dir, &hw) {
+        if m.installed {
+            let model_path = dir.join("models").join(m.id);
+            let (b, _) = du(&model_path);
+            ai_models_details.push(json!({
+                "id": m.id,
+                "name": m.name,
+                "kind": m.kind,
+                "bytes": b,
+                "size_mb": m.size_mb,
+            }));
+        }
+    }
+    // Also include any custom or untracked directories under models/
+    let known_ids: HashSet<String> = ai_models_details.iter().filter_map(|m| m["id"].as_str().map(|s| s.to_string())).collect();
+    if models_dir.is_dir() {
+        if let Ok(entries) = fs::read_dir(&models_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if !known_ids.contains(&name) && entry.path().is_dir() {
+                    let (b, _) = du(&entry.path());
+                    if b > 0 {
+                        ai_models_details.push(json!({
+                            "id": name,
+                            "name": name,
+                            "kind": "custom",
+                            "bytes": b,
+                            "size_mb": b as f32 / 1_048_576.0,
+                        }));
+                    }
+                }
+            }
+        }
+    }
+    if cache_bytes > 0 {
+        ai_models_details.push(json!({
+            "id": "coreml_cache",
+            "name": "CoreML compile cache",
+            "kind": "cache",
+            "bytes": cache_bytes,
+            "size_mb": cache_bytes as f32 / 1_048_576.0,
+        }));
+    }
+    let ai_models_count = ai_models_details.iter().filter(|m| m["id"] != "coreml_cache").count();
+
     let mut other_details = Vec::new();
     let mut other_bytes = 0u64;
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
-            if name == "thumbs" || name == "remote" || name.starts_with("catalog.olcat") {
+            if name == "thumbs" || name == "remote" || name.starts_with("catalog.olcat") || name == "models" || name == "coreml-cache" || name == "cache" {
                 continue;
             }
             let (b, _) = du(&entry.path());
@@ -159,8 +214,8 @@ pub fn report(core: &Core) -> Result<Value, String> {
         .map_err(es)?;
     let missing: usize = folders.values().map(|f| f.missing.len()).sum();
     let orphan_bytes: u64 = orphans.iter().map(|p| du(p).0).sum();
-    let all_count = orphans.len() + originals.1 as usize + steps.max(0) as usize;
-    let all_bytes = orphan_bytes + originals.0 + step_bytes.max(0) as u64 + free.max(0) as u64 + wal;
+    let all_count = orphans.len() + originals.1 as usize + steps.max(0) as usize + ai_cache_files as usize;
+    let all_bytes = orphan_bytes + originals.0 + step_bytes.max(0) as u64 + free.max(0) as u64 + wal + ai_cache_bytes;
 
     Ok(json!({
         "data_dir": dir,
@@ -178,6 +233,13 @@ pub fn report(core: &Core) -> Result<Value, String> {
         "immich_albums_bytes": immich_albums_bytes,
         "google": google,
         "cloud": clouds.0,
+        "ai_models": ai_models_bytes,
+        "ai_models_count": ai_models_count,
+        "ai_models_details": ai_models_details,
+        "ai_cache": {
+            "bytes": ai_cache_bytes,
+            "files": ai_cache_files,
+        },
         "other": other_bytes,
         "other_details": other_details,
         "summary": catalog::summary(&c)?,
@@ -191,6 +253,8 @@ pub fn report(core: &Core) -> Result<Value, String> {
             "originals": {"count": originals.1, "bytes": originals.0},
             "immich_albums": {"count": immich_albums_count, "bytes": immich_albums_bytes},
             "cloud": {"count": clouds.1, "bytes": clouds.0},
+            "ai_models": {"count": ai_models_count, "bytes": ai_models_bytes},
+            "ai_cache": {"count": ai_cache_files, "bytes": ai_cache_bytes},
             "missing": {"count": missing, "bytes": 0},
             "history": {"count": steps, "bytes": step_bytes},
             "compact": {"count": 0, "bytes": free as u64 + wal},
@@ -245,6 +309,61 @@ pub fn clean(core: &Core, what: &str) -> Result<usize, String> {
             remote::update_settings(core, |s| s.clouds.iter_mut().for_each(|a| a.folders.clear()))?;
             n
         }
+        "ai_models" => {
+            let mut count = 0;
+            let hw = aimodel::hardware();
+            for m in aimodel::models(&core.dir, &hw) {
+                if m.installed {
+                    if aimodel::remove(&core.dir, m.id).is_ok() {
+                        count += 1;
+                    }
+                }
+            }
+            let models_dir = core.dir.join("models");
+            if models_dir.is_dir() {
+                if let Ok(entries) = fs::read_dir(&models_dir) {
+                    for entry in entries.flatten() {
+                        if entry.path().is_dir() {
+                            let _ = fs::remove_dir_all(entry.path());
+                            count += 1;
+                        }
+                    }
+                }
+            }
+            let cache_dir = core.dir.join("coreml-cache");
+            if cache_dir.is_dir() {
+                let _ = fs::remove_dir_all(&cache_dir);
+            }
+            count
+        }
+        what if what.starts_with("ai_model:") => {
+            let id = &what["ai_model:".len()..];
+            if id == "coreml_cache" {
+                let cache_dir = core.dir.join("coreml-cache");
+                if cache_dir.is_dir() {
+                    let _ = fs::remove_dir_all(&cache_dir);
+                }
+                1
+            } else {
+                if let Err(e) = aimodel::remove(&core.dir, id) {
+                    let model_dir = core.dir.join("models").join(id);
+                    if model_dir.is_dir() {
+                        fs::remove_dir_all(model_dir).map_err(es)?;
+                    } else {
+                        return Err(e);
+                    }
+                }
+                1
+            }
+        }
+        "ai_cache" => {
+            let ai_cache_dir = core.dir.join("cache").join("ai");
+            let count = du(&ai_cache_dir).1 as usize;
+            if ai_cache_dir.is_dir() {
+                let _ = fs::remove_dir_all(&ai_cache_dir);
+            }
+            count
+        }
         "missing" => core.remove(&folders(core)?.into_values().flat_map(|f| f.missing).collect::<Vec<_>>())?,
         "history" => catalog::clear_history(&core.db())?,
         "compact" => 0,
@@ -256,6 +375,11 @@ pub fn clean(core: &Core, what: &str) -> Result<usize, String> {
             let dir = remote::originals_dir(core);
             count += du(&dir).1 as usize;
             let _ = fs::remove_dir_all(&dir);
+            let ai_cache_dir = core.dir.join("cache").join("ai");
+            count += du(&ai_cache_dir).1 as usize;
+            if ai_cache_dir.is_dir() {
+                let _ = fs::remove_dir_all(&ai_cache_dir);
+            }
             if let Ok(h) = catalog::clear_history(&core.db()) {
                 count += h;
             }
@@ -263,7 +387,7 @@ pub fn clean(core: &Core, what: &str) -> Result<usize, String> {
         }
         _ => return Err(format!("unknown clean-up '{what}'")),
     };
-    if what != "thumbs" && what != "originals" {
+    if what != "thumbs" && what != "originals" && what != "ai_models" && what != "ai_cache" && !what.starts_with("ai_model:") {
         catalog::compact(&core.db())?; // deleted rows only free disk space once the file is rewritten
     }
     Ok(n)
@@ -864,10 +988,18 @@ mod tests {
         fs::write(dir.join("data/thumbs/.DS_Store"), [0u8; 5]).unwrap();
         fs::create_dir_all(remote::originals_dir(&core)).unwrap();
         fs::write(remote::originals_dir(&core).join("IMG_1_u1.jpg"), [0u8; 7]).unwrap();
+        let model_dir = dir.join("data/models/custom-model");
+        fs::create_dir_all(&model_dir).unwrap();
+        fs::write(model_dir.join("weights.onnx"), [0u8; 12]).unwrap();
+        let cache_dir = dir.join("data/coreml-cache/cache-entry");
+        fs::create_dir_all(&cache_dir).unwrap();
+        fs::write(cache_dir.join("cache.bin"), [0u8; 8]).unwrap();
 
         let r = report(&core).unwrap();
         assert_eq!(r["clean"]["thumbs"], json!({"count": 1, "bytes": 5}));
         assert_eq!(r["clean"]["originals"], json!({"count": 1, "bytes": 7}));
+        assert_eq!(r["ai_models"], 20);
+        assert_eq!(r["clean"]["ai_models"], json!({"count": 1, "bytes": 20}));
         assert_eq!(r["clean"]["missing"]["count"], 1);
         assert_eq!(r["clean"]["history"]["count"], 2, "Import and the first exposure step; the current one stays");
         assert_eq!(r["folders"][0], json!({"folder": photos, "photos": 2, "bytes": 10, "missing": 1, "online": true}));
@@ -876,6 +1008,9 @@ mod tests {
         assert_eq!(clean(&core, "thumbs").unwrap(), 1);
         assert!(core.thumb_path(kept).exists() && dir.join("data/thumbs/.DS_Store").exists());
         assert_eq!(clean(&core, "originals").unwrap(), 1);
+        assert_eq!(clean(&core, "ai_models").unwrap(), 1);
+        assert!(!model_dir.exists());
+        assert!(!cache_dir.exists());
         assert_eq!(clean(&core, "missing").unwrap(), 1);
         assert!(core.photo(missing).is_err() && core.photo(offline).is_ok());
         assert_eq!(clean(&core, "history").unwrap(), 2);

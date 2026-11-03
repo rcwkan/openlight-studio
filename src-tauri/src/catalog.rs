@@ -479,6 +479,35 @@ pub fn step(c: &Connection, id: i64, dir: i32) -> Result<Option<Develop>, String
     target.map(|t| goto(c, id, t)).transpose()
 }
 
+/// Delete a specific history step. If deleting the current step, navigates to the adjacent step and returns its Develop state.
+pub fn delete_history_step(c: &Connection, id: i64, hid: i64) -> Result<Option<Develop>, String> {
+    let pos: Option<i64> =
+        c.query_row("SELECT history_pos FROM photos WHERE id = ?", [id], |r| r.get(0)).map_err(es)?;
+    let count: i64 =
+        c.query_row("SELECT COUNT(*) FROM history WHERE photo_id = ?", [id], |r| r.get(0)).map_err(es)?;
+    if count <= 1 {
+        return Err("Cannot delete the only history step".into());
+    }
+
+    let mut new_dev = None;
+    if pos == Some(hid) {
+        let prev: Option<i64> = c
+            .query_row("SELECT MAX(id) FROM history WHERE photo_id = ? AND id < ?", [id, hid], |r| r.get(0))
+            .map_err(es)?;
+        let target = match prev {
+            Some(p) => p,
+            None => c
+                .query_row("SELECT MIN(id) FROM history WHERE photo_id = ? AND id > ?", [id, hid], |r| r.get(0))
+                .map_err(es)?,
+        };
+        let d = goto(c, id, target)?;
+        new_dev = Some(d);
+    }
+
+    c.execute("DELETE FROM history WHERE id = ? AND photo_id = ?", params![hid, id]).map_err(es)?;
+    Ok(new_dev)
+}
+
 /// Undo steps: every history step but each photo's current one.
 const PAST_STEPS: &str = "FROM history WHERE id NOT IN (SELECT history_pos FROM photos WHERE history_pos IS NOT NULL)";
 
@@ -570,12 +599,124 @@ pub fn summary(c: &Connection) -> Result<Value, String> {
     let top = |col: &str| -> Result<Vec<Value>, String> {
         let mut st = c
             .prepare(&format!(
-                "SELECT {col}, COUNT(*) n FROM photos WHERE {col} IS NOT NULL GROUP BY {col} ORDER BY n DESC LIMIT 20"
+                "SELECT {col}, COUNT(*) n FROM photos WHERE {col} IS NOT NULL AND {col} != '' GROUP BY {col} ORDER BY n DESC LIMIT 20"
             ))
             .map_err(es)?;
         let rows = st.query_map([], |r| Ok(json!({"name": r.get::<_, String>(0)?, "count": r.get::<_, i64>(1)?})));
         rows.map_err(es)?.collect::<Result<_, _>>().map_err(es)
     };
+
+    let ratings: Vec<Value> = {
+        let mut st = c.prepare("SELECT rating, COUNT(*) FROM photos GROUP BY rating ORDER BY rating").map_err(es)?;
+        let rows = st.query_map([], |r| Ok(json!({"rating": r.get::<_, i64>(0)?, "count": r.get::<_, i64>(1)?})));
+        rows.map_err(es)?.collect::<Result<_, _>>().map_err(es)?
+    };
+
+    let flags: Vec<Value> = {
+        let mut st = c.prepare("SELECT flag, COUNT(*) FROM photos GROUP BY flag ORDER BY flag").map_err(es)?;
+        let rows = st.query_map([], |r| Ok(json!({"flag": r.get::<_, i64>(0)?, "count": r.get::<_, i64>(1)?})));
+        rows.map_err(es)?.collect::<Result<_, _>>().map_err(es)?
+    };
+
+    let years: Vec<Value> = {
+        let mut st = c.prepare("SELECT SUBSTR(captured_at, 1, 4) y, COUNT(*) n FROM photos WHERE captured_at IS NOT NULL AND length(captured_at) >= 4 GROUP BY y ORDER BY y DESC LIMIT 12").map_err(es)?;
+        let rows = st.query_map([], |r| Ok(json!({"year": r.get::<_, String>(0)?, "count": r.get::<_, i64>(1)?})));
+        rows.map_err(es)?.collect::<Result<_, _>>().map_err(es)?
+    };
+
+    let iso_ranges: Vec<Value> = {
+        let sql = "SELECT 
+          CASE 
+            WHEN iso < 200 THEN '< 200'
+            WHEN iso < 800 THEN '200–800'
+            WHEN iso < 3200 THEN '800–3200'
+            WHEN iso < 12800 THEN '3200–12800'
+            ELSE '12800+'
+          END AS range,
+          COUNT(*) n
+        FROM photos WHERE iso IS NOT NULL AND iso > 0
+        GROUP BY range ORDER BY MIN(iso)";
+        let mut st = c.prepare(sql).map_err(es)?;
+        let rows = st.query_map([], |r| Ok(json!({"range": r.get::<_, String>(0)?, "count": r.get::<_, i64>(1)?})));
+        rows.map_err(es)?.collect::<Result<_, _>>().map_err(es)?
+    };
+
+    let aperture_ranges: Vec<Value> = {
+        let sql = "SELECT 
+          CASE 
+            WHEN aperture <= 1.4 THEN '≤ f/1.4'
+            WHEN aperture <= 2.8 THEN 'f/1.8–f/2.8'
+            WHEN aperture <= 5.6 THEN 'f/4–f/5.6'
+            WHEN aperture <= 11.0 THEN 'f/8–f/11'
+            ELSE '≥ f/16'
+          END AS range,
+          COUNT(*) n
+        FROM photos WHERE aperture IS NOT NULL AND aperture > 0
+        GROUP BY range ORDER BY MIN(aperture)";
+        let mut st = c.prepare(sql).map_err(es)?;
+        let rows = st.query_map([], |r| Ok(json!({"range": r.get::<_, String>(0)?, "count": r.get::<_, i64>(1)?})));
+        rows.map_err(es)?.collect::<Result<_, _>>().map_err(es)?
+    };
+
+    let focal_ranges: Vec<Value> = {
+        let sql = "SELECT 
+          CASE 
+            WHEN focal_length < 24 THEN 'Ultra-wide (<24mm)'
+            WHEN focal_length < 50 THEN 'Wide (24–50mm)'
+            WHEN focal_length < 85 THEN 'Standard (50–85mm)'
+            WHEN focal_length < 200 THEN 'Telephoto (85–200mm)'
+            ELSE 'Super-tele (200mm+)'
+          END AS range,
+          COUNT(*) n
+        FROM photos WHERE focal_length IS NOT NULL AND focal_length > 0
+        GROUP BY range ORDER BY MIN(focal_length)";
+        let mut st = c.prepare(sql).map_err(es)?;
+        let rows = st.query_map([], |r| Ok(json!({"range": r.get::<_, String>(0)?, "count": r.get::<_, i64>(1)?})));
+        rows.map_err(es)?.collect::<Result<_, _>>().map_err(es)?
+    };
+
+    let (formats, raw_count, std_count) = {
+        let mut st = c.prepare("SELECT filename FROM photos").map_err(es)?;
+        let mut map: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut rows = st.query([]).map_err(es)?;
+        let mut raw = 0usize;
+        let mut std = 0usize;
+        while let Some(row) = rows.next().map_err(es)? {
+            let f: String = row.get(0).map_err(es)?;
+            let ext = std::path::Path::new(&f)
+                .extension()
+                .map(|s| s.to_string_lossy().to_uppercase())
+                .unwrap_or_else(|| "OTHER".into());
+            let is_raw = matches!(ext.as_str(), "NEF" | "CR2" | "CR3" | "ARW" | "DNG" | "RAF" | "RW2" | "ORF" | "PEF");
+            if is_raw {
+                raw += 1;
+            } else {
+                std += 1;
+            }
+            *map.entry(ext).or_default() += 1;
+        }
+        let mut list: Vec<(String, usize)> = map.into_iter().collect();
+        list.sort_by(|a, b| b.1.cmp(&a.1));
+        let fmt_values: Vec<Value> = list.into_iter().take(8).map(|(k, v)| json!({"ext": k, "count": v})).collect();
+        (fmt_values, raw, std)
+    };
+
+    let history_stats = {
+        let total_steps: i64 = one("SELECT COUNT(*) FROM history")?;
+        let max_steps: i64 = c.query_row("SELECT COALESCE(MAX(n), 0) FROM (SELECT COUNT(*) n FROM history GROUP BY photo_id)", [], |r| r.get(0)).unwrap_or(0);
+        let edited_photos: i64 = one("SELECT COUNT(*) FROM photos WHERE edited_at IS NOT NULL")?;
+        let avg_steps = if edited_photos > 0 {
+            (total_steps as f64 / edited_photos as f64 * 10.0).round() / 10.0
+        } else {
+            0.0
+        };
+        json!({
+            "total_steps": total_steps,
+            "max_steps": max_steps,
+            "avg_steps": avg_steps,
+        })
+    };
+
     Ok(json!({
         "total_photos": one("SELECT COUNT(*) FROM photos")?,
         "virtual_copies": one("SELECT COUNT(*) FROM photos WHERE master_id IS NOT NULL")?,
@@ -586,6 +727,16 @@ pub fn summary(c: &Connection) -> Result<Value, String> {
         "folders": folders(c)?.into_iter().map(|(f, n)| json!({"folder": f, "count": n})).collect::<Vec<_>>(),
         "cameras": top("camera")?,
         "lenses": top("lens")?,
+        "ratings": ratings,
+        "flags": flags,
+        "years": years,
+        "iso_ranges": iso_ranges,
+        "aperture_ranges": aperture_ranges,
+        "focal_ranges": focal_ranges,
+        "formats": formats,
+        "raw_count": raw_count,
+        "std_count": std_count,
+        "history_stats": history_stats,
     }))
 }
 
@@ -1024,5 +1175,53 @@ mod tests {
         assert_eq!(bin_count(&c).unwrap(), 0);
         drop(c);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_delete_history_step() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(SCHEMA).unwrap();
+
+        c.execute(
+            "INSERT INTO photos (id, path, folder, filename, width, height) VALUES (1, '/photos/a.jpg', '/photos', 'a.jpg', 6000, 4000)",
+            [],
+        )
+        .unwrap();
+
+        let mut d1 = Develop::default();
+        save_develop(&c, 1, &d1, "Import").unwrap();
+
+        // Only 1 step: deleting must fail
+        let h = history(&c, 1).unwrap();
+        assert_eq!(h.len(), 1);
+        let hid1 = h[0]["id"].as_i64().unwrap();
+        assert!(delete_history_step(&c, 1, hid1).is_err());
+
+        // Add 2 more steps
+        d1.basic_tone.exposure = 1.0;
+        save_develop(&c, 1, &d1, "Exposure +1").unwrap();
+        d1.basic_tone.contrast = 20.0;
+        save_develop(&c, 1, &d1, "Contrast +20").unwrap();
+
+        let h = history(&c, 1).unwrap();
+        assert_eq!(h.len(), 3);
+        let hid3 = h[0]["id"].as_i64().unwrap(); // Contrast +20 (current)
+        let hid2 = h[1]["id"].as_i64().unwrap(); // Exposure +1
+
+        // Delete inactive step (hid2)
+        let res = delete_history_step(&c, 1, hid2).unwrap();
+        assert!(res.is_none()); // current step was unchanged
+        let h = history(&c, 1).unwrap();
+        assert_eq!(h.len(), 2);
+        assert_eq!(h[0]["label"], "Contrast +20");
+        assert!(h[0]["current"].as_bool().unwrap());
+
+        // Delete active step (hid3): should move to previous step (hid1)
+        let res = delete_history_step(&c, 1, hid3).unwrap();
+        assert!(res.is_some());
+        let h = history(&c, 1).unwrap();
+        assert_eq!(h.len(), 1);
+        assert_eq!(h[0]["label"], "Import");
+        assert!(h[0]["current"].as_bool().unwrap());
     }
 }

@@ -2,7 +2,7 @@ import { listen } from "@tauri-apps/api/event";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Log } from "./Agent";
-import { api, AppInfo, AutoFunction, CloudFolder, Culling, Develop as Dev, Filter, FolderLoading, forgetRoot, loadRoots, rememberRoot, JobProgress, LABELS, NetworkDrive, Photo, setThumbsDir, Settings, Source } from "./api";
+import { api, AppInfo, AutoFunction, CloudFolder, Culling, Develop as Dev, Filter, FolderLoading, forgetRoot, getFirstFolder, loadLastFolder, loadRoots, rememberLastFolder, rememberRoot, JobProgress, LABELS, NetworkDrive, Photo, setThumbsDir, Settings, Source } from "./api";
 import { AiTaskState, Develop } from "./Develop";
 import { ExportDialog, Library, RemoteDialog, SelectMods } from "./Library";
 import { CompareModal } from "./CompareModal";
@@ -20,7 +20,17 @@ export default function App() {
   const [info, setInfo] = useState<AppInfo | null>(null);
   const [module, setModule] = useState<Module>("library");
   const [libraryAutoFn, setLibraryAutoFn] = useState<AutoFunction | null>(null);
-  const [filter, setFilter] = useState<Filter>({});
+  const [filter, setFilter] = useState<Filter>(() => {
+    const last = loadLastFolder();
+    if (last) {
+      return { folder: last, flat: true, view: `folder:${last}` };
+    }
+    const r = loadRoots();
+    if (r.length > 0) {
+      return { folder: r[0], flat: true, view: `folder:${r[0]}` };
+    }
+    return { view: "loading" };
+  });
   const [photos, setPhotos] = useState<Photo[]>([]);
   const [folders, setFolders] = useState<[string, number][]>([]);
   const [selected, setSelected] = useState<number[]>([]);
@@ -45,7 +55,10 @@ export default function App() {
   const [aiTasks, setAiTasks] = useState<Record<number, AiTaskState>>({});
   const [initialLoading, setInitialLoading] = useState(true);
 
+  const initialResolved = useRef(false);
+
   const reload = useCallback(async () => {
+    if (!initialResolved.current) return;
     const [ps, fs, bc] = await Promise.all([
       api.query(filter),
       api.folders(),
@@ -84,23 +97,68 @@ export default function App() {
 
   useEffect(() => {
     let mounted = true;
-    Promise.all([
-      api.appInfo().then((i) => (setThumbsDir(i.thumbs_dir), setInfo(i))),
-      api.settings().then((s) => {
-        setSettings(s);
-        if (s.theme) {
-          applyTheme(s.theme);
-        } else {
-          applyTheme(getStoredTheme());
-        }
-      }),
-      api.defaultDevelop().then(setDefaults),
-      reloadRef.current(),
-    ]).finally(() => {
-      if (mounted) {
-        setTimeout(() => setInitialLoading(false), 200);
+    (async () => {
+      const storedLast = loadLastFolder();
+      const currentRoots = loadRoots();
+      const initialCandidate = storedLast || currentRoots[0] || null;
+
+      const [appInfoRes, settingsRes, , initialPhotos, fs, bc] = await Promise.all([
+        api.appInfo().then((i) => {
+          setThumbsDir(i.thumbs_dir);
+          setInfo(i);
+          return i;
+        }).catch(() => null),
+        api.settings().then((s) => {
+          setSettings(s);
+          if (s.theme) {
+            applyTheme(s.theme);
+          } else {
+            applyTheme(getStoredTheme());
+          }
+          return s;
+        }).catch(() => null),
+        api.defaultDevelop().then(setDefaults).catch(() => null),
+        initialCandidate ? api.query({ folder: initialCandidate, flat: true }).catch(() => [] as Photo[]) : Promise.resolve([] as Photo[]),
+        api.folders().catch(() => [] as [string, number][]),
+        api.binCount().catch(() => 0),
+      ]);
+
+      if (!mounted) return;
+      setFolders(fs);
+      setBinCount(bc);
+
+      const drives = settingsRes?.network_drives ?? [];
+      const dataDir = appInfoRes?.data_dir ?? "";
+      let targetFolder: string | null = null;
+
+      if (storedLast && (fs.some(([f]) => f === storedLast) || currentRoots.some((r) => storedLast === r || storedLast.startsWith(r)))) {
+        targetFolder = storedLast;
+      } else {
+        targetFolder = getFirstFolder(currentRoots, fs, dataDir, drives);
       }
-    });
+
+      initialResolved.current = true;
+
+      if (targetFolder) {
+        rememberLastFolder(targetFolder);
+        const nextFilter: Filter = { folder: targetFolder, flat: true, view: `folder:${targetFolder}` };
+        setFilter(nextFilter);
+        if (targetFolder === initialCandidate) {
+          setPhotos(initialPhotos);
+        } else {
+          const ps = await api.query(nextFilter).catch(() => []);
+          if (mounted) setPhotos(ps);
+        }
+      } else {
+        setFilter({});
+        const ps = await api.query({}).catch(() => []);
+        if (mounted) setPhotos(ps);
+      }
+
+      setTimeout(() => {
+        if (mounted) setInitialLoading(false);
+      }, 200);
+    })();
 
     const subs = [
       listen("catalog-changed", () => reloadRef.current()),
@@ -124,7 +182,10 @@ export default function App() {
       ),
       listen<{ source: string; message: string }>("agent-log", (e) => setLogs((l) => [...l.slice(-499), { t: new Date().toLocaleTimeString(), ...e.payload }])),
     ];
-    return () => subs.forEach((s) => s.then((f) => f()));
+    return () => {
+      mounted = false;
+      subs.forEach((s) => s.then((f) => f()));
+    };
   }, []);
   useEffect(() => void (module === "settings" && settingsTab === "agent" && api.appInfo().then(setInfo)), [module, settingsTab]);
   useEffect(() => void api.setSelection(selected), [selected]);
@@ -274,6 +335,7 @@ export default function App() {
 
   // A folder is a live source: opening it picks up files added since it was last read.
   const openFolder = async (folder: string) => {
+    rememberLastFolder(folder);
     const viewId = `folder:${folder}`;
     const name = shortFolder(folder);
     const isSwitching = filter.folder !== folder || filter.immich_album != null || filter.ids != null;
@@ -309,7 +371,7 @@ export default function App() {
     if (isSwitching) {
       setPhotos([]);
     }
-    setFilter((f) => ({ ...f, folder: null, immich_album: null, ids: null, view: null, in_bin: null }));
+    setFilter((f) => ({ ...f, folder: null, immich_album: null, ids: null, view: "all", in_bin: null }));
     try {
       await reloadRef.current();
     } finally {
@@ -436,6 +498,7 @@ export default function App() {
 
   // A network drive opens like a folder; it is connected first when it isn't mounted.
   const openDrive = async (d: NetworkDrive) => {
+    rememberLastFolder(d.path);
     const viewId = `drive:${d.id}`;
     const isSwitching = filter.view !== viewId;
     setLoadingFolder({ viewId, name: d.name });
@@ -776,7 +839,7 @@ export default function App() {
         )}
         <button
           className="flex items-center gap-1.5 text-[11px] text-neutral-400 hover:text-neutral-200 transition-colors cursor-pointer"
-          title={`${info?.mcp_url ?? "MCP server"} — Click to open AI & MCP Settings`}
+          title={`${info?.mcp_url ?? "MCP server"} — Click to open Agent & MCP Settings`}
           onClick={() => {
             setSettingsTab("agent");
             setModule("settings");

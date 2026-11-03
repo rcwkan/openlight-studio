@@ -569,7 +569,7 @@ fn serve(core: &Arc<Core>, mut req: tiny_http::Request) {
     }
     let token = core.settings.lock().unwrap().mcp_token.clone();
     if !auth.and_then(|a| a.strip_prefix("Bearer ").map(|t| ct_eq(t.trim(), &token))).unwrap_or(false) {
-        return reply(req, 401, json!({ "error": "missing or invalid bearer token (Settings > AI & MCP)" }).to_string());
+        return reply(req, 401, json!({ "error": "missing or invalid bearer token (Settings > Agent & MCP)" }).to_string());
     }
     if *req.method() != tiny_http::Method::Post {
         return reply(req, 405, String::new());

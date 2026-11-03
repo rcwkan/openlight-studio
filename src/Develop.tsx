@@ -121,7 +121,14 @@ const ASPECTS: [string, number | null][] = [
 
 /** Settings copied between photos (crop, removals and provenance stay per photo). */
 let clipboard: Dev | null = null;
-const paste = (target: Dev, src: Dev): Dev => ({ ...structuredClone(src), crop: target.crop, retouch: target.retouch, ai_provenance_log: target.ai_provenance_log });
+const paste = (target: Dev, src: Dev): Dev => ({
+  ...structuredClone(src),
+  crop: target.crop,
+  retouch: target.retouch,
+  ai_removals: target.ai_removals,
+  ai_denoise: target.ai_denoise,
+  ai_provenance_log: target.ai_provenance_log,
+});
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 
 /** Ensure each AI-selected polygon object is its own selection in `masks` so it can be tuned independently. */
@@ -1462,10 +1469,29 @@ export function Develop(p: Props) {
               <div
                 key={h.id}
                 onClick={async () => id != null && (await flush(), setDev(await api.gotoHistory(id, h.id)), refreshHistory(id))}
-                className={`flex cursor-pointer justify-between gap-2 rounded px-2 py-1 text-[11px] ${h.current ? "bg-neutral-700 text-white" : "text-neutral-400 hover:bg-neutral-800"}`}
+                className={`group flex cursor-pointer items-center justify-between gap-1.5 rounded px-2 py-1 text-[11px] ${h.current ? "bg-neutral-700 text-white" : "text-neutral-400 hover:bg-neutral-800"}`}
               >
                 <span className={`truncate ${h.label.startsWith("AI") ? "text-violet-300" : ""}`}>{h.label}</span>
-                <span className="shrink-0 text-neutral-500">{h.created_at.slice(11, 16)}</span>
+                <div className="flex shrink-0 items-center gap-1.5">
+                  <span className="text-neutral-500">{h.created_at.slice(11, 16)}</span>
+                  {history.length > 1 && (
+                    <button
+                      type="button"
+                      title="Delete this history step"
+                      onClick={async (e) => {
+                        e.stopPropagation();
+                        if (id == null) return;
+                        await flush();
+                        const updated = await api.deleteHistory(id, h.id);
+                        if (updated && idRef.current === id) setDev(updated);
+                        refreshHistory(id);
+                      }}
+                      className="flex h-3.5 w-3.5 items-center justify-center rounded text-[10px] font-bold text-red-500 opacity-60 transition-all hover:bg-red-950/60 hover:text-red-400 hover:opacity-100 group-hover:opacity-100"
+                    >
+                      ✕
+                    </button>
+                  )}
+                </div>
               </div>
             ))}
           </div>
@@ -2265,7 +2291,23 @@ export function Develop(p: Props) {
           />
         )}
         {dev && T && rtab === "pro" && <ProTab dev={T} edit={edit} S={S} reset={reset} whole={!mask} autoLevels={autoLevels} autoHdr={autoHdr} hist={hist?.[3]} />}
-        {rtab === "ai" && <AiTab photoId={id} settings={p.settings} drawing={tool === "remove"} onDraw={() => (tool === "remove" ? setTool("none") : (clearBrush(), setTool("remove")))} selection={snap ? strokes : null} brush={brush} setBrush={setBrush} onClear={clearBrush} onOpenModels={() => p.onOpenModels?.()} onOpenPhoto={(n) => p.onOpenPhoto?.(n)} />}
+        {rtab === "ai" && (
+          <AiTab
+            photoId={id}
+            settings={p.settings}
+            dev={dev}
+            onChange={change}
+            setDev={setDev}
+            drawing={tool === "remove"}
+            onDraw={() => (tool === "remove" ? setTool("none") : (clearBrush(), setTool("remove")))}
+            selection={snap ? strokes : null}
+            brush={brush}
+            setBrush={setBrush}
+            onClear={clearBrush}
+            onOpenModels={() => p.onOpenModels?.()}
+            onOpenPhoto={(n) => p.onOpenPhoto?.(n)}
+          />
+        )}
         {dev && rtab === "auto" && (
           <AutoTab
             dev={dev}

@@ -29,6 +29,11 @@ const PROFILES: [string, string][] = [
   ["architecture", "Architecture"],
   ["night", "Night"],
   ["nature", "Nature & macro"],
+  ["teal_orange", "Teal & Orange"],
+  ["soft_editorial", "Soft editorial"],
+  ["dark_moody", "Dark moody"],
+  ["analog_film", "35mm film"],
+  ["fine_art_bw", "Fine-art B&W"],
 ];
 const DETAIL: [string, string][] = [
   ["fast", "Fast (1024 px)"],

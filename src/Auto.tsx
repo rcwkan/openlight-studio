@@ -17,6 +17,11 @@ const PROFILES: [string, string, string][] = [
   ["architecture", "Architecture", "Clean and cool: crisp lines, even tones, pastel skies, little colour"],
   ["night", "Night", "Teal and orange city light, neon held back, deep blacks"],
   ["nature", "Nature", "Macro, flowers and wildlife: lush greens, fine detail, soft vignette"],
+  ["teal_orange", "Teal & Orange", "Cinematic: teal shadows, amber highlights, deep shadows, held-back highlights"],
+  ["soft_editorial", "Editorial", "Soft and airy: bright, warm midtones, luminous skin, dusty muted colour"],
+  ["dark_moody", "Dark Moody", "Low key and atmospheric: compressed highlights, pine greens, muted yellows, vignette"],
+  ["analog_film", "35mm Film", "Vintage emulsion: lifted blacks, rolled-off whites, golden warmth, heavy grain"],
+  ["fine_art_bw", "Fine-Art B&W", "Zone-system black and white: deep S-curve, dark skies, bright skin, fine grain"],
 ];
 const sub = "mb-1 mt-3 text-[10px] uppercase tracking-wider text-neutral-500";
 const hint = "mt-1 text-[10px] text-neutral-500";

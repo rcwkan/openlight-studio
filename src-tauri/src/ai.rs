@@ -442,7 +442,7 @@ fn run_cli(core: &Arc<Core>, p: &Provider, id: i64, prompt: &str, dir: &PathBuf,
         (s.mcp_enabled, format!("http://127.0.0.1:{}/mcp", s.mcp_port), s.mcp_token.clone())
     };
     if !enabled || *core.mcp_status.lock().unwrap() != "running" {
-        return Err("CLI agents edit through the MCP server; enable it in AI & MCP settings (restart may be needed)".into());
+        return Err("CLI agents edit through the MCP server; enable it in Agent & MCP settings (restart may be needed)".into());
     }
     if p.command.trim().is_empty() {
         return Err(format!("{} has no command template", p.name));
@@ -610,7 +610,7 @@ fn call_model(p: &Provider, system: &str, user: &str, image_b64: &str, schema: &
             )
         }
         "anthropic" => {
-            headers.push(("x-api-key", key.ok_or("no Anthropic API key (set one in AI & MCP or ANTHROPIC_API_KEY)")?));
+            headers.push(("x-api-key", key.ok_or("no Anthropic API key (set one in Agent & MCP or ANTHROPIC_API_KEY)")?));
             headers.push(("anthropic-version", "2023-06-01".into()));
             (
                 format!("{ep}/v1/messages"),
@@ -620,7 +620,7 @@ fn call_model(p: &Provider, system: &str, user: &str, image_b64: &str, schema: &
             )
         }
         "gemini" => {
-            headers.push(("x-goog-api-key", key.ok_or("no Gemini API key (set one in AI & MCP or GEMINI_API_KEY)")?));
+            headers.push(("x-goog-api-key", key.ok_or("no Gemini API key (set one in Agent & MCP or GEMINI_API_KEY)")?));
             (
                 format!("{ep}/v1beta/models/{}:generateContent", p.model),
                 json!({ "systemInstruction": { "parts": [{ "text": system }] },

@@ -175,7 +175,7 @@ impl Core {
         }
     }
 
-    /// Activity line for the AI & MCP console.
+    /// Activity line for the Agent & MCP console.
     pub fn log(&self, source: &str, message: impl Into<String>) {
         self.emit("agent-log", json!({"source": source, "message": message.into()}));
     }
@@ -227,11 +227,21 @@ impl Core {
         Ok(img)
     }
 
+    pub fn ai_cache_dir(&self, id: i64) -> PathBuf {
+        let p = self.dir.join("cache").join("ai").join(id.to_string());
+        let _ = fs::create_dir_all(&p);
+        p
+    }
+
     /// Render the current edit of a photo at proxy size.
     pub fn render(&self, id: i64, opts: &Opts) -> Result<Img, String> {
         let p = self.photo(id)?;
         let d = self.develop(id)?;
-        Ok(develop::render(&*self.proxy(&p.path)?, &d, opts))
+        let mut opts = opts.clone();
+        if opts.ai_cache_dir.is_none() {
+            opts.ai_cache_dir = Some(self.ai_cache_dir(id));
+        }
+        Ok(develop::render(&*self.proxy(&p.path)?, &d, &opts))
     }
 
     /// Persist an edit as one history step (one undo = one GUI gesture or one AI/MCP call).
@@ -248,7 +258,7 @@ impl Core {
         let (core, d) = (self.clone(), d.clone());
         std::thread::spawn(move || {
             let res = (|| -> Result<(), String> {
-                let out = develop::render(&*core.proxy(&photo.path)?, &d, &Opts::default());
+                let out = develop::render(&*core.proxy(&photo.path)?, &d, &Opts { ai_cache_dir: Some(core.ai_cache_dir(id)), ..Default::default() });
                 let thumb = catalog::to_dynamic(&out).thumbnail(catalog::THUMB, catalog::THUMB);
                 catalog::write_jpeg(&core.thumb_path(id), &thumb)?;
                 core.db().execute("UPDATE photos SET thumb_v = thumb_v + 1 WHERE id = ?", [id]).map_err(es)?;
@@ -374,7 +384,8 @@ impl Core {
             let p = self.photo(id)?;
             let d = self.develop(id)?;
             let src = self.decode(&self.local_file(&p.path)?, max_edge)?;
-            let img = develop::render(&src, &d, &Opts::default());
+            let opts = Opts { ai_cache_dir: Some(self.ai_cache_dir(id)), ..Default::default() };
+            let img = develop::render(&src, &d, &opts);
             let stem = Path::new(&p.filename).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
             let stem = match &p.copy_name {
                 Some(c) => format!("{stem}-{}", c.replace(' ', "")),
@@ -519,7 +530,7 @@ struct Proof {
 #[tauri::command(async)]
 fn render_preview(core: St, id: i64, develop: Develop, skip_crop: bool, overlay_mask: Option<usize>, full_frame: Option<bool>, proof: Option<Proof>, hires: Option<bool>) -> Result<tauri::ipc::Response, String> {
     let photo = core.photo(id)?;
-    let opts = Opts { skip_crop, overlay_mask, full_frame: full_frame.unwrap_or(false) };
+    let opts = Opts { skip_crop, overlay_mask, full_frame: full_frame.unwrap_or(false), ai_cache_dir: Some(core.ai_cache_dir(id)) };
     let src = if hires == Some(true) { core.full_image(&photo.path)? } else { core.proxy(&photo.path)? };
     let mut out = develop::render(&src, &develop, &opts);
     drop(src);
@@ -658,6 +669,16 @@ fn goto_history(core: St, id: i64, hid: i64) -> Result<Develop, String> {
 }
 
 #[tauri::command(async)]
+fn delete_history(core: St, id: i64, hid: i64) -> Result<Option<Develop>, String> {
+    let d = catalog::delete_history_step(&core.db(), id, hid)?;
+    if let Some(d) = &d {
+        core.refresh(id, d)?;
+    }
+    core.emit("catalog-changed", json!({}));
+    Ok(d)
+}
+
+#[tauri::command(async)]
 fn undo_redo(core: St, id: i64, dir: i32) -> Result<Option<Develop>, String> {
     let d = catalog::step(&core.db(), id, dir)?;
     if let Some(d) = &d {
@@ -758,6 +779,127 @@ fn snap_object(core: St, id: i64, strokes: Vec<brush::Stroke>) -> Result<tauri::
 #[tauri::command(async)]
 fn ai_remove(core: St, id: String) -> Result<(), String> {
     aimodel::remove(&core.dir, &id)
+}
+
+#[tauri::command(async)]
+fn ai_inpaint_inplace(
+    core: St,
+    id: i64,
+    model: String,
+    strokes: Vec<brush::Stroke>,
+    grow: usize,
+    prompt: String,
+) -> Result<Develop, String> {
+    if strokes.is_empty() {
+        return Err("no strokes drawn to remove".into());
+    }
+    let p = core.photo(id)?;
+    let job = crate::auto::Job::start(&core, "ai-remove");
+    let file = core.local_file(&p.path)?;
+    let img = core.decode(&file, None)?;
+    let proxy = core.proxy(&p.path)?;
+    let alpha = brush::snap(&proxy, &strokes)?;
+    let hole = aimodel::hole_from_alpha(&alpha, proxy.w, proxy.h, img.w, img.h).ok_or("nothing is selected to remove")?;
+
+    job.progress("Preparing hole & context", 0, 25);
+    let patch = aimodel::inpaint_patch(&core.dir, &model, &img, &hole, grow.min(40), &prompt, &|done, total| {
+        let label = if total > 3 {
+            format!("Diffusion step {} of {}", (done + 1).min(total), total)
+        } else if total == 3 {
+            match done {
+                1 => "Extracting hole context".to_string(),
+                2 => "Inpainting with neural network".to_string(),
+                _ => "Feathering & blending patch".to_string(),
+            }
+        } else {
+            "Removing object".to_string()
+        };
+        job.progress(&label, done, total);
+        !job.cancelled()
+    })?;
+
+    let removal_id = new_token()[..12].to_string();
+    let patch_filename = format!("patch_{removal_id}.bin");
+    let ai_dir = core.ai_cache_dir(id);
+    patch.save(&ai_dir.join(&patch_filename))?;
+
+    let mut d = core.develop(id)?;
+    let removal_label = if prompt.trim().is_empty() {
+        format!("Removal {}", d.ai_removals.len() + 1)
+    } else {
+        format!("Fill: {}", prompt.trim())
+    };
+    let bounds = [
+        patch.sx as f32 / img.w as f32,
+        patch.sy as f32 / img.h as f32,
+        patch.side as f32 / img.w as f32,
+        patch.side as f32 / img.h as f32,
+    ];
+    d.ai_removals.push(develop::AiRemoval {
+        id: removal_id,
+        enabled: true,
+        model: model.clone(),
+        label: removal_label,
+        prompt: prompt.clone(),
+        bounds,
+        patch_file: patch_filename,
+    });
+    core.commit(id, &d, "AI: Remove object")?;
+    Ok(d)
+}
+
+#[tauri::command(async)]
+fn ai_denoise_inplace(
+    core: St,
+    id: i64,
+    model: String,
+    strength: f32,
+) -> Result<Develop, String> {
+    let p = core.photo(id)?;
+    let job = crate::auto::Job::start(&core, "ai-denoise");
+    let file = core.local_file(&p.path)?;
+    let img = core.decode(&file, None)?;
+    let vram = aimodel::hardware().vram_mb;
+
+    job.progress("Starting AI denoise", 0, 1);
+    let denoised_img = aimodel::denoise(&core.dir, &model, img, 100.0, vram, &|done, total| {
+        let label = if total > 1 {
+            format!("Denoising tile {} of {}", (done + 1).min(total), total)
+        } else {
+            "Denoising photo".to_string()
+        };
+        job.progress(&label, done + 1, total);
+        !job.cancelled()
+    })?;
+
+    let cache = develop::DenoisedCache {
+        w: denoised_img.w,
+        h: denoised_img.h,
+        px: denoised_img.px,
+    };
+    let cache_file = core.ai_cache_dir(id).join(format!("denoise_{model}.bin"));
+    cache.save(&cache_file)?;
+
+    let mut d = core.develop(id)?;
+    d.ai_denoise = develop::AiDenoise {
+        enabled: true,
+        model: model.clone(),
+        strength,
+    };
+    core.commit(id, &d, "AI: Denoise")?;
+    Ok(d)
+}
+
+#[tauri::command(async)]
+fn ai_delete_removal(core: St, id: i64, removal_id: String) -> Result<Develop, String> {
+    let mut d = core.develop(id)?;
+    if let Some(pos) = d.ai_removals.iter().position(|r| r.id == removal_id) {
+        let r = d.ai_removals.remove(pos);
+        let patch_path = core.ai_cache_dir(id).join(&r.patch_file);
+        let _ = std::fs::remove_file(patch_path);
+        core.commit(id, &d, "Delete AI removal")?;
+    }
+    Ok(d)
 }
 
 /// Detected GPU adapter name, or null when none is usable (the Settings toggle then has no effect).
@@ -1034,6 +1176,7 @@ pub fn run() {
             save_develop,
             get_history,
             goto_history,
+            delete_history,
             undo_redo,
             export_photos,
             get_settings,
@@ -1042,6 +1185,9 @@ pub fn run() {
             ai_models,
             ai_download,
             ai_remove,
+            ai_inpaint_inplace,
+            ai_denoise_inplace,
+            ai_delete_removal,
             snap_object,
             regenerate_token,
             set_provider_key,
