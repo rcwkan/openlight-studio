@@ -288,7 +288,13 @@ export function Develop(p: Props) {
     (d: Dev, label: string, replacePrefix?: string) => {
       if (idRef.current == null) return;
       setDev(d);
-      if (pending.current) clearTimeout(pending.current.timer);
+      if (pending.current) {
+        if (pending.current.label !== label && pending.current.id === idRef.current) {
+          void flush();
+        } else {
+          clearTimeout(pending.current.timer);
+        }
+      }
       pending.current = { id: idRef.current, d, label, replacePrefix, timer: window.setTimeout(flush, 450) };
     },
     [flush],
@@ -1169,12 +1175,13 @@ export function Develop(p: Props) {
   // While a mask is selected every panel tunes inside it: the mask's own settings (a delta
   // that starts at the defaults), applied on top of the photo.
   const T = mask ? (mask.tuning ?? p.defaults) : dev;
-  const edit = (t: Dev, label: string) => {
-    if (dev && mask && maskSel != null) (setOverlay(false), change(setPath(dev, ["masks", maskSel, "tuning"], t), `${mask.name}: ${label}`));
-    else change(t, label);
+  const edit = (t: Dev, label: string, replacePrefix?: string) => {
+    const prefix = replacePrefix ?? label;
+    if (dev && mask && maskSel != null) (setOverlay(false), change(setPath(dev, ["masks", maskSel, "tuning"], t), `${mask.name}: ${label}`, `${mask.name}: ${prefix}`));
+    else change(t, label, prefix);
   };
   const slider =
-    (root: Dev | null, write: (d: Dev, label: string) => void) =>
+    (root: Dev | null, write: (d: Dev, label: string, replacePrefix?: string) => void) =>
       (label: string, path: Path, min: number, max: number, extra: Partial<Parameters<typeof Slider>[0]> = {}) =>
         root && (
           <Slider
@@ -1184,7 +1191,7 @@ export function Develop(p: Props) {
             def={(getPath(p.defaults, path) as number | undefined) ?? 0}
             min={min}
             max={max}
-            onChange={(v) => write(setPath(root, path, v), label)}
+            onChange={(v) => write(setPath(root, path, v), label, label)}
             {...extra}
           />
         );
@@ -1296,7 +1303,7 @@ export function Develop(p: Props) {
     if (!dev || r == null) return;
     const W = imgSize.w / imgSize.h;
     const [w, h] = W > r ? [r / W, 1] : [1, W / r];
-    change({ ...dev, crop: { ...dev.crop, x: (1 - w) / 2, y: (1 - h) / 2, w, h } }, "Crop aspect");
+    change({ ...dev, crop: { ...dev.crop, x: (1 - w) / 2, y: (1 - h) / 2, w, h } }, "Crop aspect", "Crop aspect");
   };
   const cropDrag = (mode: string) =>
     dragger((dx, dy) => {
@@ -1332,7 +1339,7 @@ export function Develop(p: Props) {
           y = clamp(y, 0, 1 - h);
         }
       }
-      change({ ...base, crop: { ...base.crop, x, y, w, h } }, "Crop");
+      change({ ...base, crop: { ...base.crop, x, y, w, h } }, "Crop", "Crop");
     });
 
   const compDrag = (ci: number, key: "start" | "end" | "center" | "radius", axis?: 0 | 1) =>
@@ -1342,7 +1349,7 @@ export function Develop(p: Props) {
       let v: number[];
       if (key === "radius") v = axis === 0 ? [Math.max(0.01, c.radius[0] + dx), c.radius[1]] : [c.radius[0], Math.max(0.01, c.radius[1] + dy)];
       else v = [clamp(c[key][0] + dx, -0.5, 1.5), clamp(c[key][1] + dy, -0.5, 1.5)];
-      change(setPath(base, ["masks", maskSel!, "components", ci, key], v), "Move mask");
+      change(setPath(base, ["masks", maskSel!, "components", ci, key], v), "Move mask", "Move mask");
     });
   const grab = (ci: number, fn: (e: React.PointerEvent) => void) => (e: React.PointerEvent) => {
     handleStart.current = structuredClone(devRef.current!.masks[maskSel!].components[ci]);
@@ -2478,7 +2485,7 @@ export function Develop(p: Props) {
                 points={T.tone_curve[curveKey.current]}
                 color={{ point_luma: "#ddd", point_red: "#f55", point_green: "#5d5", point_blue: "#58f" }[curveKey.current]}
                 hist={hist?.[{ point_luma: 3, point_red: 0, point_green: 1, point_blue: 2 }[curveKey.current]]}
-                onChange={(pts) => edit(setPath(T, ["tone_curve", curveKey.current], pts), "Point curve")}
+                onChange={(pts) => edit(setPath(T, ["tone_curve", curveKey.current], pts), "Point curve", "Point curve")}
               />
               <p className="mt-1 text-[10px] text-neutral-500">Click to add · drag to move · double-click to delete</p>
             </Panel>
@@ -2529,11 +2536,11 @@ export function Develop(p: Props) {
             <Panel title="Color grading" open={false} right={reset("color_grading_3way", "grading")}>
               <div className="grid grid-cols-3 gap-2">
                 {(["shadows", "midtones", "highlights"] as const).map((k) => (
-                  <ColorWheel key={k} size={84} label={k[0].toUpperCase() + k.slice(1)} wheel={T.color_grading_3way[k]} onChange={(w) => edit(setPath(T, ["color_grading_3way", k], w), `Grade ${k}`)} />
+                  <ColorWheel key={k} size={84} label={k[0].toUpperCase() + k.slice(1)} wheel={T.color_grading_3way[k]} onChange={(w) => edit(setPath(T, ["color_grading_3way", k], w), `Grade ${k}`, `Grade ${k}`)} />
                 ))}
               </div>
               <div className="mx-auto mt-2 w-28">
-                <ColorWheel label="Global" size={84} wheel={T.color_grading_3way.global} onChange={(w) => edit(setPath(T, ["color_grading_3way", "global"], w), "Grade global")} />
+                <ColorWheel label="Global" size={84} wheel={T.color_grading_3way.global} onChange={(w) => edit(setPath(T, ["color_grading_3way", "global"], w), "Grade global", "Grade global")} />
               </div>
               {S("Blending", ["color_grading_3way", "blending"], 0, 100)}
               {S("Balance", ["color_grading_3way", "balance"], -100, 100)}

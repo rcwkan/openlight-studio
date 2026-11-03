@@ -33,7 +33,7 @@ const HDR_CURVES: [string, number[][]][] = [
 export function ProTab(p: {
   /** the photo, or the selected selection's tuning */
   dev: Dev;
-  edit: (d: Dev, label: string) => void;
+  edit: (d: Dev, label: string, replacePrefix?: string) => void;
   S: SliderFor;
   reset: (key: keyof Dev, label: string) => ReactNode;
   /** no selection: whole-photo panels and auto */
@@ -47,7 +47,7 @@ export function ProTab(p: {
   const [ch, setCh] = useState<"rgb" | "red" | "green" | "blue">("rgb");
   const [fam, setFam] = useState<(typeof FAMILIES)[number]>("reds");
   const [out, setOut] = useState<"red" | "green" | "blue">("red");
-  const set = (path: string[], v: unknown, label: string) => edit(setPath(dev, path, v), label);
+  const set = (path: string[], v: unknown, label: string) => edit(setPath(dev, path, v), label, label);
   const check = (label: string, path: string[], title?: string) => (
     <label className="mt-1.5 flex items-center gap-1.5 text-[11px] text-neutral-300" title={title}>
       <input type="checkbox" checked={getPath(dev, path) as boolean} onChange={(e) => set(path, e.target.checked, label)} />

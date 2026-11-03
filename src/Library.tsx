@@ -902,6 +902,7 @@ function FolderNode({
 }) {
   const [open, setOpen] = useState(false);
   const [kids, setKids] = useState<string[]>([]);
+  const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(null);
   const show = (v: boolean) => {
     setOpen(v);
     if (v) void api.browseFolder(path).then(([d]) => setKids(d), () => setKids([]));
@@ -927,12 +928,31 @@ function FolderNode({
           <FolderRow
             {...row}
             hue="amber"
+            onContextMenu={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setMenuPos({ x: e.clientX, y: e.clientY });
+            }}
             actions={
-              onRemove && (
-                <button className="px-1 text-neutral-400 hover:text-red-400" title="Remove from the list; nothing is deleted" onClick={onRemove}>
-                  ×
+              <div className="flex items-center gap-0.5">
+                <button
+                  type="button"
+                  className="px-1 text-neutral-400 hover:text-neutral-200"
+                  title="Folder actions"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    const rect = e.currentTarget.getBoundingClientRect();
+                    setMenuPos({ x: rect.right, y: rect.bottom });
+                  }}
+                >
+                  ···
                 </button>
-              )
+                {onRemove && (
+                  <button type="button" className="px-1 text-neutral-400 hover:text-red-400" title="Remove from the list; nothing is deleted" onClick={(e) => { e.stopPropagation(); onRemove(); }}>
+                    ×
+                  </button>
+                )}
+              </div>
             }
             onClick={() => {
               row.onClick();
@@ -941,6 +961,71 @@ function FolderNode({
           />
         </div>
       </div>
+      {menuPos && (
+        <div className="fixed inset-0 z-50 cursor-default" onClick={(e) => { e.stopPropagation(); setMenuPos(null); }}>
+          <div
+            className="fixed z-50 min-w-[200px] rounded-lg border border-neutral-700 bg-neutral-900/95 p-1 text-xs text-neutral-200 shadow-2xl backdrop-blur-md"
+            style={{
+              left: Math.min(menuPos.x, Math.max(10, window.innerWidth - 220)),
+              top: Math.min(menuPos.y, Math.max(10, window.innerHeight - 170)),
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-neutral-500 truncate border-b border-neutral-800 mb-1">
+              {path.split(/[\\/]/).filter(Boolean).pop() ?? path}
+            </div>
+            <button
+              type="button"
+              className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-neutral-200 hover:bg-neutral-800 hover:text-white cursor-pointer"
+              onClick={() => {
+                setMenuPos(null);
+                void api.showInFolder(path);
+              }}
+            >
+              <span className="text-neutral-400">↗</span>
+              <span>Open in {fileManagerName()}</span>
+            </button>
+            <button
+              type="button"
+              className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-neutral-200 hover:bg-neutral-800 hover:text-white cursor-pointer"
+              onClick={() => {
+                setMenuPos(null);
+                p.onOpenFolder(path);
+              }}
+            >
+              <span className="text-neutral-400">↻</span>
+              <span>Rescan Folder</span>
+            </button>
+            <button
+              type="button"
+              className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-neutral-200 hover:bg-neutral-800 hover:text-white cursor-pointer"
+              onClick={async () => {
+                setMenuPos(null);
+                await api.regenerateThumbnails({ folder: path });
+              }}
+            >
+              <span className="text-neutral-400">⚡</span>
+              <span>Regenerate Thumbnails</span>
+            </button>
+            {onRemove && (
+              <>
+                <div className="my-1 border-t border-neutral-800" />
+                <button
+                  type="button"
+                  className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-red-400 hover:bg-red-500/10 cursor-pointer"
+                  onClick={() => {
+                    setMenuPos(null);
+                    onRemove();
+                  }}
+                >
+                  <span>×</span>
+                  <span>Remove from Sidebar</span>
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      )}
       {open && kids.map((k) => <FolderNode key={k} path={k} depth={depth + 1} p={p} />)}
     </>
   );
@@ -953,6 +1038,7 @@ function FolderRow({
   loading,
   progress,
   onClick,
+  onContextMenu,
   title,
   icon,
   actions,
@@ -965,6 +1051,7 @@ function FolderRow({
   loading?: boolean;
   progress?: FolderProgress;
   onClick: () => void;
+  onContextMenu?: (e: React.MouseEvent) => void;
   title?: string;
   icon?: ReactNode;
   /** small buttons shown in place of the count on hover or focus */
@@ -981,6 +1068,7 @@ function FolderRow({
       tabIndex={0}
       title={title}
       onClick={onClick}
+      onContextMenu={onContextMenu}
       onKeyDown={(e) => e.target === e.currentTarget && (e.key === "Enter" || e.key === " ") && (e.preventDefault(), onClick())}
       className={`group flex cursor-pointer items-center gap-1.5 rounded py-1 pr-1.5 text-[11px] outline-none transition-colors duration-150 focus-visible:ring-1 focus-visible:ring-[var(--theme-accent,#0ea5e9)] ${indent ? "pl-4" : "pl-2"} ${
         active ? `${h.soft} font-medium text-neutral-100` : loading ? "bg-neutral-800/80 text-neutral-100" : "text-neutral-300 hover:bg-neutral-800/60"
@@ -1320,6 +1408,15 @@ function Metadata(p: Props & { photo: Photo }) {
                 title={`Open and reveal file in ${fileManagerName()}`}
               >
                 Open in {fileManagerName()}
+              </Btn>
+              <Btn
+                onClick={async () => {
+                  const targets = p.selected.length ? p.selected : [ph.id];
+                  await api.regenerateThumbnails({ ids: targets });
+                }}
+                title="Re-render thumbnail directly from source file on disk"
+              >
+                Regenerate thumbnail{p.selected.length > 1 ? `s (${p.selected.length})` : ""}
               </Btn>
               {/* the ones that take photos away, on their own line under the everyday ones */}
               <div className="mt-1 flex w-full flex-wrap gap-1 border-t border-neutral-800 pt-2">

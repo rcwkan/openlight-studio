@@ -638,6 +638,7 @@ function Usage({ onSettingsChanged, onGoToAiModels }: { onSettingsChanged: () =>
   const [cleanupOld, setCleanupOld] = useState(false);
   const [reconnectBusy, setReconnectBusy] = useState(false);
   const [relocating, setRelocating] = useState<{ phase: string; file: string; done_bytes: number; total_bytes: number } | null>(null);
+  const [regenProgress, setRegenProgress] = useState<{ done: number; total: number } | null>(null);
 
   useEffect(() => void api.storage().then(setR, (e) => setNote(`Could not measure storage: ${e}`)), []);
 
@@ -654,8 +655,15 @@ function Usage({ onSettingsChanged, onGoToAiModels }: { onSettingsChanged: () =>
         }));
       }
     );
+    const unlistenRegen = listen<{ done: number; total: number }>(
+      "regenerate-thumbs-progress",
+      (event) => {
+        setRegenProgress(event.payload);
+      }
+    );
     return () => {
       void unlistenPromise.then((unlisten) => unlisten());
+      void unlistenRegen.then((unlisten) => unlisten());
     };
   }, []);
 
@@ -685,7 +693,7 @@ function Usage({ onSettingsChanged, onGoToAiModels }: { onSettingsChanged: () =>
   const handleConfirmRelocate = async (mode: StorageMoveMode) => {
     if (!pendingRelocate?.target) return;
     const target = pendingRelocate.target;
-    const isResettingToDefault = target === r?.default_data_dir;
+    const isResettingToDefault = !pendingRelocate.is_custom || target === r?.default_data_dir;
     setRelocating({
       phase: "starting",
       file: "",
@@ -1133,6 +1141,11 @@ function Usage({ onSettingsChanged, onGoToAiModels }: { onSettingsChanged: () =>
               <span className="truncate text-[11px] text-emerald-400" title={note}>
                 {note}
               </span>
+              {regenProgress && regenProgress.total > 0 && (
+                <span className="font-mono text-[11px] font-medium text-sky-400 tabular-nums">
+                  {Math.round((regenProgress.done / regenProgress.total) * 100)}%
+                </span>
+              )}
               <Btn
                 active
                 className="px-2.5 py-0.5 font-medium text-violet-200 hover:text-white"
@@ -1173,6 +1186,72 @@ function Usage({ onSettingsChanged, onGoToAiModels }: { onSettingsChanged: () =>
               </Btn>
             </div>
           ))}
+          <div className="flex flex-col gap-2 border-t border-neutral-800 py-2.5">
+            <div className="flex items-center gap-3">
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2">
+                  <span className="text-neutral-200 font-medium">Regenerate thumbnails</span>
+                  {regenProgress && (
+                    <span className="rounded bg-sky-950 px-1.5 py-0.5 text-[10px] font-medium text-sky-300 border border-sky-800/60 animate-pulse">
+                      In progress…
+                    </span>
+                  )}
+                </div>
+                <div className="text-[11px] text-neutral-500">
+                  Re-render all thumbnails directly from original photo files on disk. Fixes mismatched, outdated, or missing previews.
+                </div>
+              </div>
+              <span className="shrink-0 text-right tabular-nums text-neutral-400">
+                {regenProgress ? `${num(regenProgress.done)} / ${num(regenProgress.total)}` : plural(r.summary.total_photos, "photo")}
+              </span>
+              <Btn
+                className="w-24 shrink-0"
+                disabled={!!busy || !!regenProgress}
+                onClick={async () => {
+                  if (busy || regenProgress) return;
+                  setBusy("regen_thumbs");
+                  setNote("Regenerating thumbnails…");
+                  try {
+                    const count = await api.regenerateThumbnails();
+                    const next = await api.storage();
+                    setR(next);
+                    setNote(`Regenerated ${num(count)} thumbnails.`);
+                  } catch (e) {
+                    setNote(`Failed to regenerate: ${e}`);
+                  } finally {
+                    setBusy("");
+                    setTimeout(() => setRegenProgress(null), 2500);
+                  }
+                }}
+              >
+                {busy === "regen_thumbs" || regenProgress ? "Working…" : "Regenerate"}
+              </Btn>
+            </div>
+            {regenProgress && regenProgress.total > 0 && (
+              <div className="space-y-1.5 rounded-lg border border-sky-800/80 bg-sky-950/40 p-2.5 text-sky-200">
+                <div className="flex justify-between text-[11px] font-medium">
+                  <span className="flex items-center gap-1.5">
+                    <svg className="h-3.5 w-3.5 animate-spin text-sky-400" viewBox="0 0 24 24" fill="none">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                    </svg>
+                    <span>Regenerating photo thumbnails…</span>
+                  </span>
+                  <span className="font-mono text-sky-300">
+                    {Math.round((regenProgress.done / regenProgress.total) * 100)}% ({num(regenProgress.done)} / {num(regenProgress.total)})
+                  </span>
+                </div>
+                <div className="h-2 w-full overflow-hidden rounded-full bg-neutral-800">
+                  <div
+                    className="h-full bg-gradient-to-r from-sky-500 to-indigo-500 transition-all duration-150"
+                    style={{
+                      width: `${Math.min(100, Math.max(3, (regenProgress.done / regenProgress.total) * 100))}%`,
+                    }}
+                  />
+                </div>
+              </div>
+            )}
+          </div>
         </section>
       </div>
 
