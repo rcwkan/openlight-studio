@@ -513,6 +513,9 @@ export const api = {
   /** Auto fine tune to a profile (natural | neutral | vivid | portrait | landscape | bw | film | moody); not saved */
   autoDevelop: (id: number, develop: Develop, profile: string, strength?: number) =>
     invoke<Develop>("auto_develop", { id, develop, profile, strength: strength != null ? strength / 100 : 1.0 }),
+  /** One-click AI auto adjustment: the local retouch model's result as sliders (`amount` and `strength` 0-100), with a profile's look on top when given; not saved */
+  aiAdjust: (id: number, develop: Develop, profile: string | null, strength: number, amount: number) =>
+    invoke<Develop>("ai_adjust", { id, develop, profile, strength: strength / 100, amount: amount / 100 }),
   /** the develop profile for what the photo shows, and the AI's error when it fell back to keywords */
   photoType: (id: number) => invoke<[string, string | null]>("photo_type", { id }),
   autoWhiteBalance: (id: number) => invoke<Develop["white_balance"]>("auto_white_balance", { id }),

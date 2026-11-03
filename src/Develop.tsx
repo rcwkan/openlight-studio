@@ -1379,6 +1379,10 @@ export function Develop(p: Props) {
     });
   };
   const autoTone = () => measured("Auto tone", api.autoTone, (cur, basic_tone) => ({ ...cur, basic_tone }));
+  const aiAdjust = (profile: string | null, style: number, amount: number) => {
+    const name = profile ? PROFILES.find(([k]) => k === profile)?.[1] : null;
+    return measured(name ? `AI auto adjust + ${name}` : "AI auto adjust", (i, cur) => api.aiAdjust(i, cur, profile, style, amount), (_, d) => d, "AI auto adjust");
+  };
   const autoHdr = () => measured("Auto HDR toning", (i) => api.autoHdr(i), (cur, hdr) => ({ ...cur, hdr }));
   const autoWb = () => measured("Auto white balance", api.autoWhiteBalance, (cur, white_balance) => ({ ...cur, white_balance }));
   const autoProfile = async (profile: string, label: string, strength: number = profileStrength) => {
@@ -2364,6 +2368,7 @@ export function Develop(p: Props) {
             onClear={clearBrush}
             onOpenModels={() => p.onOpenModels?.()}
             onOpenPhoto={(n) => p.onOpenPhoto?.(n)}
+            onAutoAdjust={aiAdjust}
           />
         )}
         {dev && rtab === "auto" && (

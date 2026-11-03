@@ -10,6 +10,7 @@ mod gpu;
 mod mcp;
 mod moebius;
 mod remote;
+mod retouch;
 mod sdfill;
 mod storage;
 mod vision;
@@ -771,6 +772,12 @@ fn auto_develop(core: St, id: i64, develop: Develop, profile: String, strength: 
     develop::auto_with_strength(&*core.proxy(&core.photo(id)?.path)?, &develop, &profile, strength.unwrap_or(1.0))
 }
 
+/// One-click AI auto adjustment: the local retouch model's result as sliders, with `profile`'s look on top when given.
+#[tauri::command(async)]
+fn ai_adjust(core: St, id: i64, develop: Develop, profile: Option<String>, strength: Option<f32>, amount: Option<f32>) -> Result<Develop, String> {
+    retouch::adjust(&*core.proxy(&core.photo(id)?.path)?, &develop, profile.as_deref(), strength.unwrap_or(1.0), amount.unwrap_or(1.0))
+}
+
 /// The profile for what photo `id` shows (auto::photo_type_of), asking the active AI provider; with the
 /// AI's error when it could not, and the type came from the photo's keywords and measurements alone.
 #[tauri::command(async)]
@@ -1458,6 +1465,7 @@ pub fn run() {
             auto_ca,
             heal_spot,
             auto_develop,
+            ai_adjust,
             photo_type,
             auto_white_balance,
             auto_tone,
