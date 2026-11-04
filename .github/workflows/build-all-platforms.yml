@@ -69,7 +69,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: v__VERSION__
+          # PR builds only build; pushes to main and tags publish to the release
+          tagName: ${{ github.event_name != 'pull_request' && 'v__VERSION__' || '' }}
           releaseName: 'OpenLight Studio v__VERSION__'
           releaseBody: 'See the release assets below for macOS (.dmg, .app), Windows (.msi, .exe), and Linux (.deb, .AppImage).'
           releaseDraft: false
