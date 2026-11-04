@@ -1,6 +1,7 @@
 import { listen } from "@tauri-apps/api/event";
 import { useEffect, useState } from "react";
 import { AiModel, api, Develop as Dev, Settings, Stroke } from "./api";
+import { PROFILES } from "./Auto";
 import { Btn, Slider } from "./controls";
 
 const sub = "mb-1 mt-3 text-[10px] uppercase tracking-wider text-neutral-500";
@@ -131,6 +132,8 @@ export function AiTab(p: {
   onOpenModels: () => void;
   /** show a photo this tool just made */
   onOpenPhoto?: (id: number) => void;
+  /** run the local AI auto adjustment on the photo: a style (profile id or none), its strength and how far to go, 0-100 */
+  onAutoAdjust: (profile: string | null, style: number, amount: number) => Promise<void>;
 }) {
   const photoId = p.photoId;
   const [models, setModels] = useState<AiModel[]>([]);
@@ -140,6 +143,10 @@ export function AiTab(p: {
   const [job, setJob] = useState<AiJobProgress | null>(null);
   const [removing, setRemoving] = useState(false);
   const [fillJob, setFillJob] = useState<AiJobProgress | null>(null);
+  const [style, setStyle] = useState("");
+  const [styleStrength, setStyleStrength] = useState(100);
+  const [amount, setAmount] = useState(100);
+  const [adjusting, setAdjusting] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
   useEffect(() => void api.aiModels().then((r) => setModels(r.models), () => setModels([])), []);
@@ -204,6 +211,15 @@ export function AiTab(p: {
   const removalModel = use(models.filter((m) => m.kind !== "denoise"), p.settings?.ai_removal_model);
   const generative = removalModel?.kind === "generate";
 
+  const autoAdjust = async () => {
+    setMsg(null);
+    setAdjusting(true);
+    try {
+      await p.onAutoAdjust(style || null, styleStrength, amount);
+    } finally {
+      setAdjusting(false);
+    }
+  };
   const denoise = async () => {
     if (photoId == null || !denoiseModel) return;
     setMsg(null);
@@ -309,8 +325,33 @@ export function AiTab(p: {
   return (
     <div className="px-3 py-2 text-[11px] text-neutral-300">
       <div className={sub} style={{ marginTop: 0 }}>
-        Remove objects
+        Auto adjust
       </div>
+      <p className="text-neutral-400">A retouch model trained on photographers' edits looks at the photo and sets white balance, tone and colour for you. Every slider stays editable.</p>
+      <div className="mt-2">
+        <div className="mb-1 text-neutral-500">Style</div>
+        <select
+          className="w-full rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-[11px] text-neutral-100 outline-none focus:border-sky-600"
+          value={style}
+          onChange={(e) => setStyle(e.target.value)}
+        >
+          <option value="">None: the AI's own look</option>
+          {PROFILES.map(([id, label]) => (
+            <option key={id} value={id}>
+              {label}
+            </option>
+          ))}
+        </select>
+        {style && <p className={hint}>{PROFILES.find(([id]) => id === style)?.[2]}</p>}
+      </div>
+      <Slider label="Adjustment" value={amount} min={0} max={100} def={100} onChange={setAmount} />
+      {style && <Slider label="Style strength" value={styleStrength} min={0} max={100} def={100} onChange={setStyleStrength} />}
+      <Btn active className="mt-2" disabled={photoId == null || adjusting} onClick={() => void autoAdjust()} title="Sets the sliders on this photo; Ctrl+Z undoes it">
+        {adjusting ? "Adjusting…" : "✦ AI Auto Adjust"}
+      </Btn>
+      <p className={hint}>Built in, runs on this computer in about a second.</p>
+
+      <div className={sub}>Remove objects</div>
       {removalModel ? (
         <>
           <p className="text-neutral-400">Paint over what you want gone; its edges snap to the photo, then you confirm.</p>

@@ -103,6 +103,18 @@ export function AiModelsSettings({ settings, setSettings }: { settings: Settings
             <p className="mt-1 text-neutral-500">Checking…</p>
           )}
         </section>
+        <section className="rounded-lg border border-neutral-800 bg-neutral-900 p-4">
+          <h2 className="font-semibold">Auto adjust</h2>
+          <p className={`${hint} mb-2`}>Used by Develop → AI → Auto adjust.</p>
+          <div className="rounded border border-neutral-800 bg-neutral-900/40 px-3 py-2">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="font-medium text-neutral-100">Image-Adaptive 3D-LUT · Photo retouch</span>
+              <span className="rounded bg-sky-600/80 px-1.5 text-[9px] font-semibold text-white">Built in</span>
+            </div>
+            <div className="mt-0.5 text-neutral-400">A small model trained on photographers' edits. It looks at the photo and returns a colour lookup, which is turned into editable sliders. Fast on any computer, so there is nothing to download or choose.</div>
+            <div className={`${hint} mt-0.5`}>2 MB · Apache-2.0 (Zeng et al.) · trained on MIT-Adobe FiveK, which is for research use</div>
+          </div>
+        </section>
         {section(
           "Object removal",
           "Used by Develop → AI → Remove objects. Generative fill paints new content into the gap; the fast one only continues what surrounds it.",

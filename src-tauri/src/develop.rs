@@ -3960,7 +3960,8 @@ pub fn auto_tone(img: &Img, wb: &WhiteBalance) -> BasicTone {
     };
     let lum: Vec<f32> = px.iter().map(|p| luma(*p).max(0.0)).collect();
     let med = pct(lum.clone(), &[0.5])[0].max(1e-4);
-    let exposure = ((0.8 * (med.clamp(0.08, 0.35) / med).log2()).clamp(-0.75, 2.0) * 20.0).round() / 20.0;
+    // RAW files decode linear with no camera baseline, so a well exposed one has a median near 0.09: aim for 0.15 (the camera's own JPEG sits near 0.2)
+    let exposure = ((0.9 * (med.clamp(0.15, 0.35) / med).log2()).clamp(-0.75, 2.0) * 20.0).round() / 20.0;
     let k = exposure.exp2();
     // Tone works on sqrt values: the white end from the brightest channel, the rest from luma
     let hi = pct(px.iter().map(|p| (p[0].max(p[1]).max(p[2]) * k).max(0.0).sqrt()).collect(), &[0.997])[0];
@@ -3986,7 +3987,7 @@ pub fn auto_tone(img: &Img, wb: &WhiteBalance) -> BasicTone {
     // the end points and contrast moved the midtones: put the median back where exposure set it
     let tone = Tone::new(&t);
     let after = pct(px.iter().map(|p| luma(tone.apply(p.map(|c| c * k))).max(0.0)).collect(), &[0.5])[0].max(1e-4);
-    t.exposure = ((exposure + 0.8 * (med * k / after).log2()).clamp(-0.75, 2.0) * 20.0).round() / 20.0;
+    t.exposure = ((exposure + 0.9 * (med * k / after).log2()).clamp(-0.75, 2.0) * 20.0).round() / 20.0;
     t
 }
 
