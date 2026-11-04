@@ -34,11 +34,10 @@ Pre-built beta release packages are available for direct download from the [GitH
 | Operating System | Architecture | Package Format | Download Link |
 | :--- | :---: | :---: | :--- |
 | **macOS** (11.0+) | Apple Silicon (M1–M4) | `.dmg` Installer | [**Download for macOS (Apple Silicon)**](https://github.com/rcwkan/openlight-studio/releases/latest) — `OpenLight.Studio_<version>_aarch64.dmg` |
-| **Linux** (Debian/Ubuntu) | ARM64 (aarch64) | `.deb` Package | [**Download for Linux (.deb ARM64)**](https://github.com/rcwkan/openlight-studio/releases/download/v0.1.0-beta/OpenLight-Studio-v0.1.0-beta-Linux-arm64.deb) |
-| **Linux** (Debian/Ubuntu) | x86_64 (amd64) | `.deb` Package | [**Download for Linux (.deb x86_64)**](https://github.com/rcwkan/openlight-studio/releases/download/v0.1.0/OpenLight.Studio_0.1.0_amd64.deb) |
-| **Linux** (Universal) | x86_64 | `.AppImage` | [**Download for Linux (.AppImage)**](https://github.com/rcwkan/openlight-studio/releases/download/v0.1.0/OpenLight.Studio_0.1.0_amd64.AppImage) |
-| **Linux** (Fedora/RHEL) | x86_64 | `.rpm` Package | [**Download for Linux (.rpm)**](https://github.com/rcwkan/openlight-studio/releases/download/v0.1.0/OpenLight.Studio-0.1.0-1.x86_64.rpm) |
-| **Windows** (10/11) | x64 | `.msi` / `.exe` | [**Download for Windows (Installer)**](https://github.com/rcwkan/openlight-studio/releases/download/v0.1.0/OpenLight.Studio_0.1.0_x64-setup.exe) |
+| **Linux** (Debian/Ubuntu) | x86_64 (amd64) | `.deb` Package | [**Download for Linux (.deb)**](https://github.com/rcwkan/openlight-studio/releases/latest) — `OpenLight.Studio_<version>_amd64.deb` |
+| **Linux** (Universal) | x86_64 | `.AppImage` | [**Download for Linux (.AppImage)**](https://github.com/rcwkan/openlight-studio/releases/latest) — `OpenLight.Studio_<version>_amd64.AppImage` |
+| **Linux** (Fedora/RHEL) | x86_64 | `.rpm` Package | [**Download for Linux (.rpm)**](https://github.com/rcwkan/openlight-studio/releases/latest) — `OpenLight.Studio-<version>-1.x86_64.rpm` |
+| **Windows** (10/11) | x64 | `.exe` / `.msi` | [**Download for Windows**](https://github.com/rcwkan/openlight-studio/releases/latest) — `OpenLight.Studio_<version>_x64-setup.exe` or `_x64_en-US.msi` |
 
 ### 🍎 Installing on macOS
 
