@@ -33,16 +33,27 @@ Pre-built beta release packages are available for direct download from the [GitH
 
 | Operating System | Architecture | Package Format | Download Link |
 | :--- | :---: | :---: | :--- |
-| **macOS** (11.0+) | Apple Silicon (M1/M2/M3/M4) | `.dmg` Installer | [**Download for macOS (Apple Silicon)**](https://github.com/rcwkan/openlight-studio/releases/download/v0.1.0-beta/OpenLight-Studio-v0.1.0-beta-macOS-arm64.dmg) |
-| **macOS** (11.0+) | Intel (x86_64) | `.app.tar.gz` Archive | [**Download for macOS (Intel)**](https://github.com/rcwkan/openlight-studio/releases/download/v0.1.0/OpenLight.Studio_aarch64.app.tar.gz) |
-| **Linux** (Debian/Ubuntu) | ARM64 (aarch64) | `.deb` Package | [**Download for Linux (.deb ARM64)**](https://github.com/rcwkan/openlight-studio/releases/download/v0.1.0-beta/OpenLight-Studio-v0.1.0-beta-Linux-arm64.deb) |
-| **Linux** (Debian/Ubuntu) | x86_64 (amd64) | `.deb` Package | [**Download for Linux (.deb x86_64)**](https://github.com/rcwkan/openlight-studio/releases/download/v0.1.0/OpenLight.Studio_0.1.0_amd64.deb) |
-| **Linux** (Universal) | x86_64 | `.AppImage` | [**Download for Linux (.AppImage)**](https://github.com/rcwkan/openlight-studio/releases/download/v0.1.0/OpenLight.Studio_0.1.0_amd64.AppImage) |
-| **Linux** (Fedora/RHEL) | x86_64 | `.rpm` Package | [**Download for Linux (.rpm)**](https://github.com/rcwkan/openlight-studio/releases/download/v0.1.0/OpenLight.Studio-0.1.0-1.x86_64.rpm) |
-| **Windows** (10/11) | x64 | `.msi` / `.exe` | [**Download for Windows (Installer)**](https://github.com/rcwkan/openlight-studio/releases/download/v0.1.0/OpenLight.Studio_0.1.0_x64-setup.exe) |
+| **macOS** (11.0+) | Apple Silicon (M1–M4) | `.dmg` Installer | [**Download for macOS (Apple Silicon)**](https://github.com/rcwkan/openlight-studio/releases/latest) — `OpenLight.Studio_<version>_aarch64.dmg` |
+| **Linux** (Debian/Ubuntu) | x86_64 (amd64) | `.deb` Package | [**Download for Linux (.deb)**](https://github.com/rcwkan/openlight-studio/releases/latest) — `OpenLight.Studio_<version>_amd64.deb` |
+| **Linux** (Universal) | x86_64 | `.AppImage` | [**Download for Linux (.AppImage)**](https://github.com/rcwkan/openlight-studio/releases/latest) — `OpenLight.Studio_<version>_amd64.AppImage` |
+| **Linux** (Fedora/RHEL) | x86_64 | `.rpm` Package | [**Download for Linux (.rpm)**](https://github.com/rcwkan/openlight-studio/releases/latest) — `OpenLight.Studio-<version>-1.x86_64.rpm` |
+| **Windows** (10/11) | x64 | `.exe` / `.msi` | [**Download for Windows**](https://github.com/rcwkan/openlight-studio/releases/latest) — `OpenLight.Studio_<version>_x64-setup.exe` or `_x64_en-US.msi` |
 
-> [!TIP]
-> **macOS Security Tip**: Because OpenLight Studio is independently built open-source software, macOS Gatekeeper may show a notice on first launch. Right-click (or Control-click) `OpenLight Studio.app` and select **Open**, or run `xattr -cr "/Applications/OpenLight Studio.app"` in Terminal.
+### 🍎 Installing on macOS
+
+Intel Macs are not supported: the AI engine (ONNX Runtime + CoreML) ships for Apple Silicon only.
+
+1. Download `OpenLight.Studio_<version>_aarch64.dmg` from the [latest release](https://github.com/rcwkan/openlight-studio/releases/latest).
+2. Open the `.dmg` and drag **OpenLight Studio** into **Applications**.
+3. Launch it from Applications. On first launch macOS shows a warning because the app is not notarized by Apple:
+   - **"OpenLight Studio.app is damaged and can't be opened"** or **"cannot be opened"**: the download carries a quarantine flag. Remove it in Terminal, then open the app again:
+     ```bash
+     xattr -cr "/Applications/OpenLight Studio.app"
+     ```
+   - **"Apple could not verify OpenLight Studio is free of malware"**: click **Done**, open **System Settings → Privacy & Security**, scroll down and click **Open Anyway**, then confirm with your password. (On macOS 14 and earlier, Control-click the app and choose **Open** instead.)
+
+> [!NOTE]
+> Do not choose **Move to Trash** on the "damaged" dialog: the app is fine, macOS only blocks unsigned downloads. Run the `xattr` command above instead.
 
 ---
 
