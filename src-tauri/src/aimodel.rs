@@ -186,8 +186,10 @@ pub struct Hardware {
 /// ONNX Runtime execution provider: DirectML on Windows, CoreML (GPU + Neural Engine) on Apple Silicon.
 #[cfg(target_os = "macos")]
 pub const ACCEL_NAME: &str = "CoreML: GPU + Neural Engine";
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
 pub const ACCEL_NAME: &str = "DirectML";
+#[cfg(not(any(windows, target_os = "macos")))]
+pub const ACCEL_NAME: &str = "CPU";
 
 #[cfg(target_os = "macos")]
 pub fn accel(key: &str) -> ort::ep::ExecutionProviderDispatch {
@@ -209,9 +211,14 @@ pub fn accel(key: &str) -> ort::ep::ExecutionProviderDispatch {
         .with_model_cache_dir(cache.to_string_lossy())
         .build()
 }
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
 pub fn accel(_key: &str) -> ort::ep::ExecutionProviderDispatch {
     ep::DirectML::default().build()
+}
+// ponytail: Linux runs on the CPU; add the CUDA EP when someone needs Linux GPU inference
+#[cfg(not(any(windows, target_os = "macos")))]
+pub fn accel(_key: &str) -> ort::ep::ExecutionProviderDispatch {
+    ep::CPU::default().build()
 }
 
 /// Apple Silicon shares one memory pool between CPU, GPU and Neural Engine, so system RAM is the model budget.
