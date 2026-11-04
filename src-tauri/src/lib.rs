@@ -6,6 +6,7 @@ mod catalog;
 mod cloud;
 mod develop;
 mod enhance;
+mod faceswap;
 mod gpu;
 mod mcp;
 mod moebius;
@@ -1035,6 +1036,36 @@ fn ai_inpaint_inplace(
     Ok(d)
 }
 
+/// Put the biggest face of library photo `source` onto every face of photo `id`: one layer per face, in the
+/// same list as the object removals.
+#[tauri::command(async)]
+fn ai_face_swap(core: St, id: i64, model: String, source: i64) -> Result<Develop, String> {
+    let p = core.photo(id)?;
+    let s = core.photo(source)?;
+    let job = crate::auto::Job::start(&core, "ai-faceswap");
+    let src = core.decode(&core.local_file(&s.path)?, Some(2048))?;
+    let img = core.decode(&core.local_file(&p.path)?, None)?;
+    if img.w == 0 || img.h == 0 {
+        return Err("target photo has invalid dimensions".into());
+    }
+    let patches = aimodel::face_swap(&core.dir(), &model, &img, &src, &|label, done, total| {
+        job.progress(label, done, total);
+        !job.cancelled()
+    })?;
+    let name = Path::new(&s.path).file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned());
+    let mut d = core.develop(id)?;
+    let ai_dir = core.ai_cache_dir(id);
+    for patch in patches {
+        let layer = new_token()[..12].to_string();
+        let patch_file = format!("patch_{layer}.bin");
+        patch.save(&ai_dir.join(&patch_file))?;
+        let bounds = [patch.sx as f32 / img.w as f32, patch.sy as f32 / img.h as f32, patch.side as f32 / img.w as f32, patch.side as f32 / img.h as f32];
+        d.ai_removals.push(develop::AiRemoval { id: layer, enabled: true, model: model.clone(), label: format!("Face swap: {name}"), prompt: String::new(), bounds, patch_file });
+    }
+    core.commit(id, &d, "AI: Face swap")?;
+    Ok(d)
+}
+
 #[tauri::command(async)]
 fn ai_denoise_inplace(
     core: St,
@@ -1082,8 +1113,10 @@ fn ai_delete_removal(core: St, id: i64, removal_id: String) -> Result<Develop, S
     let mut d = core.develop(id)?;
     if let Some(pos) = d.ai_removals.iter().position(|r| r.id == removal_id) {
         let r = d.ai_removals.remove(pos);
-        let patch_path = core.ai_cache_dir(id).join(&r.patch_file);
-        let _ = std::fs::remove_file(patch_path);
+        if let Some(file_name) = Path::new(&r.patch_file).file_name() {
+            let patch_path = core.ai_cache_dir(id).join(file_name);
+            let _ = std::fs::remove_file(patch_path);
+        }
         core.commit(id, &d, "Delete AI removal")?;
     }
     Ok(d)
@@ -1484,6 +1517,7 @@ pub fn run() {
             ai_download,
             ai_remove,
             ai_inpaint_inplace,
+            ai_face_swap,
             ai_denoise_inplace,
             ai_delete_removal,
             snap_object,

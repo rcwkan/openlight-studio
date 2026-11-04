@@ -229,6 +229,7 @@ export function Develop(p: Props) {
   devRef.current = dev;
   const idRef = useRef(id);
   idRef.current = id;
+  const profileStrengthSeq = useRef(0);
   const pending = useRef<{ id: number; d: Dev; label: string; replacePrefix?: string; timer: number } | null>(null);
 
   // Keep per-photo session cache synchronized for instant switching between working images
@@ -289,7 +290,11 @@ export function Develop(p: Props) {
       if (idRef.current == null) return;
       setDev(d);
       if (pending.current) {
-        if (pending.current.label !== label && pending.current.id === idRef.current) {
+        const isSame =
+          pending.current.id === idRef.current &&
+          ((replacePrefix && pending.current.replacePrefix === replacePrefix) ||
+            pending.current.label === label);
+        if (!isSame) {
           void flush();
         } else {
           clearTimeout(pending.current.timer);
@@ -735,7 +740,7 @@ export function Develop(p: Props) {
       isDraggingSplit.current = false;
       try {
         (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
-      } catch (_) {}
+      } catch (_) { }
     }
   };
 
@@ -952,21 +957,21 @@ export function Develop(p: Props) {
     if (id == null || !dev) return;
     setError(null);
     await waitFor("Auto levels", async () => {
-    try {
-      const { hist: h } = await api.render(id, { ...dev, levels: p.defaults.levels }, false, null);
-      const cur = devRef.current;
-      if (idRef.current !== id || !cur) return;
-      const at = (c: number, q: number) => {
-        const n = h[c].reduce((a, b) => a + b, 0) * q;
-        let acc = 0;
-        return Math.max(0, h[c].findIndex((v) => (acc += v) > n));
-      };
-      const lv = structuredClone(p.defaults.levels);
-      (["red", "green", "blue"] as const).forEach((c, k) => Object.assign(lv[c], { black: at(k, 0.001), white: at(k, 0.999) }));
-      change({ ...cur, levels: lv }, "Auto levels");
-    } catch (e) {
-      setError(`Auto levels: ${e}`);
-    }
+      try {
+        const { hist: h } = await api.render(id, { ...dev, levels: p.defaults.levels }, false, null);
+        const cur = devRef.current;
+        if (idRef.current !== id || !cur) return;
+        const at = (c: number, q: number) => {
+          const n = h[c].reduce((a, b) => a + b, 0) * q;
+          let acc = 0;
+          return Math.max(0, h[c].findIndex((v) => (acc += v) > n));
+        };
+        const lv = structuredClone(p.defaults.levels);
+        (["red", "green", "blue"] as const).forEach((c, k) => Object.assign(lv[c], { black: at(k, 0.001), white: at(k, 0.999) }));
+        change({ ...cur, levels: lv }, "Auto levels");
+      } catch (e) {
+        setError(`Auto levels: ${e}`);
+      }
     });
   };
   // Spot removal: the engine picks a matching source area and commits the heal
@@ -1403,11 +1408,16 @@ export function Develop(p: Props) {
     if (!activeProfile) {
       setActiveProfile(prof);
     }
+    const seq = ++profileStrengthSeq.current;
     try {
       const d = await api.autoDevelop(id, devRef.current, prof, strength);
-      if (idRef.current === id) change(d, `Profile: ${label} (${strength}%)`, `Profile: ${label}`);
+      if (idRef.current === id && seq === profileStrengthSeq.current) {
+        change(d, `Profile: ${label} (${strength}%)`, `Profile: ${label}`);
+      }
     } catch (e) {
-      setError(`Profile strength: ${e}`);
+      if (seq === profileStrengthSeq.current) {
+        setError(`Profile strength: ${e}`);
+      }
     }
   };
   // Auto › by photo type: the AI (or, failing that, the photo's keywords) picks the profile
@@ -1627,10 +1637,10 @@ export function Develop(p: Props) {
                     }}
                     title={`${wp.filename}${wp.copy_name ? ` (${wp.copy_name})` : ""}${isBusy ? ` — AI working (${task.elapsed.toFixed(1)}s)` : ""}`}
                     className={`group flex shrink-0 cursor-pointer items-center gap-1.5 rounded-md border px-2 py-1 transition-all select-none ${isCur
-                        ? "border-sky-500/80 bg-neutral-800 text-white shadow-xs ring-1 ring-sky-500/30"
-                        : isBusy
-                          ? "border-violet-700/70 bg-violet-950/30 text-violet-200 hover:bg-violet-950/50"
-                          : "border-neutral-800 bg-neutral-900/80 text-neutral-400 hover:border-neutral-700 hover:bg-neutral-800/60 hover:text-neutral-200"
+                      ? "border-sky-500/80 bg-neutral-800 text-white shadow-xs ring-1 ring-sky-500/30"
+                      : isBusy
+                        ? "border-violet-700/70 bg-violet-950/30 text-violet-200 hover:bg-violet-950/50"
+                        : "border-neutral-800 bg-neutral-900/80 text-neutral-400 hover:border-neutral-700 hover:bg-neutral-800/60 hover:text-neutral-200"
                       }`}
                   >
                     <img
@@ -1761,11 +1771,10 @@ export function Develop(p: Props) {
             </Btn>
             <div className="flex items-center rounded border border-neutral-700/80 bg-neutral-800/80 p-0.5">
               <button
-                className={`flex items-center gap-1 rounded px-2 py-0.5 text-xs font-medium transition ${
-                  compareMode === "side-by-side"
-                    ? "bg-sky-600 text-white shadow-xs"
-                    : "text-neutral-300 hover:bg-neutral-700 hover:text-white"
-                }`}
+                className={`flex items-center gap-1 rounded px-2 py-0.5 text-xs font-medium transition ${compareMode === "side-by-side"
+                  ? "bg-sky-600 text-white shadow-xs"
+                  : "text-neutral-300 hover:bg-neutral-700 hover:text-white"
+                  }`}
                 onClick={() => setCompareMode((m) => (m === "side-by-side" ? "off" : "side-by-side"))}
                 title="Side-by-side Before & After comparison (Y)"
               >
@@ -1773,11 +1782,10 @@ export function Develop(p: Props) {
                 <span>Side by Side</span>
               </button>
               <button
-                className={`flex items-center gap-1 rounded px-2 py-0.5 text-xs font-medium transition ${
-                  compareMode === "split"
-                    ? "bg-sky-600 text-white shadow-xs"
-                    : "text-neutral-300 hover:bg-neutral-700 hover:text-white"
-                }`}
+                className={`flex items-center gap-1 rounded px-2 py-0.5 text-xs font-medium transition ${compareMode === "split"
+                  ? "bg-sky-600 text-white shadow-xs"
+                  : "text-neutral-300 hover:bg-neutral-700 hover:text-white"
+                  }`}
                 onClick={() => setCompareMode((m) => (m === "split" ? "off" : "split"))}
                 title="Interactive split-view wipe Before & After (U)"
               >
@@ -1787,11 +1795,10 @@ export function Develop(p: Props) {
               {compareMode !== "off" && (
                 <div className="ml-1 flex items-center gap-0.5 border-l border-neutral-700 pl-1">
                   <button
-                    className={`rounded px-1.5 py-0.5 text-xs transition ${
-                      compareOrientation === "horizontal"
-                        ? "bg-neutral-700 text-sky-400 font-semibold"
-                        : "text-neutral-400 hover:text-white"
-                    }`}
+                    className={`rounded px-1.5 py-0.5 text-xs transition ${compareOrientation === "horizontal"
+                      ? "bg-neutral-700 text-sky-400 font-semibold"
+                      : "text-neutral-400 hover:text-white"
+                      }`}
                     onClick={() => setCompareOrientation("horizontal")}
                     title={
                       compareMode === "side-by-side"
@@ -1802,11 +1809,10 @@ export function Develop(p: Props) {
                     ⬌ {compareMode === "side-by-side" ? "Side" : "Vertical"}
                   </button>
                   <button
-                    className={`rounded px-1.5 py-0.5 text-xs transition ${
-                      compareOrientation === "vertical"
-                        ? "bg-neutral-700 text-sky-400 font-semibold"
-                        : "text-neutral-400 hover:text-white"
-                    }`}
+                    className={`rounded px-1.5 py-0.5 text-xs transition ${compareOrientation === "vertical"
+                      ? "bg-neutral-700 text-sky-400 font-semibold"
+                      : "text-neutral-400 hover:text-white"
+                      }`}
                     onClick={() => setCompareOrientation("vertical")}
                     title={
                       compareMode === "side-by-side"
@@ -1850,9 +1856,8 @@ export function Develop(p: Props) {
           {compareMode === "side-by-side" ? (
             <div
               ref={wrap}
-              className={`relative shrink-0 flex items-center justify-center gap-3 ${
-                compareOrientation === "horizontal" ? "flex-row" : "flex-col"
-              }`}
+              className={`relative shrink-0 flex items-center justify-center gap-3 ${compareOrientation === "horizontal" ? "flex-row" : "flex-col"
+                }`}
               style={{ transform: `translate(${pan.x}px, ${pan.y}px)` }}
             >
               {/* Before Pane */}
@@ -1880,11 +1885,10 @@ export function Develop(p: Props) {
                   ref={setCanvasRef}
                   onClick={onCanvasClick}
                   onPointerMove={tool === "remove" ? (e) => setCursor({ x: e.nativeEvent.offsetX, y: e.nativeEvent.offsetY }) : undefined}
-                onPointerLeave={() => setCursor(null)}
-                onPointerDown={tool === "guides" && !showBefore && !spaceHeld ? drawGuide : tool === "remove" && !showBefore && !spaceHeld ? paintStroke : undefined}
-                  className={`block h-full w-full ${
-                    picking ? "cursor-wait" : dragging ? "cursor-grabbing" : spaceHeld ? "cursor-grab" : tool !== "none" && tool !== "crop" ? "cursor-crosshair" : ""
-                  }`}
+                  onPointerLeave={() => setCursor(null)}
+                  onPointerDown={tool === "guides" && !showBefore && !spaceHeld ? drawGuide : tool === "remove" && !showBefore && !spaceHeld ? paintStroke : undefined}
+                  className={`block h-full w-full ${picking ? "cursor-wait" : dragging ? "cursor-grabbing" : spaceHeld ? "cursor-grab" : tool !== "none" && tool !== "crop" ? "cursor-crosshair" : ""
+                    }`}
                 />
                 <div className="absolute left-2.5 top-2.5 select-none rounded bg-neutral-900/80 px-2.5 py-1 font-mono text-[11px] font-medium text-neutral-200 backdrop-blur-md border border-white/10 shadow-md pointer-events-none">
                   {afterBadgeText}
@@ -1905,9 +1909,8 @@ export function Develop(p: Props) {
                 onPointerMove={tool === "remove" ? (e) => setCursor({ x: e.nativeEvent.offsetX, y: e.nativeEvent.offsetY }) : undefined}
                 onPointerLeave={() => setCursor(null)}
                 onPointerDown={tool === "guides" && !showBefore && !spaceHeld ? drawGuide : tool === "remove" && !showBefore && !spaceHeld ? paintStroke : undefined}
-                className={`block h-full w-full ${
-                  picking ? "cursor-wait" : dragging ? "cursor-grabbing" : spaceHeld ? "cursor-grab" : tool !== "none" && tool !== "crop" ? "cursor-crosshair" : ""
-                }`}
+                className={`block h-full w-full ${picking ? "cursor-wait" : dragging ? "cursor-grabbing" : spaceHeld ? "cursor-grab" : tool !== "none" && tool !== "crop" ? "cursor-crosshair" : ""
+                  }`}
               />
               {renderOverlays()}
 
@@ -1980,7 +1983,7 @@ export function Develop(p: Props) {
                 style={{
                   opacity:
                     (compareOrientation === "horizontal" && splitPos < 10) ||
-                    (compareOrientation === "vertical" && splitPos < 10)
+                      (compareOrientation === "vertical" && splitPos < 10)
                       ? 0.25
                       : 1,
                   transition: "opacity 0.15s ease",
@@ -1989,13 +1992,12 @@ export function Develop(p: Props) {
                 {beforeBadgeText}
               </div>
               <div
-                className={`absolute select-none rounded bg-neutral-900/80 px-2.5 py-1 font-mono text-[11px] font-medium text-neutral-200 backdrop-blur-md border border-white/10 shadow-md pointer-events-none tracking-wide ${
-                  compareOrientation === "horizontal" ? "right-3 top-3" : "right-3 bottom-3"
-                }`}
+                className={`absolute select-none rounded bg-neutral-900/80 px-2.5 py-1 font-mono text-[11px] font-medium text-neutral-200 backdrop-blur-md border border-white/10 shadow-md pointer-events-none tracking-wide ${compareOrientation === "horizontal" ? "right-3 top-3" : "right-3 bottom-3"
+                  }`}
                 style={{
                   opacity:
                     (compareOrientation === "horizontal" && splitPos > 90) ||
-                    (compareOrientation === "vertical" && splitPos > 90)
+                      (compareOrientation === "vertical" && splitPos > 90)
                       ? 0.25
                       : 1,
                   transition: "opacity 0.15s ease",
@@ -2021,9 +2023,8 @@ export function Develop(p: Props) {
                 onPointerMove={tool === "remove" ? (e) => setCursor({ x: e.nativeEvent.offsetX, y: e.nativeEvent.offsetY }) : undefined}
                 onPointerLeave={() => setCursor(null)}
                 onPointerDown={tool === "guides" && !showBefore && !spaceHeld ? drawGuide : tool === "remove" && !showBefore && !spaceHeld ? paintStroke : undefined}
-                className={`block h-full w-full ${
-                  picking ? "cursor-wait" : dragging ? "cursor-grabbing" : spaceHeld ? "cursor-grab" : tool !== "none" && tool !== "crop" ? "cursor-crosshair" : ""
-                }`}
+                className={`block h-full w-full ${picking ? "cursor-wait" : dragging ? "cursor-grabbing" : spaceHeld ? "cursor-grab" : tool !== "none" && tool !== "crop" ? "cursor-crosshair" : ""
+                  }`}
               />
               {renderOverlays()}
             </div>
@@ -2188,18 +2189,16 @@ export function Develop(p: Props) {
             </button>
             <span className="mx-0.5 h-3.5 w-px bg-neutral-700" />
             <button
-              className={`rounded px-2 py-0.5 text-[10px] font-medium transition ${
-                compareMode === "side-by-side" ? "bg-sky-600 text-white shadow-xs" : "text-neutral-300 hover:bg-neutral-800 hover:text-white"
-              }`}
+              className={`rounded px-2 py-0.5 text-[10px] font-medium transition ${compareMode === "side-by-side" ? "bg-sky-600 text-white shadow-xs" : "text-neutral-300 hover:bg-neutral-800 hover:text-white"
+                }`}
               onClick={() => setCompareMode((m) => (m === "side-by-side" ? "off" : "side-by-side"))}
               title="Toggle side-by-side Before / After comparison (Y)"
             >
               ⧉ Side by Side
             </button>
             <button
-              className={`rounded px-2 py-0.5 text-[10px] font-medium transition ${
-                compareMode === "split" ? "bg-sky-600 text-white shadow-xs" : "text-neutral-300 hover:bg-neutral-800 hover:text-white"
-              }`}
+              className={`rounded px-2 py-0.5 text-[10px] font-medium transition ${compareMode === "split" ? "bg-sky-600 text-white shadow-xs" : "text-neutral-300 hover:bg-neutral-800 hover:text-white"
+                }`}
               onClick={() => setCompareMode((m) => (m === "split" ? "off" : "split"))}
               title="Toggle interactive split-view Before / After wipe (U)"
             >
@@ -2258,14 +2257,14 @@ export function Develop(p: Props) {
                 onClick={() => p.setActive(ph.id)}
                 title={`${ph.filename}${isWorking ? " (Open in Working Images)" : ""}${phBusy ? " — AI working…" : ""}`}
                 className={`relative h-full shrink-0 cursor-pointer rounded-sm ${ph.id === id
-                    ? "ring-2 ring-sky-500"
-                    : phBusy
-                      ? "ring-2 ring-violet-500"
-                      : isWorking
-                        ? "opacity-95 ring-1 ring-sky-500/50"
-                        : p.selected.includes(ph.id)
-                          ? "opacity-90 ring-1 ring-neutral-400"
-                          : "opacity-60 hover:opacity-100"
+                  ? "ring-2 ring-sky-500"
+                  : phBusy
+                    ? "ring-2 ring-violet-500"
+                    : isWorking
+                      ? "opacity-95 ring-1 ring-sky-500/50"
+                      : p.selected.includes(ph.id)
+                        ? "opacity-90 ring-1 ring-neutral-400"
+                        : "opacity-60 hover:opacity-100"
                   }`}
               >
                 <img
@@ -2429,11 +2428,10 @@ export function Develop(p: Props) {
                 {!mask && (
                   <div className="flex items-center gap-1">
                     <button
-                      className={`rounded px-2 py-0.5 text-[10px] font-medium transition ${
-                        dev.hdr.enabled
-                          ? "bg-amber-600 text-white shadow-xs"
-                          : "border border-neutral-700 text-neutral-400 hover:border-neutral-500 hover:text-neutral-200"
-                      }`}
+                      className={`rounded px-2 py-0.5 text-[10px] font-medium transition ${dev.hdr.enabled
+                        ? "bg-amber-600 text-white shadow-xs"
+                        : "border border-neutral-700 text-neutral-400 hover:border-neutral-500 hover:text-neutral-200"
+                        }`}
                       onClick={() => {
                         if (!dev.hdr.enabled) {
                           autoHdr();

@@ -155,7 +155,31 @@ const MODELS: &[Spec] = &[
         gpu: true,
         unzip: false,
     },
+    Spec {
+        id: "hyperswap-1a",
+        kind: "faceswap",
+        name: "HyperSwap 1A · Face swap",
+        blurb: "Puts the face from another picture onto the faces in this photo, keeping their pose, expression and light. FaceFusion's default swapper, with its YOLOFace detector and ArcFace recogniser.",
+        license: "FaceFusion models (research use; check FaceFusion's terms before commercial use)",
+        repo: "facefusion/models-3.0.0",
+        files: &[
+            (crate::faceswap::DETECT, 12_659_761, "821cdbb1e65fbbabdde7dd0933f754797a343e56fd962729c61ffcefcd135929"),
+            (crate::faceswap::RECOGNISE, 174_388_474, "f1f79dc3b0b79a69f94799af1fffebff09fbd78fd96a275fd8f0cbbea23270d1"),
+            ("@facefusion/models-3.3.0/hyperswap_1a_256.onnx", 402_742_682, "c0e98a8a03a238f461ed3d2570e426b49f46745ee400854a60dceeb70c246add"),
+        ],
+        min_vram_mb: 0,
+        rank: 10,
+        multiple: 1,
+        dims: None,
+        gpu: false,
+        unzip: false,
+    },
 ];
+
+/// A file name may name its own repository, "@owner/repo/file", stored as "file": (repository, local name).
+fn source<'a>(s: &'a Spec, name: &'a str) -> (&'a str, &'a str) {
+    name.strip_prefix('@').and_then(|n| n.rsplit_once('/')).unwrap_or((s.repo, name))
+}
 
 fn spec(id: &str) -> Result<&'static Spec, String> {
     MODELS
@@ -172,7 +196,7 @@ fn installed(data: &Path, s: &Spec) -> bool {
     if s.unzip {
         return dir(data, s).join(".unpacked").is_file();
     }
-    s.files.iter().all(|(n, size, _)| fs::metadata(dir(data, s).join(n)).is_ok_and(|m| m.len() == *size))
+    s.files.iter().all(|(n, size, _)| fs::metadata(dir(data, s).join(source(s, n).1)).is_ok_and(|m| m.len() == *size))
 }
 
 #[derive(Serialize, Clone)]
@@ -289,6 +313,7 @@ pub fn models(data: &Path, hw: &Hardware) -> Vec<ModelInfo> {
                     Some(v) if m.kind == "generate" => format!("Fits {} ({:.0} GB): about 10 seconds per removal on the GPU, and the most natural result of the removal models.", hw.gpu.as_deref().unwrap_or("your GPU"), v as f32 / 1024.0),
                     _ if m.kind == "generate" => "Best match for this machine (needs about 4 GB of GPU memory).".to_string(),
                     _ if m.id == "moebius" => "A fast 0.2B diffusion model running on GPU with learned conditioning for realistic object removal.".to_string(),
+                    _ if m.kind == "faceswap" => "Runs on the CPU: about a second per face.".to_string(),
                     _ if m.kind == "inpaint" => "A fast alternative that runs on the CPU (about 2 seconds per removal) and only continues what is around the object.".to_string(),
                     Some(v) => format!("Best quality for {}: runs at {} px tiles in {:.0} GB.", hw.gpu.as_deref().unwrap_or("your GPU"), tile_for(Some(v)), v as f32 / 1024.0),
                     None => "Best match for this machine (GPU memory could not be read).".to_string(),
@@ -391,7 +416,8 @@ pub fn download(data: &Path, id: &str, progress: &(dyn Fn(u64, u64) + Sync)) -> 
         return Ok(());
     }
     let agent: ureq::Agent = ureq::Agent::config_builder().timeout_connect(Some(Duration::from_secs(15))).timeout_per_read(Some(Duration::from_secs(60))).build().into();
-    for (name, size, sha) in s.files {
+    for (file, size, sha) in s.files {
+        let (repo, name) = source(s, file);
         let out = d.join(name);
         if let Some(parent) = out.parent() {
             fs::create_dir_all(parent).map_err(es)?;
@@ -401,7 +427,7 @@ pub fn download(data: &Path, id: &str, progress: &(dyn Fn(u64, u64) + Sync)) -> 
             progress(done, total);
             continue;
         }
-        let url = format!("https://huggingface.co/{}/resolve/main/{name}", s.repo);
+        let url = format!("https://huggingface.co/{repo}/resolve/main/{name}");
         let mut r = agent.get(&url).call().map_err(|e| format!("{name}: {e}"))?;
         let part = out.with_extension("part");
         let res = (|| -> Result<(), String> {
@@ -459,7 +485,7 @@ pub fn download(data: &Path, id: &str, progress: &(dyn Fn(u64, u64) + Sync)) -> 
 /// The loaded model and the tile size its input shape was fixed to.
 static SESSION: Mutex<Option<(String, usize, Session)>> = Mutex::new(None);
 
-fn open_session(path: &Path, dims: Option<[&str; 3]>, tile: usize, gpu: bool) -> Result<Session, String> {
+pub(crate) fn open_session(path: &Path, dims: Option<[&str; 3]>, tile: usize, gpu: bool) -> Result<Session, String> {
     let env = crate::sdfill::env()?;
     let fail = |e: String| format!("could not load the AI model: {e}");
     // DirectML needs sequential execution and no memory-pattern reuse; without a usable GPU it falls back to the CPU
@@ -772,6 +798,15 @@ pub fn inpaint_patch(data: &Path, id: &str, img: &Img, hole: &Hole, grow: usize,
         orig_h: h,
         data: patch_data,
     })
+}
+
+/// Face swap: the biggest face of `source` onto every face of `img`, one patch per face.
+pub fn face_swap(data: &Path, id: &str, img: &Img, source: &Img, tick: &dyn Fn(&str, usize, usize) -> bool) -> Result<Vec<crate::develop::Patch>, String> {
+    let s = spec(id)?;
+    if s.kind != "faceswap" || !installed(data, s) {
+        return Err("download the face swap model first (Settings → AI models)".into());
+    }
+    crate::faceswap::run(&dir(data, s), img, source, tick)
 }
 
 /// Fill the hole with LaMa. The model works on a 512 px square, so a square around the object (with its

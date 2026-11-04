@@ -1,6 +1,7 @@
 import { listen } from "@tauri-apps/api/event";
 import { useEffect, useState } from "react";
-import { AiModel, api, Develop as Dev, Settings, Stroke } from "./api";
+import { createPortal } from "react-dom";
+import { AiModel, api, Develop as Dev, Photo, Settings, Stroke, thumbUrl } from "./api";
 import { PROFILES } from "./Auto";
 import { Btn, Slider } from "./controls";
 
@@ -147,6 +148,10 @@ export function AiTab(p: {
   const [styleStrength, setStyleStrength] = useState(100);
   const [amount, setAmount] = useState(100);
   const [adjusting, setAdjusting] = useState(false);
+  const [swapJob, setSwapJob] = useState<AiJobProgress | null>(null);
+  /** the library face picker: open while not null, holding the search text */
+  const [faceQuery, setFaceQuery] = useState<string | null>(null);
+  const [faces, setFaces] = useState<Photo[]>([]);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
   useEffect(() => void api.aiModels().then((r) => setModels(r.models), () => setModels([])), []);
@@ -155,6 +160,7 @@ export function AiTab(p: {
       const p = e.payload;
       if (p.finished) {
         if (p.job === "ai-denoise") setJob(null);
+        if (p.job === "ai-faceswap") setSwapJob(null);
         if (p.job === "ai-remove") {
           setFillJob(null);
           setRemoving(false);
@@ -165,6 +171,16 @@ export function AiTab(p: {
       if (p.job === "ai-denoise") {
         setJob((prev) => ({
           label: p.label || "AI Denoising…",
+          done: p.done,
+          total: p.total,
+          percent: pct,
+          startTime: prev?.startTime ?? Date.now(),
+          elapsedSec: Math.floor((Date.now() - (prev?.startTime ?? Date.now())) / 1000),
+        }));
+      }
+      if (p.job === "ai-faceswap") {
+        setSwapJob((prev) => ({
+          label: p.label || "Swapping faces…",
           done: p.done,
           total: p.total,
           percent: pct,
@@ -187,7 +203,7 @@ export function AiTab(p: {
   }, []);
 
   useEffect(() => {
-    if (!job && !fillJob && !removing) return;
+    if (!job && !fillJob && !swapJob && !removing) return;
     const interval = setInterval(() => {
       if (job) {
         setJob((prev) => (prev ? { ...prev, elapsedSec: Math.floor((Date.now() - prev.startTime) / 1000) } : null));
@@ -195,9 +211,18 @@ export function AiTab(p: {
       if (fillJob) {
         setFillJob((prev) => (prev ? { ...prev, elapsedSec: Math.floor((Date.now() - prev.startTime) / 1000) } : null));
       }
+      if (swapJob) {
+        setSwapJob((prev) => (prev ? { ...prev, elapsedSec: Math.floor((Date.now() - prev.startTime) / 1000) } : null));
+      }
     }, 1000);
     return () => clearInterval(interval);
-  }, [job != null, fillJob != null, removing]);
+  }, [job != null, fillJob != null, swapJob != null, removing]);
+
+  useEffect(() => {
+    if (faceQuery == null) return;
+    const t = setTimeout(() => void api.query({ text: faceQuery.trim() || null, limit: 120 }).then(setFaces, () => setFaces([])), 200);
+    return () => clearTimeout(t);
+  }, [faceQuery]);
 
   useEffect(() => {
     if (p.dev?.ai_denoise?.strength != null) {
@@ -208,7 +233,8 @@ export function AiTab(p: {
   // what each tool uses: the model chosen in Settings if it is installed, else the best installed one
   const use = (group: AiModel[], chosen?: string) => group.find((m) => m.id === chosen && m.installed) ?? group.find((m) => m.installed);
   const denoiseModel = use(models.filter((m) => m.kind === "denoise"), p.settings?.ai_denoise_model);
-  const removalModel = use(models.filter((m) => m.kind !== "denoise"), p.settings?.ai_removal_model);
+  const removalModel = use(models.filter((m) => m.kind === "inpaint" || m.kind === "generate"), p.settings?.ai_removal_model);
+  const faceModel = use(models.filter((m) => m.kind === "faceswap"));
   const generative = removalModel?.kind === "generate";
 
   const autoAdjust = async () => {
@@ -276,6 +302,21 @@ export function AiTab(p: {
     }
   };
 
+  const faceSwap = async (source: number) => {
+    if (photoId == null || !faceModel) return;
+    setFaceQuery(null);
+    setMsg(null);
+    setSwapJob({ label: "Loading face models…", done: 0, total: 1, percent: 0, startTime: Date.now(), elapsedSec: 0 });
+    try {
+      p.setDev(await api.aiFaceSwap(photoId, faceModel.id, source));
+      setMsg({ ok: true, text: "Face swapped in-place. Each face is its own layer below: toggle or delete it." });
+    } catch (e) {
+      setMsg({ ok: false, text: String(e).toLowerCase().includes("cancel") ? "Face swap cancelled." : String(e) });
+    } finally {
+      setSwapJob(null);
+    }
+  };
+
   const toggleRemoval = (removalId: string) => {
     if (!p.dev || !p.dev.ai_removals) return;
     const nextRemovals = p.dev.ai_removals.map((r) =>
@@ -290,7 +331,7 @@ export function AiTab(p: {
     try {
       const newDev = await api.aiDeleteRemoval(photoId, removalId);
       p.setDev(newDev);
-      setMsg({ ok: true, text: "AI removal layer deleted." });
+      setMsg({ ok: true, text: "AI layer deleted." });
     } catch (e) {
       setMsg({ ok: false, text: String(e) });
     }
@@ -405,49 +446,123 @@ export function AiTab(p: {
           )}
           <p className={hint}>Using {removalModel.name}. Change it in {models_link}.</p>
 
-          {/* AI Removals adjustment list */}
-          {p.dev?.ai_removals && p.dev.ai_removals.length > 0 && (
-            <div className="mt-3 space-y-1.5 border-t border-neutral-800/80 pt-2">
-              <div className="text-[10px] font-medium uppercase tracking-wider text-neutral-400">
-                Removals ({p.dev.ai_removals.length})
-              </div>
-              <div className="max-h-48 space-y-1 overflow-y-auto pr-0.5">
-                {p.dev.ai_removals.map((r, i) => (
-                  <div
-                    key={r.id}
-                    className="group flex items-center justify-between rounded bg-neutral-900/70 px-2 py-1 border border-neutral-800 text-[11px] hover:border-neutral-700"
-                  >
-                    <label className="flex items-center gap-2 cursor-pointer flex-1 min-w-0">
-                      <input
-                        type="checkbox"
-                        checked={r.enabled}
-                        onChange={() => toggleRemoval(r.id)}
-                        className="rounded border-neutral-700 text-sky-500 focus:ring-0"
-                      />
-                      <span className={`truncate ${r.enabled ? "text-neutral-200" : "text-neutral-500 line-through"}`}>
-                        {r.label || `Removal ${i + 1}`}
-                      </span>
-                    </label>
-                    <div className="flex items-center gap-1.5 shrink-0 ml-2">
-                      <span className="text-[9px] px-1 py-0.5 rounded bg-neutral-800 text-neutral-400">
-                        {r.model}
-                      </span>
-                      <button
-                        onClick={() => void deleteRemoval(r.id)}
-                        className="text-neutral-500 hover:text-red-400 p-0.5 rounded"
-                        title="Delete this removal layer"
-                      >
-                        ✕
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
         </>
       ) : (
         <p className="text-neutral-400">Needs an object removal model. Download one in {models_link}.</p>
+      )}
+
+      <div className={sub}>Face swap</div>
+      {faceModel ? (
+        <>
+          <p className="text-neutral-400">Pick a library photo of someone; their face goes onto every face in this photo.</p>
+          <Btn
+            active
+            className="mt-2"
+            disabled={photoId == null || !!swapJob}
+            onClick={() => setFaceQuery("")}
+            title="Choose the library photo with the face to use"
+          >
+            {swapJob ? `Swapping… ${swapJob.percent}%` : "✦ Choose a face from the library…"}
+          </Btn>
+          {faceQuery != null &&
+            createPortal(
+              <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6" onClick={() => setFaceQuery(null)}>
+                <div
+                  className="flex max-h-full w-[760px] max-w-full flex-col rounded-lg border border-neutral-700 bg-neutral-900 p-4 text-[12px] text-neutral-300 shadow-2xl"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <h2 className="text-sm font-semibold text-neutral-100">Choose the face to use</h2>
+                    <Btn onClick={() => setFaceQuery(null)}>Close</Btn>
+                  </div>
+                  <input
+                    autoFocus
+                    className="w-full rounded border border-neutral-700 bg-neutral-950 px-2 py-1.5 text-neutral-100 outline-none focus:border-sky-600"
+                    placeholder="Search the library (name, keyword, camera…)"
+                    value={faceQuery}
+                    onChange={(e) => setFaceQuery(e.target.value)}
+                    onKeyDown={(e) => e.key === "Escape" && setFaceQuery(null)}
+                  />
+                  <div className="mt-3 min-h-0 flex-1 overflow-y-auto">
+                    <div className="grid grid-cols-[repeat(auto-fill,minmax(130px,1fr))] gap-2">
+                      {faces
+                        .filter((ph) => ph.id !== photoId)
+                        .map((ph) => (
+                          <button
+                            key={ph.id}
+                            type="button"
+                            onClick={() => void faceSwap(ph.id)}
+                            title={`Use the face in ${ph.filename}`}
+                            className="group rounded border border-neutral-800 bg-neutral-950 p-1 text-left hover:border-sky-500 focus:border-sky-500 focus:outline-none"
+                          >
+                            <img src={thumbUrl(ph)} alt={ph.filename} loading="lazy" className="aspect-square w-full rounded-sm object-cover" />
+                            <div className="mt-1 truncate text-[10px] text-neutral-400 group-hover:text-neutral-200">{ph.filename}</div>
+                          </button>
+                        ))}
+                    </div>
+                    {faces.length === 0 && <p className="py-6 text-center text-neutral-500">No photos match.</p>}
+                  </div>
+                </div>
+              </div>,
+              document.body,
+            )}
+          {swapJob && (
+            <AiProgressBar
+              title="Face Swap"
+              label={swapJob.label}
+              done={swapJob.done}
+              total={swapJob.total}
+              percent={swapJob.percent}
+              modelName={faceModel.name}
+              elapsedSec={swapJob.elapsedSec}
+              onCancel={() => void api.cancelJob("ai-faceswap")}
+            />
+          )}
+          <p className={hint}>Using {faceModel.name}. Only swap faces of people who agreed to it.</p>
+        </>
+      ) : (
+        <p className="text-neutral-400">Needs the face swap model. Download it in {models_link}.</p>
+      )}
+
+      {/* AI layers: object removals and face swaps */}
+      {p.dev?.ai_removals && p.dev.ai_removals.length > 0 && (
+        <div className="mt-3 space-y-1.5 border-t border-neutral-800/80 pt-2">
+          <div className="text-[10px] font-medium uppercase tracking-wider text-neutral-400">
+            AI layers ({p.dev.ai_removals.length})
+          </div>
+          <div className="max-h-48 space-y-1 overflow-y-auto pr-0.5">
+            {p.dev.ai_removals.map((r, i) => (
+              <div
+                key={r.id}
+                className="group flex items-center justify-between rounded bg-neutral-900/70 px-2 py-1 border border-neutral-800 text-[11px] hover:border-neutral-700"
+              >
+                <label className="flex items-center gap-2 cursor-pointer flex-1 min-w-0">
+                  <input
+                    type="checkbox"
+                    checked={r.enabled}
+                    onChange={() => toggleRemoval(r.id)}
+                    className="rounded border-neutral-700 text-sky-500 focus:ring-0"
+                  />
+                  <span className={`truncate ${r.enabled ? "text-neutral-200" : "text-neutral-500 line-through"}`}>
+                    {r.label || `Removal ${i + 1}`}
+                  </span>
+                </label>
+                <div className="flex items-center gap-1.5 shrink-0 ml-2">
+                  <span className="text-[9px] px-1 py-0.5 rounded bg-neutral-800 text-neutral-400">
+                    {r.model}
+                  </span>
+                  <button
+                    onClick={() => void deleteRemoval(r.id)}
+                    className="text-neutral-500 hover:text-red-400 p-0.5 rounded"
+                    title="Delete this layer"
+                  >
+                    ✕
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
       )}
 
       <div className={sub}>Denoise</div>

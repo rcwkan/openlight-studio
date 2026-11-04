@@ -1312,19 +1312,30 @@ impl Patch {
         let side = read_u32(16);
         let orig_w = read_u32(20);
         let orig_h = read_u32(24);
-        let expected_floats = side * side * 4;
+        if side == 0 || side > 16384 {
+            return Err("invalid patch dimensions".into());
+        }
+        let expected_floats = side.checked_mul(side).and_then(|s| s.checked_mul(4)).ok_or("patch dimensions overflow")?;
+        let expected_bytes = expected_floats.checked_mul(4).ok_or("patch byte size overflow")?;
         let data_bytes = &bytes[28..];
-        if data_bytes.len() < expected_floats * 4 {
+        if data_bytes.len() < expected_bytes {
             return Err("patch file data truncated".into());
         }
-        let floats: &[f32] = bytemuck::cast_slice(&data_bytes[..expected_floats * 4]);
-        let data: Vec<[f32; 4]> = floats.chunks_exact(4).map(|c| [c[0], c[1], c[2], c[3]]).collect();
+        let data: Vec<[f32; 4]> = data_bytes[..expected_bytes]
+            .chunks_exact(16)
+            .map(|c| [
+                f32::from_le_bytes(c[0..4].try_into().unwrap()),
+                f32::from_le_bytes(c[4..8].try_into().unwrap()),
+                f32::from_le_bytes(c[8..12].try_into().unwrap()),
+                f32::from_le_bytes(c[12..16].try_into().unwrap()),
+            ])
+            .collect();
         Ok(Patch { sx, sy, side, orig_w, orig_h, data })
     }
 }
 
 pub fn composite_patch(px: &mut [Px], w: usize, h: usize, patch: &Patch, g: [f32; 3]) {
-    if patch.orig_w == 0 || patch.orig_h == 0 || patch.side == 0 {
+    if patch.orig_w == 0 || patch.orig_h == 0 || patch.side == 0 || patch.data.len() < patch.side * patch.side || px.len() < w * h {
         return;
     }
     let scale_x = w as f32 / patch.orig_w as f32;
@@ -1403,13 +1414,23 @@ impl DenoisedCache {
         };
         let w = read_u32(8);
         let h = read_u32(12);
-        let expected_floats = w * h * 3;
+        if w == 0 || h == 0 || w > 32768 || h > 32768 {
+            return Err("invalid denoise cache dimensions".into());
+        }
+        let expected_floats = w.checked_mul(h).and_then(|wh| wh.checked_mul(3)).ok_or("denoise cache dimensions overflow")?;
+        let expected_bytes = expected_floats.checked_mul(4).ok_or("denoise cache byte size overflow")?;
         let data_bytes = &bytes[16..];
-        if data_bytes.len() < expected_floats * 4 {
+        if data_bytes.len() < expected_bytes {
             return Err("denoise cache file truncated".into());
         }
-        let floats: &[f32] = bytemuck::cast_slice(&data_bytes[..expected_floats * 4]);
-        let px: Vec<Px> = floats.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
+        let px: Vec<Px> = data_bytes[..expected_bytes]
+            .chunks_exact(12)
+            .map(|c| [
+                f32::from_le_bytes(c[0..4].try_into().unwrap()),
+                f32::from_le_bytes(c[4..8].try_into().unwrap()),
+                f32::from_le_bytes(c[8..12].try_into().unwrap()),
+            ])
+            .collect();
         Ok(DenoisedCache { w, h, px })
     }
 }
@@ -1530,9 +1551,11 @@ fn tones(src: &[Px], w: usize, h: usize, d: &Develop, overlay: Option<usize>, ai
         if let Some(dir) = ai_cache_dir {
             for r in &d.ai_removals {
                 if r.enabled {
-                    let patch_file = dir.join(&r.patch_file);
-                    if let Ok(patch) = Patch::load(&patch_file) {
-                        composite_patch(&mut px, w, h, &patch, g);
+                    if let Some(file_name) = Path::new(&r.patch_file).file_name() {
+                        let patch_file = dir.join(file_name);
+                        if let Ok(patch) = Patch::load(&patch_file) {
+                            composite_patch(&mut px, w, h, &patch, g);
+                        }
                     }
                 }
             }
@@ -3629,7 +3652,7 @@ pub fn estimate_ca(img: &Img) -> [f32; 2] {
 /// Auto tab picks one per photo from what it shows (auto::photo_type).
 pub const PROFILES: &[&str] = &[
     "natural", "neutral", "vivid", "portrait", "landscape", "bw", "film", "moody", "street", "food", "architecture", "night", "nature",
-    "teal_orange", "soft_editorial", "dark_moody", "analog_film", "fine_art_bw",
+    "teal_orange", "editorial", "soft_editorial", "dark_moody", "analog_film", "fine_art_bw",
 ];
 
 /// A profile's look on top of the auto result: numbers add to it, everything else is set. Colour mixer
@@ -3730,7 +3753,7 @@ fn look(profile: &str) -> Option<Value> {
             "grain": { "amount": 8, "roughness": -10 }
         }),
         // portrait, wedding, interiors: airy high key, warm yellow-green midtones, skin kept luminous
-        "soft_editorial" => json!({
+        "editorial" | "soft_editorial" => json!({
             "white_balance": { "temperature_k": 250, "tint": -6 },
             "basic_tone": { "exposure": 0.35, "contrast": -12, "highlights": -25, "shadows": 30, "whites": 8, "blacks": 12 },
             "presence": { "clarity": -8, "vibrance": 24, "saturation": -8 },
@@ -3840,11 +3863,7 @@ fn scale_value(v: &Value, s: f32, path: &str) -> Value {
         }
         Value::Number(n) => {
             let val = n.as_f64().unwrap_or(0.0) * (s as f64);
-            if n.is_i64() || n.is_u64() {
-                json!(val.round() as i64)
-            } else {
-                json!(val)
-            }
+            json!((val * 100.0).round() / 100.0)
         }
         Value::String(str_val) if str_val == "Monochrome" && s <= 0.0 => {
             Value::String("Color".into())

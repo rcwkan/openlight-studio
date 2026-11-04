@@ -49,6 +49,8 @@ export type Filter = {
   view?: string | null;
   /** Query items in the bin (trash) */
   in_bin?: boolean | null;
+  /** at most this many photos */
+  limit?: number | null;
 };
 
 export type FolderProgress = {
@@ -543,6 +545,8 @@ export const api = {
     invoke<{ develop: Develop; mask: number }>("ai_select", { id, x, y, provider, mask, subtract }),
   aiInpaintInplace: (id: number, model: string, strokes: Stroke[], grow: number, prompt: string) =>
     invoke<Develop>("ai_inpaint_inplace", { id, model, strokes, grow, prompt }),
+  /** Put the biggest face of library photo `source` onto every face of photo `id`: one AI layer per face */
+  aiFaceSwap: (id: number, model: string, source: number) => invoke<Develop>("ai_face_swap", { id, model, source }),
   aiDenoiseInplace: (id: number, model: string, strength: number) =>
     invoke<Develop>("ai_denoise_inplace", { id, model, strength }),
   aiDeleteRemoval: (id: number, removalId: string) =>
