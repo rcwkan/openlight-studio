@@ -43,8 +43,8 @@ export function AiModelsSettings({ settings, setSettings }: { settings: Settings
   // the model a tool uses: the one chosen here if it is installed, else the best installed one
   const inUse = (group: AiModel[], chosen?: string) => (group.find((m) => m.id === chosen && m.installed) ?? group.find((m) => m.installed))?.id;
 
-  const section = (title: string, text: string, group: AiModel[], key: "ai_denoise_model" | "ai_removal_model") => {
-    const current = inUse(group, settings[key]);
+  const section = (title: string, text: string, group: AiModel[], key?: "ai_denoise_model" | "ai_removal_model") => {
+    const current = inUse(group, key && settings[key]);
     return (
       <section className="rounded-lg border border-neutral-800 bg-neutral-900 p-4">
         <h2 className="font-semibold">{title}</h2>
@@ -67,7 +67,7 @@ export function AiModelsSettings({ settings, setSettings }: { settings: Settings
                 <div className="mt-2 flex items-center gap-1.5">
                   {m.installed ? (
                     <>
-                      {current !== m.id && <Btn onClick={() => pick(key, m.id)}>Use this one</Btn>}
+                      {current !== m.id && key && <Btn onClick={() => pick(key, m.id)}>Use this one</Btn>}
                       <Btn disabled={!!dl} onClick={() => remove(m.id)} title="Delete the downloaded files">
                         Remove
                       </Btn>
@@ -118,9 +118,10 @@ export function AiModelsSettings({ settings, setSettings }: { settings: Settings
         {section(
           "Object removal",
           "Used by Develop → AI → Remove objects. Generative fill paints new content into the gap; the fast one only continues what surrounds it.",
-          models.filter((m) => m.kind !== "denoise"),
+          models.filter((m) => m.kind === "inpaint" || m.kind === "generate"),
           "ai_removal_model",
         )}
+        {section("Face swap", "Used by Develop → AI → Face swap. Runs on the CPU.", models.filter((m) => m.kind === "faceswap"))}
         {section("Denoise", "Used by Develop → AI → Denoise. Both make a new, cleaner copy of the photo.", models.filter((m) => m.kind === "denoise"), "ai_denoise_model")}
         {error && <p className="break-words text-red-400">{error}</p>}
       </div>
