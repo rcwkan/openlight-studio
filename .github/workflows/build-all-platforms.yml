@@ -20,7 +20,7 @@ jobs:
           - platform: 'macos-latest'
             os_name: 'macOS'
             target: 'aarch64-apple-darwin'
-          - platform: 'ubuntu-22.04'
+          - platform: 'ubuntu-24.04'
             os_name: 'Linux'
             target: 'x86_64-unknown-linux-gnu'
           - platform: 'windows-latest'
@@ -49,17 +49,19 @@ jobs:
           workspaces: './src-tauri -> target'
 
       - name: Install Linux system dependencies
-        if: matrix.platform == 'ubuntu-22.04'
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev \
-            libappindicator3-dev \
             librsvg2-dev \
             patchelf \
             libgtk-3-dev \
             libsoup-3.0-dev \
-            libjavascriptcoregtk-4.1-dev
+            libjavascriptcoregtk-4.1-dev \
+            libssl-dev \
+            squashfs-tools
+          sudo apt-get install -y libayatana-appindicator3-dev || sudo apt-get install -y libappindicator3-dev
 
       - name: Install npm dependencies
         run: npm ci || npm install
@@ -100,6 +102,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
       - name: Extract release tag
         id: release_info
         run: |
@@ -110,18 +117,22 @@ jobs:
       - name: Generate SHA-256 checksums and update release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_NAME: ${{ steps.release_info.outputs.tag }}
         run: |
           mkdir -p release-files
           cd release-files
 
           echo "Downloading assets for release ${TAG_NAME}..."
-          gh release download "${TAG_NAME}" --dir . --clobber
+          if ! gh release download "${TAG_NAME}" --dir . --clobber; then
+            echo "Warning: Could not download release assets for ${TAG_NAME}."
+            exit 0
+          fi
 
           # Remove existing checksums file if present
           rm -f SHA256SUMS.txt checksums.txt
 
-          ASSET_COUNT=$(ls -1 | wc -l)
+          ASSET_COUNT=$(ls -1 | wc -l | tr -d ' ')
           if [ "${ASSET_COUNT}" -eq 0 ]; then
             echo "No assets found in release ${TAG_NAME}."
             exit 0
@@ -134,30 +145,26 @@ jobs:
           echo "Uploading SHA256SUMS.txt to GitHub release ${TAG_NAME}..."
           gh release upload "${TAG_NAME}" SHA256SUMS.txt --clobber
 
-          # Generate formatted Markdown checksums table
-          TABLE="| File | SHA-256 Checksum |\n| :--- | :--- |\n"
-          while read -r hash file; do
-            if [ "$file" != "SHA256SUMS.txt" ]; then
-              TABLE="${TABLE}| \`${file}\` | \`${hash}\` |\n"
-            fi
-          done < SHA256SUMS.txt
-
-          EXISTING_BODY=$(gh release view "${TAG_NAME}" --json body -q .body)
+          EXISTING_BODY=$(gh release view "${TAG_NAME}" --json body -q .body 2>/dev/null || true)
           # Strip old checksum section if it exists
           CLEAN_BODY=$(echo "${EXISTING_BODY}" | awk '/### 🔐 SHA-256 Checksums/{exit} {print}')
 
-          cat << EOF > release-notes.md
-${CLEAN_BODY}
+          DEFAULT_BODY="See the release assets below for macOS (.dmg, .app), Windows (.msi, .exe), and Linux (.deb, .AppImage)."
+          BASE_BODY="${CLEAN_BODY:-$DEFAULT_BODY}"
 
-### 🔐 SHA-256 Checksums
-
-${TABLE}
-#### Verifying Checksums
-- **macOS / Linux**: \`shasum -a 256 <filename>\` or \`sha256sum -c SHA256SUMS.txt\`
-- **Windows (PowerShell)**: \`Get-FileHash <filename> -Algorithm SHA256\`
-EOF
+          printf "%s\n\n### 🔐 SHA-256 Checksums\n\n" "$BASE_BODY" > release-notes.md
+          echo "| File | SHA-256 Checksum |" >> release-notes.md
+          echo "| :--- | :--- |" >> release-notes.md
+          while read -r hash file; do
+            if [ -n "$file" ] && [ "$file" != "SHA256SUMS.txt" ]; then
+              echo "| \`${file}\` | \`${hash}\` |" >> release-notes.md
+            fi
+          done < SHA256SUMS.txt
+          echo "" >> release-notes.md
+          echo "#### Verifying Checksums" >> release-notes.md
+          echo "- **macOS / Linux**: \`shasum -a 256 <filename>\` or \`sha256sum -c SHA256SUMS.txt\`" >> release-notes.md
+          echo "- **Windows (PowerShell)**: \`Get-FileHash <filename> -Algorithm SHA256\`" >> release-notes.md
 
           echo "Updating release description with checksums..."
           gh release edit "${TAG_NAME}" --notes-file release-notes.md
           echo "Done!"
-
