@@ -1,10 +1,10 @@
 import { listen } from "@tauri-apps/api/event";
 import { Fragment, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AdvancedTab } from "./Advanced";
+import { CalibrationPanel, GrainPanel, LensPanel, ProofPanel, SpotPanel, TransformPanel } from "./Advanced";
 import { Log } from "./Agent";
 import { AiTab } from "./AiDenoise";
-import { AutoTab, PROFILES } from "./Auto";
-import { ProTab } from "./Pro";
+import { AiSelectPanel, AutoTab, PROFILES } from "./Auto";
+import { ChannelMixerPanel, FiltersPanel, GradientMapPanel, HdrTab, HueSatPanel, LevelsPanel, SelectiveColorPanel } from "./Pro";
 import { api, Snap, Stroke, Develop as Dev, getPath, HistoryEntry, Mask, MaskComponent, Photo, Proof, Rendered, setPath, Settings, srgbToOklch, thumbUrl } from "./api";
 import { Btn, ColorWheel, CurveEditor, Histogram, Panel, Seg, Slider } from "./controls";
 
@@ -20,7 +20,18 @@ export interface AiTaskState {
   userClosedDetails?: boolean;
 }
 
-type RTab = "adjust" | "advanced" | "pro" | "ai" | "auto";
+type RTab = "adjust" | "color" | "detail" | "hdr" | "geometry" | "masks" | "auto" | "ai";
+/** the Develop tabs, grouped by kind of tuning: id, label, what is in it */
+const RTABS: [RTab, string, string][] = [
+  ["adjust", "Adjust", "White balance, tone, presence, tone curve and levels"],
+  ["color", "Color", "Color mixer, point color, grading, hue/saturation, selective color, channel mixer, gradient map, calibration"],
+  ["detail", "Detail", "Sharpening, noise reduction, vignette & grain, filters and spot removal"],
+  ["hdr", "HDR", "HDR toning: on/off, auto, method, tone, colour and toning curve"],
+  ["geometry", "Geometry", "Crop, rotate & flip, Upright transform and lens corrections (whole photo)"],
+  ["masks", "Masks", "Select objects with AI or add masks, then tune only them"],
+  ["auto", "Auto", "One-click auto adjustments, profiles and auto rotate"],
+  ["ai", "AI", "Local AI models: auto adjust, object removal, face swap and denoise"],
+];
 
 export type CompareMode = "off" | "side-by-side" | "split";
 export type CompareOrientation = "horizontal" | "vertical";
@@ -1046,7 +1057,7 @@ export function Develop(p: Props) {
   };
   const switchTab = (t: typeof rtab) => {
     setRtab(t);
-    if (t === "advanced") setMaskSel(null); // these panels edit the whole photo (Auto's own do too, and it lists the selections)
+    if (t === "geometry") setMaskSel(null); // these panels edit the whole photo (Auto's own do too)
     if (tool === "guides" || tool === "spot" || tool === "remove") setTool("none");
     if (t !== "ai") clearBrush();
   };
@@ -1140,7 +1151,7 @@ export function Develop(p: Props) {
     else if (e.key.toLowerCase() === "r") setTool((t) => (t === "crop" ? "none" : "crop"));
     else if (e.key.toLowerCase() === "s") setTool((t) => (t === "select" ? "none" : "select"));
     else if (e.key.toLowerCase() === "o" && maskSel != null) setOverlay((o) => !o);
-    else if (e.key.toLowerCase() === "q") (setRtab("advanced"), setMaskSel(null), setTool((t) => (t === "spot" ? "none" : "spot")));
+    else if (e.key.toLowerCase() === "q") (setRtab("detail"), setMaskSel(null), setTool((t) => (t === "spot" ? "none" : "spot")));
     else if (e.key.toLowerCase() === "j") setProof((v) => ({ ...v, clipping: !v.clipping }));
     else if (e.key === "Escape") (setTool("none"), setMaskSel(null), clearBrush());
   };
@@ -1206,6 +1217,10 @@ export function Develop(p: Props) {
       reset
     </button>
   );
+
+  // panel props: `tp` tunes the photo or the selected selection, `W` always the whole photo
+  const tp = T && { dev: T, edit, S, reset };
+  const W = dev && { dev, defaults: p.defaults, change, S: slider(dev, change) };
 
   const sample = (e: React.MouseEvent) => {
     const c = canvas.current!;
@@ -2329,86 +2344,26 @@ export function Develop(p: Props) {
           </div>
         )}
         <div className="border-b border-neutral-800 px-3 py-2">
-          <Seg
-            options={[["adjust", "Adjust"], ["advanced", "Advanced"], ["pro", "Pro"], ["ai", "AI"], ["auto", dev?.masks.length ? `Auto (${dev.masks.length})` : "Auto"]]}
-            value={rtab}
-            onChange={switchTab}
-          />
+          <div className="grid grid-cols-4 overflow-hidden rounded bg-neutral-800 text-[11px]" role="tablist">
+            {RTABS.map(([t, label, title]) => (
+              <button
+                key={t}
+                role="tab"
+                aria-selected={rtab === t}
+                title={title}
+                onClick={() => switchTab(t)}
+                className={`whitespace-nowrap px-1.5 py-1 ${rtab === t ? "bg-neutral-600 text-white" : "text-neutral-400 hover:text-neutral-200"}`}
+              >
+                {label}
+                {t === "masks" && dev?.masks.length ? ` (${dev.masks.length})` : ""}
+                {t === "hdr" && dev?.hdr.enabled ? <span className="ml-0.5 text-amber-500">●</span> : null}
+              </button>
+            ))}
+          </div>
         </div>
-        {dev && rtab === "advanced" && (
-          <AdvancedTab
-            dev={dev}
-            defaults={p.defaults}
-            change={change}
-            S={slider(dev, change)}
-            tool={tool}
-            setTool={setTool}
-            upright={(m) => upright(m)}
-            autoCa={autoCa}
-            proof={proof}
-            setProof={setProof}
-            spotSize={spotSize}
-            setSpotSize={setSpotSize}
-          />
-        )}
-        {dev && T && rtab === "pro" && <ProTab dev={T} edit={edit} S={S} reset={reset} whole={!mask} autoLevels={autoLevels} autoHdr={autoHdr} hist={hist?.[3]} />}
-        {rtab === "ai" && (
-          <AiTab
-            photoId={id}
-            settings={p.settings}
-            dev={dev}
-            onChange={change}
-            setDev={setDev}
-            drawing={tool === "remove"}
-            onDraw={() => (tool === "remove" ? setTool("none") : (clearBrush(), setTool("remove")))}
-            selection={snap ? strokes : null}
-            brush={brush}
-            setBrush={setBrush}
-            onClear={clearBrush}
-            onOpenModels={() => p.onOpenModels?.()}
-            onOpenPhoto={(n) => p.onOpenPhoto?.(n)}
-            onAutoAdjust={aiAdjust}
-          />
-        )}
-        {dev && rtab === "auto" && (
-          <AutoTab
-            dev={dev}
-            profile={autoProfile}
-            activeProfile={activeProfile}
-            profileStrength={profileStrength}
-            onStrengthChange={handleProfileStrength}
-            byType={autoByType}
-            whiteBalance={autoWb}
-            tone={autoTone}
-            levels={autoLevels}
-            ca={autoCa}
-            hdr={autoHdr}
-            upright={upright}
-            level={levelHorizon}
-            remove={removeSelection}
-            ask={(text) => id != null && void runPhotoAi(id, text)}
-            aiBusy={id != null ? !!p.aiTasks[id]?.busy : false}
-            aiPrompt={id != null ? p.aiTasks[id]?.prompt : undefined}
-          />
-        )}
-        {dev && rtab === "auto" && (
-          <SelectionsTab
-            dev={dev}
-            change={change}
-            sel={maskSel}
-            setSel={(i) => (setMaskSel(i), setCompSel(0))}
-            compSel={compSel}
-            setCompSel={setCompSel}
-            overlay={overlay}
-            setOverlay={setOverlay}
-            pickColor={(ci) => (setCompSel(ci), setTool("maskcolor"))}
-            S={slider(dev, change)}
-            selecting={tool === "select"}
-            toggleSelecting={() => setTool(tool === "select" ? "none" : "select")}
-            onTune={() => switchTab("adjust")}
-          />
-        )}
-        {dev && T && rtab === "adjust" && (
+
+        {/* Adjust: light and tone */}
+        {dev && T && tp && rtab === "adjust" && (
           <>
             <Panel
               title="Basic"
@@ -2426,33 +2381,16 @@ export function Develop(p: Props) {
               <div className="mb-2 flex items-center justify-between gap-1">
                 <Seg options={[["Color", "Color"], ["Monochrome", "B&W"]]} value={T.profile.toLowerCase() === "monochrome" ? "Monochrome" : "Color"} onChange={(v) => edit({ ...T, profile: v }, "Profile")} />
                 {!mask && (
-                  <div className="flex items-center gap-1">
-                    <button
-                      className={`rounded px-2 py-0.5 text-[10px] font-medium transition ${dev.hdr.enabled
-                        ? "bg-amber-600 text-white shadow-xs"
-                        : "border border-neutral-700 text-neutral-400 hover:border-neutral-500 hover:text-neutral-200"
-                        }`}
-                      onClick={() => {
-                        if (!dev.hdr.enabled) {
-                          autoHdr();
-                        } else {
-                          edit({ ...dev, hdr: { ...dev.hdr, enabled: false } }, "Disable HDR toning");
-                        }
-                      }}
-                      title={dev.hdr.enabled ? "HDR toning is active. Click to disable" : "Enable Auto HDR toning"}
-                    >
-                      HDR{dev.hdr.enabled ? " ON" : ""}
-                    </button>
-                    {dev.hdr.enabled && (
-                      <button
-                        className="text-[10px] text-neutral-500 hover:text-neutral-300"
-                        onClick={() => edit({ ...dev, hdr: structuredClone(p.defaults.hdr) }, "Reset HDR toning")}
-                        title="Reset HDR toning to default"
-                      >
-                        reset
-                      </button>
-                    )}
-                  </div>
+                  <button
+                    className={`rounded px-2 py-0.5 text-[10px] font-medium transition ${dev.hdr.enabled
+                      ? "bg-amber-600 text-white shadow-xs"
+                      : "border border-neutral-700 text-neutral-400 hover:border-neutral-500 hover:text-neutral-200"
+                      }`}
+                    onClick={() => switchTab("hdr")}
+                    title={dev.hdr.enabled ? "HDR toning is on: open the HDR tab to tune or turn it off" : "Open the HDR tab: auto HDR and every HDR toning setting"}
+                  >
+                    HDR{dev.hdr.enabled ? " ON" : ""} ›
+                  </button>
                 )}
               </div>
               {S("Temp", ["white_balance", "temperature_k"], 2000, 50000, { log: true, track: "track-temp" })}
@@ -2493,7 +2431,14 @@ export function Develop(p: Props) {
               <p className="mt-1 text-[10px] text-neutral-500">Click to add · drag to move · double-click to delete</p>
             </Panel>
 
-            <Panel title="Color mixer" open={false} right={reset("color_mixer", "mixer")}>
+            <LevelsPanel {...tp} autoLevels={mask ? undefined : autoLevels} />
+          </>
+        )}
+
+        {/* Color: every colour tool, Lightroom's and Photoshop's */}
+        {dev && T && tp && W && rtab === "color" && (
+          <>
+            <Panel title="Color mixer" right={reset("color_mixer", "mixer")}>
               <div className="mb-2">
                 <Seg options={[["hue", "Hue"], ["saturation", "Saturation"], ["luminance", "Luminance"]]} value={mixerTab} onChange={setMixerTab} />
               </div>
@@ -2549,69 +2494,188 @@ export function Develop(p: Props) {
               {S("Balance", ["color_grading_3way", "balance"], -100, 100)}
             </Panel>
 
-            <Panel title="Detail" open={false} right={reset("detail", "detail")}>
-              {S("Sharpening", ["detail", "sharpening"], 0, 150)}
+            <HueSatPanel {...tp} />
+            <SelectiveColorPanel {...tp} />
+            <ChannelMixerPanel {...tp} />
+            <GradientMapPanel {...tp} />
+            {!mask && <CalibrationPanel {...W} />}
+            <ProofPanel proof={proof} setProof={setProof} />
+          </>
+        )}
+
+        {/* Detail: sharpening, noise, effects and retouching */}
+        {dev && T && tp && W && rtab === "detail" && (
+          <>
+            <Panel
+              title="Sharpening"
+              right={
+                <button
+                  className="text-[10px] font-normal normal-case text-neutral-500 hover:text-neutral-200"
+                  onClick={() => {
+                    const d = p.defaults.detail;
+                    edit({ ...T, detail: { ...T.detail, sharpening: d.sharpening, sharpen_radius: d.sharpen_radius, sharpen_masking: d.sharpen_masking } }, "Reset sharpening");
+                  }}
+                >
+                  reset
+                </button>
+              }
+            >
+              {S("Amount", ["detail", "sharpening"], 0, 150)}
               {S("Radius", ["detail", "sharpen_radius"], 0.5, 3, { step: 0.1, digits: 1 })}
               {S("Masking", ["detail", "sharpen_masking"], 0, 100)}
-              {S("Color NR", ["detail", "color_noise_reduction"], 0, 100)}
               <p className="mt-1 text-[10px] text-neutral-500">Preview is a 1600px proxy; sharpening is exact on export.</p>
             </Panel>
 
-            {/* whole-photo only: hidden while a selection is tuned */}
+            <Panel
+              title="Noise reduction"
+              right={
+                <button
+                  className="text-[10px] font-normal normal-case text-neutral-500 hover:text-neutral-200"
+                  onClick={() => {
+                    const d = p.defaults.detail;
+                    edit(
+                      { ...T, detail: { ...T.detail, luminance_noise_reduction: d.luminance_noise_reduction, luminance_detail: d.luminance_detail, color_noise_reduction: d.color_noise_reduction } },
+                      "Reset noise reduction",
+                    );
+                  }}
+                >
+                  reset
+                </button>
+              }
+            >
+              {!mask && S("Luminance", ["detail", "luminance_noise_reduction"], 0, 100)}
+              {!mask && S("Detail", ["detail", "luminance_detail"], 0, 100)}
+              {S("Color", ["detail", "color_noise_reduction"], 0, 100)}
+              <p className="mt-1 text-[10px] text-neutral-500">
+                The preview is a 1600px proxy; judge noise on the export. For heavy noise try{" "}
+                <button className="text-sky-400 hover:text-sky-300" onClick={() => switchTab("ai")}>
+                  AI › Denoise
+                </button>
+                .
+              </p>
+            </Panel>
+
             {!mask && (
-              <>
-                <Panel title="Effects" open={false} right={reset("effects", "effects")}>
-                  {S("Vignette", ["effects", "vignette"], -100, 100)}
-                  {S("Midpoint", ["effects", "vignette_midpoint"], 0, 100)}
-                  {S("Feather", ["effects", "vignette_feather"], 0, 100)}
-                </Panel>
-
-                <Panel title="Crop & straighten" open={tool === "crop"} right={reset("crop", "crop")}>
-                  <div className="mb-2 flex flex-wrap gap-1">
-                    {ASPECTS.map(([label, a]) => (
-                      <Btn key={label} active={aspect === a} onClick={() => (setTool("crop"), applyAspect(a))}>
-                        {label}
-                      </Btn>
-                    ))}
-                  </div>
-                  <div className="mb-2 grid grid-cols-4 gap-1">
-                    <Btn onClick={() => turn(-1)} title="Rotate 90° counter-clockwise ([)">
-                      ⟲ 90°
-                    </Btn>
-                    <Btn onClick={() => turn(1)} title="Rotate 90° clockwise (])">
-                      ⟳ 90°
-                    </Btn>
-                    <Btn active={dev.image_rotation.flip_h} onClick={() => flip("h")} title="Flip horizontal">
-                      ⇋ Flip H
-                    </Btn>
-                    <Btn active={dev.image_rotation.flip_v} onClick={() => flip("v")} title="Flip vertical">
-                      ⇵ Flip V
-                    </Btn>
-                  </div>
-                  {S("Angle", ["crop", "angle"], -45, 45, { step: 0.1, digits: 1 })}
-                  <Btn className="mt-1" active={tool === "crop"} onClick={() => setTool(tool === "crop" ? "none" : "crop")}>
-                    {tool === "crop" ? "Done (R)" : "Edit crop (R)"}
-                  </Btn>
-                </Panel>
-
-                <Panel title="Remove" open={false} right={reset("retouch", "removals")}>
-                  {dev.retouch.length === 0 && <p className="text-[10px] text-neutral-500">Ask the AI bar, e.g. “remove the people on the sand”.</p>}
-                  <div className="space-y-1">
-                    {dev.retouch.map((r, i) => (
-                      <div key={i} className="flex items-center gap-2 rounded bg-neutral-800 px-2 py-1 text-[11px]">
-                        <span className="flex-1 truncate" title={r.name}>
-                          {r.name}
-                        </span>
-                        <button className="text-neutral-500 hover:text-white" title="Undo this removal" onClick={() => change({ ...dev, retouch: dev.retouch.filter((_, k) => k !== i) }, "Delete removal")}>
-                          ✕
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                </Panel>
-              </>
+              <Panel title="Vignette & grain" open={false} right={reset("effects", "vignette")}>
+                {S("Vignette", ["effects", "vignette"], -100, 100)}
+                {S("Midpoint", ["effects", "vignette_midpoint"], 0, 100)}
+                {S("Feather", ["effects", "vignette_feather"], 0, 100)}
+                <GrainPanel {...W} />
+              </Panel>
             )}
+
+            <FiltersPanel {...tp} />
+
+            {!mask && <SpotPanel {...W} tool={tool} setTool={setTool} proof={proof} setProof={setProof} spotSize={spotSize} setSpotSize={setSpotSize} />}
+            {mask && <p className="px-3 py-2 text-[10px] text-neutral-500">Vignette, grain and spot removal are for the whole photo: press Done to see them.</p>}
           </>
+        )}
+
+        {/* HDR: everything HDR in one place */}
+        {dev && T && tp && rtab === "hdr" && <HdrTab {...tp} whole={!mask} autoHdr={autoHdr} hist={hist?.[3]} />}
+
+        {/* Geometry: crop, orientation, perspective and lens, always for the whole photo */}
+        {dev && W && rtab === "geometry" && (
+          <>
+            <Panel title="Crop, rotate & flip" right={reset("crop", "crop")}>
+              <div className="mb-2 flex flex-wrap gap-1">
+                {ASPECTS.map(([label, a]) => (
+                  <Btn key={label} active={aspect === a} onClick={() => (setTool("crop"), applyAspect(a))}>
+                    {label}
+                  </Btn>
+                ))}
+              </div>
+              <div className="mb-2 grid grid-cols-4 gap-1">
+                <Btn onClick={() => turn(-1)} title="Rotate 90° counter-clockwise ([)">
+                  ⟲ 90°
+                </Btn>
+                <Btn onClick={() => turn(1)} title="Rotate 90° clockwise (])">
+                  ⟳ 90°
+                </Btn>
+                <Btn active={dev.image_rotation.flip_h} onClick={() => flip("h")} title="Flip horizontal">
+                  ⇋ Flip H
+                </Btn>
+                <Btn active={dev.image_rotation.flip_v} onClick={() => flip("v")} title="Flip vertical">
+                  ⇵ Flip V
+                </Btn>
+              </div>
+              {W.S("Angle", ["crop", "angle"], -45, 45, { step: 0.1, digits: 1 })}
+              <Btn className="mt-1" active={tool === "crop"} onClick={() => setTool(tool === "crop" ? "none" : "crop")}>
+                {tool === "crop" ? "Done (R)" : "Edit crop (R)"}
+              </Btn>
+            </Panel>
+
+            <TransformPanel {...W} tool={tool} setTool={setTool} upright={(m) => upright(m)} />
+            <LensPanel {...W} autoCa={autoCa} />
+          </>
+        )}
+
+        {/* Masks: AI selections and masks, each tuned on its own in the other tabs */}
+        {dev && rtab === "masks" && (
+          <>
+            <AiSelectPanel
+              dev={dev}
+              remove={removeSelection}
+              ask={(text) => id != null && void runPhotoAi(id, text)}
+              aiBusy={id != null ? !!p.aiTasks[id]?.busy : false}
+              aiPrompt={id != null ? p.aiTasks[id]?.prompt : undefined}
+            />
+            <SelectionsTab
+              dev={dev}
+              change={change}
+              sel={maskSel}
+              setSel={(i) => (setMaskSel(i), setCompSel(0))}
+              compSel={compSel}
+              setCompSel={setCompSel}
+              overlay={overlay}
+              setOverlay={setOverlay}
+              pickColor={(ci) => (setCompSel(ci), setTool("maskcolor"))}
+              S={slider(dev, change)}
+              selecting={tool === "select"}
+              toggleSelecting={() => setTool(tool === "select" ? "none" : "select")}
+              onTune={() => switchTab("adjust")}
+            />
+          </>
+        )}
+
+        {/* Auto: one-click measured and AI adjustments */}
+        {dev && rtab === "auto" && (
+          <AutoTab
+            profile={autoProfile}
+            activeProfile={activeProfile}
+            profileStrength={profileStrength}
+            onStrengthChange={handleProfileStrength}
+            byType={autoByType}
+            whiteBalance={autoWb}
+            tone={autoTone}
+            levels={autoLevels}
+            ca={autoCa}
+            upright={upright}
+            level={levelHorizon}
+            ask={(text) => id != null && void runPhotoAi(id, text)}
+            aiBusy={id != null ? !!p.aiTasks[id]?.busy : false}
+            aiPrompt={id != null ? p.aiTasks[id]?.prompt : undefined}
+          />
+        )}
+
+        {/* AI: the local AI models */}
+        {rtab === "ai" && (
+          <AiTab
+            photoId={id}
+            settings={p.settings}
+            dev={dev}
+            onChange={change}
+            setDev={setDev}
+            drawing={tool === "remove"}
+            onDraw={() => (tool === "remove" ? setTool("none") : (clearBrush(), setTool("remove")))}
+            selection={snap ? strokes : null}
+            brush={brush}
+            setBrush={setBrush}
+            onClear={clearBrush}
+            onOpenModels={() => p.onOpenModels?.()}
+            onOpenPhoto={(n) => p.onOpenPhoto?.(n)}
+            onAutoAdjust={aiAdjust}
+          />
         )}
       </aside>
 
@@ -2705,7 +2769,7 @@ export function Develop(p: Props) {
   );
 }
 
-/** Stored selections (masks), listed in the Auto tab. Each AI-selected object is its own selection that can be selected
+/** Stored selections (masks), listed in the Masks tab. Each AI-selected object is its own selection that can be selected
  *  to finetune in Adjust, unselected, toggled on/off or deleted without a new AI run. */
 function SelectionsTab({
   dev,
