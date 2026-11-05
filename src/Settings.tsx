@@ -3,7 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
 import { useEffect, useState } from "react";
 import { Agent, Log } from "./Agent";
-import { api, AppInfo, CleanUp, JobProgress, Settings, size, Source, StorageMoveMode, StorageReport, StorageValidation } from "./api";
+import { api, AppInfo, CleanUp, JobProgress, Settings, size, Source, StorageMoveMode, StorageReport, StorageValidation, UpdateInfo } from "./api";
 import { Btn } from "./controls";
 import { Duplicate, Locations } from "./Storage";
 import { AiModelsSettings } from "./AiModels";
@@ -40,6 +40,10 @@ export function SettingsView(p: {
   info?: AppInfo | null;
   logs?: Log[];
   clearLogs?: () => void;
+  onCheckUpdate?: () => void;
+  updateAvailable?: boolean;
+  updateInfo?: UpdateInfo | null;
+  updateLoading?: boolean;
 }) {
   const reload = () => void api.settings().then(p.setSettings);
   return (
@@ -47,8 +51,11 @@ export function SettingsView(p: {
       <nav className="flex shrink-0 items-center gap-1 border-b border-neutral-800 bg-neutral-900 px-4 py-1.5 text-[12px]">
         <span className="mr-3 font-semibold text-neutral-300">Settings</span>
         {TABS.map(([t, label]) => (
-          <button key={t} onClick={() => p.setTab(t)} className={`rounded px-3 py-1 ${p.tab === t ? "bg-neutral-700 text-white" : "text-neutral-400 hover:text-neutral-200"}`}>
-            {label}
+          <button key={t} onClick={() => p.setTab(t)} className={`flex items-center gap-1.5 rounded px-3 py-1 ${p.tab === t ? "bg-neutral-700 text-white" : "text-neutral-400 hover:text-neutral-200"}`}>
+            <span>{label}</span>
+            {t === "about" && p.updateAvailable && (
+              <span className="h-1.5 w-1.5 rounded-full bg-[var(--theme-accent,#0ea5e9)] animate-pulse" />
+            )}
           </button>
         ))}
       </nav>
@@ -66,7 +73,16 @@ export function SettingsView(p: {
           clearLogs={p.clearLogs ?? (() => { })}
         />
       )}
-      {p.tab === "about" && <About />}
+      {p.tab === "about" && (
+        <About
+          settings={p.settings}
+          setSettings={p.setSettings}
+          onCheckUpdate={p.onCheckUpdate}
+          updateAvailable={p.updateAvailable}
+          updateInfo={p.updateInfo}
+          updateLoading={p.updateLoading}
+        />
+      )}
     </div>
   );
 }
@@ -1879,10 +1895,30 @@ function Usage({ onSettingsChanged, onGoToAiModels }: { onSettingsChanged: () =>
   );
 }
 
-/** About: app name and version, disclaimer, and developer contact. */
-function About() {
+/** About: app name and version, software updates, disclaimer, and developer contact. */
+function About({
+  settings,
+  setSettings,
+  onCheckUpdate,
+  updateAvailable,
+  updateInfo,
+  updateLoading,
+}: {
+  settings?: Settings | null;
+  setSettings?: (s: Settings) => void;
+  onCheckUpdate?: () => void;
+  updateAvailable?: boolean;
+  updateInfo?: UpdateInfo | null;
+  updateLoading?: boolean;
+}) {
   const [version, setVersion] = useState("");
   useEffect(() => void getVersion().then(setVersion, () => {}), []);
+
+  const openReleases = () => {
+    const url = "https://github.com/rcwkan/openlight-studio/releases";
+    api.openExternalUrl(url).catch(() => window.open(url, "_blank"));
+  };
+
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-4 text-[12px]">
       <div className="flex w-[520px] flex-col gap-4">
@@ -1892,6 +1928,75 @@ function About() {
           <p className="text-neutral-400">Version {version || "—"}</p>
           <p className="mt-2 text-neutral-300">Non-destructive RAW processor and photo catalog with a built-in MCP server and a pluggable AI/agent router.</p>
         </section>
+
+        <section className={card}>
+          <div className="flex items-center justify-between">
+            <h3 className={heading}>Software updates</h3>
+            {updateAvailable && (
+              <span className="rounded-full bg-[var(--theme-accent,#0ea5e9)]/20 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-[var(--theme-accent,#0ea5e9)] border border-[var(--theme-accent,#0ea5e9)]/30">
+                Update available
+              </span>
+            )}
+          </div>
+          <p className="text-neutral-300">
+            Releases and installation packages are published directly via GitHub Releases.
+          </p>
+
+          {updateInfo?.has_update && (
+            <div className="mt-3 rounded-md bg-[var(--theme-accent,#0ea5e9)]/10 border border-[var(--theme-accent,#0ea5e9)]/30 p-3 space-y-1">
+              <p className="font-semibold text-white">
+                Version {updateInfo.release_tag} is available!
+              </p>
+              <p className="text-[11px] text-neutral-300">
+                Current version is v{version || updateInfo.current_version}. Click below to review the update and download the installer package.
+              </p>
+            </div>
+          )}
+
+          <div className="mt-3 flex items-center gap-2.5">
+            <button
+              type="button"
+              onClick={onCheckUpdate}
+              disabled={updateLoading}
+              className="rounded-lg bg-[var(--theme-accent,#0ea5e9)] hover:brightness-110 disabled:opacity-50 px-3.5 py-1.5 font-semibold text-white transition-all cursor-pointer flex items-center gap-2 shadow-xs"
+            >
+              {updateLoading ? (
+                <>
+                  <span className="h-3 w-3 animate-spin rounded-full border border-white border-t-transparent" />
+                  <span>Checking GitHub…</span>
+                </>
+              ) : (
+                <>
+                  <span>🔄</span>
+                  <span>{updateAvailable ? "Review & Install Update" : "Check for Updates"}</span>
+                </>
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={openReleases}
+              className="rounded-lg border border-neutral-700 bg-neutral-800 hover:bg-neutral-700 px-3 py-1.5 font-medium text-neutral-300 transition-colors cursor-pointer"
+            >
+              View on GitHub ↗
+            </button>
+          </div>
+
+          {settings && setSettings && (
+            <label className="mt-3.5 flex items-center gap-2 cursor-pointer text-neutral-400 select-none">
+              <input
+                type="checkbox"
+                checked={settings.auto_check_updates !== false}
+                onChange={(e) => {
+                  const updated = { ...settings, auto_check_updates: e.target.checked };
+                  setSettings(updated);
+                  api.saveSettings(updated);
+                }}
+              />
+              <span className="text-[11px] text-neutral-300">Automatically check for updates on startup</span>
+            </label>
+          )}
+        </section>
+
         <section className={card}>
           <h3 className={heading}>Disclaimer</h3>
           <p className="text-neutral-300">

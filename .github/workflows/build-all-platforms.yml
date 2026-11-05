@@ -89,3 +89,75 @@ jobs:
             src-tauri/target/release/bundle/nsis/*.exe
           if-no-files-found: warn
 
+  publish-checksums:
+    name: Generate & Publish Release Checksums
+    needs: build-packages
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract release tag
+        id: release_info
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          TAG="v${VERSION}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate SHA-256 checksums and update release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ steps.release_info.outputs.tag }}
+        run: |
+          mkdir -p release-files
+          cd release-files
+
+          echo "Downloading assets for release ${TAG_NAME}..."
+          gh release download "${TAG_NAME}" --dir . --clobber
+
+          # Remove existing checksums file if present
+          rm -f SHA256SUMS.txt checksums.txt
+
+          ASSET_COUNT=$(ls -1 | wc -l)
+          if [ "${ASSET_COUNT}" -eq 0 ]; then
+            echo "No assets found in release ${TAG_NAME}."
+            exit 0
+          fi
+
+          echo "Generating SHA256SUMS.txt for ${ASSET_COUNT} files..."
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+          echo "Uploading SHA256SUMS.txt to GitHub release ${TAG_NAME}..."
+          gh release upload "${TAG_NAME}" SHA256SUMS.txt --clobber
+
+          # Generate formatted Markdown checksums table
+          TABLE="| File | SHA-256 Checksum |\n| :--- | :--- |\n"
+          while read -r hash file; do
+            if [ "$file" != "SHA256SUMS.txt" ]; then
+              TABLE="${TABLE}| \`${file}\` | \`${hash}\` |\n"
+            fi
+          done < SHA256SUMS.txt
+
+          EXISTING_BODY=$(gh release view "${TAG_NAME}" --json body -q .body)
+          # Strip old checksum section if it exists
+          CLEAN_BODY=$(echo "${EXISTING_BODY}" | awk '/### 🔐 SHA-256 Checksums/{exit} {print}')
+
+          cat << EOF > release-notes.md
+${CLEAN_BODY}
+
+### 🔐 SHA-256 Checksums
+
+${TABLE}
+#### Verifying Checksums
+- **macOS / Linux**: \`shasum -a 256 <filename>\` or \`sha256sum -c SHA256SUMS.txt\`
+- **Windows (PowerShell)**: \`Get-FileHash <filename> -Algorithm SHA256\`
+EOF
+
+          echo "Updating release description with checksums..."
+          gh release edit "${TAG_NAME}" --notes-file release-notes.md
+          echo "Done!"
+

@@ -241,6 +241,38 @@ export type Settings = {
   auto: AutoSettings;
   network_drives: NetworkDrive[];
   clouds: CloudAccount[];
+  auto_check_updates?: boolean;
+};
+
+export type ReleaseAsset = {
+  name: string;
+  size: number;
+  browser_download_url: string;
+  content_type: string;
+  sha256?: string | null;
+};
+
+export type UpdateInfo = {
+  current_version: string;
+  latest_version: string;
+  has_update: boolean;
+  release_name: string;
+  release_tag: string;
+  release_notes: string;
+  published_at: string;
+  html_url: string;
+  recommended_asset: ReleaseAsset | null;
+  all_assets: ReleaseAsset[];
+};
+
+export type DownloadProgress = {
+  status: "downloading" | "completed" | "error";
+  downloaded: number;
+  total: number;
+  percent: number;
+  path?: string | null;
+  error?: string | null;
+  sha256?: string | null;
 };
 
 // --- auto functions: their advanced settings, as kept in Settings.auto ---
@@ -607,6 +639,15 @@ export const api = {
   cloudLocalDirs: () => invoke<CloudFolder[]>("cloud_local_dirs"),
   cloudForgetFolder: (id: string, path: string) => invoke<Settings>("cloud_forget_folder", { id, path }),
   duplicate: (from: Place, to: Place, options: DuplicateOptions, job: string) => invoke<DuplicateResult>("duplicate", { from, to, options, job }),
+  /** Check GitHub Releases for the latest version of OpenLight Studio */
+  checkForUpdates: () => invoke<UpdateInfo>("check_for_updates"),
+  /** Download an update installer asset with progress tracking and SHA-256 verification */
+  downloadUpdate: (url: string, filename: string, expectedSha256?: string | null) =>
+    invoke<string>("download_update", { url, filename, expectedSha256: expectedSha256 ?? null }),
+  /** Launch or open the downloaded update installer / package */
+  installUpdate: (path: string) => invoke<void>("install_update", { path }),
+  /** Open an external URL safely in the default system browser */
+  openExternalUrl: (url: string) => invoke<void>("open_external_url", { url }),
 };
 
 /** Decimal units, as Finder shows them. */

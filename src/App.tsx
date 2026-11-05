@@ -2,11 +2,12 @@ import { listen } from "@tauri-apps/api/event";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Log } from "./Agent";
-import { api, AppInfo, AutoFunction, CloudFolder, Culling, Develop as Dev, Filter, FolderLoading, forgetRoot, getFirstFolder, loadLastFolder, loadRoots, rememberLastFolder, rememberRoot, JobProgress, LABELS, NetworkDrive, Photo, setThumbsDir, Settings, Source } from "./api";
+import { api, AppInfo, AutoFunction, CloudFolder, Culling, Develop as Dev, Filter, FolderLoading, forgetRoot, getFirstFolder, loadLastFolder, loadRoots, rememberLastFolder, rememberRoot, JobProgress, LABELS, NetworkDrive, Photo, setThumbsDir, Settings, Source, UpdateInfo } from "./api";
 import { AiTaskState, Develop } from "./Develop";
 import { ExportDialog, Library, RemoteDialog, SelectMods } from "./Library";
 import { CompareModal } from "./CompareModal";
 import { SettingsTab, SettingsView } from "./Settings";
+import { UpdateModal } from "./UpdateModal";
 import { applyTheme, getStoredTheme } from "./theme";
 
 type Module = "library" | "develop" | "settings";
@@ -55,6 +56,42 @@ export default function App() {
   const [workingPhotosMap, setWorkingPhotosMap] = useState<Record<number, Photo>>({});
   const [aiTasks, setAiTasks] = useState<Record<number, AiTaskState>>({});
   const [initialLoading, setInitialLoading] = useState(true);
+
+  // App software updater states
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+  const [updateLoading, setUpdateLoading] = useState(false);
+  const [updateError, setUpdateError] = useState<string | null>(null);
+  const [showUpdateModal, setShowUpdateModal] = useState(false);
+
+  const checkForUpdates = useCallback(async (manual = false) => {
+    try {
+      setUpdateLoading(true);
+      setUpdateError(null);
+      const res = await api.checkForUpdates();
+      setUpdateInfo(res);
+      if (manual) {
+        setShowUpdateModal(true);
+      }
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setUpdateError(msg);
+      if (manual) {
+        setShowUpdateModal(true);
+      }
+    } finally {
+      setUpdateLoading(false);
+    }
+  }, []);
+
+  // Background check on startup (slightly delayed to prevent blocking catalog setup)
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (settings?.auto_check_updates !== false) {
+        checkForUpdates(false);
+      }
+    }, 3000);
+    return () => clearTimeout(timer);
+  }, [settings?.auto_check_updates, checkForUpdates]);
 
   const initialResolved = useRef(false);
 
@@ -825,6 +862,12 @@ export default function App() {
                   }`}
               >
                 <span>{label}</span>
+                {m === "settings" && updateInfo?.has_update && (
+                  <span
+                    className="h-2 w-2 rounded-full bg-[var(--theme-accent,#0ea5e9)] animate-pulse"
+                    title={`Update ${updateInfo.release_tag} available`}
+                  />
+                )}
                 {m === "develop" && workingPhotos.length > 0 && (
                   <span
                     className={`rounded-full px-1.5 py-0.2 text-[10px] font-semibold leading-tight ${
@@ -879,6 +922,17 @@ export default function App() {
         {!status && culling && (
           <button className="text-[11px] text-neutral-500 hover:text-white" title="Stop culling the new photos; what is done stays" onClick={() => api.cancelJob(culling.job)}>
             ✕
+          </button>
+        )}
+        {updateInfo?.has_update && (
+          <button
+            type="button"
+            onClick={() => setShowUpdateModal(true)}
+            className="flex items-center gap-1.5 rounded-full border border-[var(--theme-accent,#0ea5e9)]/40 bg-[var(--theme-accent,#0ea5e9)]/20 px-2.5 py-0.5 text-[11px] font-semibold text-[var(--theme-accent,#0ea5e9)] hover:bg-[var(--theme-accent,#0ea5e9)]/30 transition-all cursor-pointer shadow-xs"
+            title={`OpenLight Studio update ${updateInfo.release_tag} is available! Click to review and download.`}
+          >
+            <span className="animate-pulse">✨</span>
+            <span>Update {updateInfo.release_tag}</span>
           </button>
         )}
         <button
@@ -1006,6 +1060,10 @@ export default function App() {
           info={info}
           logs={logs}
           clearLogs={() => setLogs([])}
+          onCheckUpdate={() => checkForUpdates(true)}
+          updateAvailable={Boolean(updateInfo?.has_update)}
+          updateInfo={updateInfo}
+          updateLoading={updateLoading}
         />
       )}
       {exportIds && exportIds.length > 0 && <ExportDialog ids={exportIds} settings={settings} dest={exportDest(exportIds)} onClose={() => setExportIds(null)} />}
@@ -1072,6 +1130,15 @@ export default function App() {
             </div>
           </div>
         </div>
+      )}
+      {showUpdateModal && (
+        <UpdateModal
+          info={updateInfo}
+          loading={updateLoading}
+          error={updateError}
+          onCheckAgain={() => checkForUpdates(true)}
+          onClose={() => setShowUpdateModal(false)}
+        />
       )}
     </div>
   );
