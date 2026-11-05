@@ -96,6 +96,21 @@ Intel Macs are not supported: the AI engine (ONNX Runtime + CoreML) ships for Ap
 - **Duplicate & Backup** (*Settings › Storage › Duplicate*): Copy images between local folders, network shares, Immich, and cloud storage with SHA-256 verification, preserving metadata and edits.
 
 ### 3. Non-Destructive RAW Develop Workspace
+The Develop panel groups every tool by the kind of tuning it does:
+
+| Tab | What's in it |
+| --- | --- |
+| **Adjust** | Basic (white balance, tone, presence, Color/B&W), tone curve, levels |
+| **Color** | Color mixer, point color, color grading, hue/saturation, selective color, channel mixer, gradient map, calibration, soft proofing |
+| **Detail** | Sharpening, noise reduction, vignette & grain, filters, spot removal (<kbd>Q</kbd>) |
+| **HDR** | Everything HDR in one place: on/off, ✦ Auto HDR, method, simulated bracket / edge glow, tone & detail, colour, toning curve |
+| **Geometry** | Crop, rotate & flip, Upright transform, lens corrections (whole photo) |
+| **Masks** | ✦ AI select (subject, sky, click objects), masks, remove a selected object |
+| **Auto** | ✦ Auto, by photo type, AI fine tune, 18 profiles with strength, one-at-a-time auto, auto rotate |
+| **AI** | Local models: AI auto adjust, object removal, face swap, neural denoise |
+
+With a mask selected, the Adjust, Color, Detail and HDR tools tune only that mask.
+
 - **Adjust Tab**: Exposure, contrast, highlights, shadows, whites, blacks, texture, clarity, dehaze, vibrance, saturation, and white balance.
 - **Live 256-Bin Histogram**: Real-time RGB and luminance histogram with clipping warnings (<kbd>J</kbd> for shadow and highlight clipping overlays).
 - **Tone Curves & 8-Band Color Mixer**: Parametric and point tone curves (RGB, R, G, B) alongside 8-hue Hue/Saturation/Luminance control.
@@ -125,18 +140,18 @@ OpenLight Studio delivers deep-learning generative retouching and denoising dire
   - All 18 creative and film profiles (Natural, Neutral, Vivid, Portrait, Landscape, B&W, Film, Moody, Street, Food, Architecture, Night, Nature, Teal & Orange, Editorial, Dark Moody, 35mm Film, Fine-Art B&W) include a real-time **Strength** slider (0% to 200%, default 100%).
   - Smoothly scales tone curves, HSL color mixer channels, 3-way color grading, and presence adjustments. Double-click the slider to reset to 100%.
 
-### 5. Advanced Optics & Perspective
+### 5. Optics & Perspective (Geometry and Detail tabs)
 - **Lens Corrections**: Distortion, lateral chromatic aberration (auto-measured along contrast edges), defringe, and vignetting.
 - **Upright Perspective Solver**: Automatically solve camera pitch, roll, and yaw using Hough transform line detection (**Auto**, **Level**, **Vertical**, **Full**, or **Guided** with 2–4 lines).
 - **Constrain Crop**: Automatically shrink crop boundaries to prevent transparent edges after perspective corrections.
 - **Film Grain & Camera Calibration**: Fine-grained analog film grain and sensor calibration adjustments.
 
-### 6. Pro Adjustments & Photoshop Tools
-The **Pro** tab provides advanced adjustments applied non-destructively on top of RAW develop:
+### 6. Photoshop Tools
+Photoshop-style adjustments applied non-destructively on top of RAW develop, grouped with their kind (Adjust, Color, Detail):
 - **Levels**: Per-channel RGB black, gamma, and white points with auto 0.1% clipping.
 - **Selective Color**: Adjust CMYK ink balances across 9 color ranges (reds, yellows, greens, cyans, blues, magentas, whites, neutrals, blacks).
 - **Channel Mixer & Gradient Maps**: Custom monochrome channel blends and dual-tone gradient maps.
-- **Filters**: Gaussian blur, image invert, posterize, threshold, and 90° orientation rotations.
+- **Filters**: Gaussian blur, image invert, posterize, and threshold.
 
 ### 7. Automated Functions & Background Batch Jobs
 Open the **Auto** bar on the right side of the Library to run background batch operations:
@@ -240,8 +255,8 @@ openlight-studio --mcp-stdio
 │   ├── PhotoViewer.tsx      # Full-screen photo viewer, zoom, filmstrip
 │   ├── Develop.tsx          # RAW develop workspace & histogram
 │   ├── AiDenoise.tsx        # AI object removal, neural denoise & progress
-│   ├── Advanced.tsx         # Optics, lens correction & Upright
-│   ├── Pro.tsx              # Levels, selective color, Photoshop tools
+│   ├── Advanced.tsx         # Whole-photo panels: lens, Upright, calibration, grain, spots, proofing
+│   ├── Pro.tsx              # Levels, HDR tab, hue/sat, selective color, Photoshop tools
 │   ├── Auto.tsx             # Auto functions, 18 profiles & strength slider
 │   ├── AutoView.tsx         # Batch auto culling & processing jobs
 │   ├── Storage.tsx          # Cloud storage, network drives, clean up
