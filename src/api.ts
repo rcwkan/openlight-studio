@@ -221,7 +221,7 @@ export type Provider = {
   timeout_s: number;
   max_passes: number;
 };
-export type Theme = "system" | "dark" | "light" | "slate" | "warm" | "nordic" | "cyber" | "emerald" | "oled";
+export type Theme = "system" | "dark" | "light" | "slate" | "warm" | "nordic" | "cyber" | "emerald" | "oled" | "slate_light" | "warm_light" | "nordic_light";
 
 export type Settings = {
   theme?: Theme;

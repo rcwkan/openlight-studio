@@ -3648,9 +3648,15 @@ pub fn estimate_ca(img: &Img) -> [f32; 2] {
 // ---------------------------------------------------------------------------
 
 /// Profiles the Auto tab tunes to: auto white balance and tone, then a look.
-/// The photo-type ones (portrait … night) follow the looks common on Unsplash for that kind of photo; the
-/// Auto tab picks one per photo from what it shows (auto::photo_type).
+/// Includes the 15 professional color grading styles (Bleach Bypass, Cyberpunk, Moody Matte,
+/// Golden Hour, Nordic Noir, Portra 400, Velvia, Emerald & Gold, Pastel Airy, Cross-Process,
+/// and 5 Teal & Orange variations) alongside classic profiles.
 pub const PROFILES: &[&str] = &[
+    // 15 Professional Photo Styles
+    "bleach_bypass", "cyberpunk", "moody_matte", "golden_hour", "nordic_noir",
+    "kodak_portra", "fuji_velvia", "emerald_gold", "pastel_airy", "cross_processed",
+    "teal_orange_muted", "teal_orange_dark", "teal_orange_airy", "teal_orange_earthy", "teal_orange_neon",
+    // Classic profiles
     "natural", "neutral", "vivid", "portrait", "landscape", "bw", "film", "moody", "street", "food", "architecture", "night", "nature",
     "teal_orange", "editorial", "soft_editorial", "dark_moody", "analog_film", "fine_art_bw",
 ];
@@ -3659,6 +3665,258 @@ pub const PROFILES: &[&str] = &[
 /// bands: red, orange, yellow, green, aqua, blue, purple, magenta.
 fn look(profile: &str) -> Option<Value> {
     Some(match profile {
+        // --- 15 Professional Photo Styles ---
+        // 1. Bleach Bypass: high-contrast silver retention, heavily desaturated channels, cold slate shadows
+        "bleach_bypass" => json!({
+            "basic_tone": { "exposure": -0.05, "contrast": 46, "highlights": 15, "shadows": -15, "whites": 10, "blacks": -8 },
+            "presence": { "clarity": 25, "vibrance": -15, "saturation": -60 },
+            "tone_curve": {
+                "point_luma": [[0, 8], [60, 42], [195, 218], [255, 250]]
+            },
+            "color_grading_3way": {
+                "shadows": { "hue": 210, "sat": 18 },
+                "midtones": { "hue": 205, "sat": 8 },
+                "highlights": { "hue": 45, "sat": 10 }
+            },
+            "color_mixer": {
+                "saturation": [-45, -45, -45, -60, -35, -40, -50, -50]
+            }
+        }),
+
+        // 2. Cyberpunk: electric cyan (-55° greens) and magenta (+42° warm hues) over deep violet shadows (265°)
+        "cyberpunk" => json!({
+            "basic_tone": { "contrast": 30, "highlights": 15, "shadows": -10, "whites": 12, "blacks": -12 },
+            "presence": { "clarity": 15, "vibrance": 35, "saturation": 22 },
+            "color_grading_3way": {
+                "shadows": { "hue": 265, "sat": 45 },
+                "midtones": { "hue": 192, "sat": 28 },
+                "highlights": { "hue": 315, "sat": 48 }
+            },
+            "color_mixer": {
+                "hue": [35, 40, 25, -65, -15, -10, 20, 25],
+                "saturation": [25, 25, 20, 30, 35, 40, 30, 35]
+            }
+        }),
+
+        // 3. Moody Matte: lifted black point (+0.11), crushed white point (0.91), desaturated olive greens
+        "moody_matte" => json!({
+            "basic_tone": { "exposure": -0.15, "contrast": 12, "highlights": -20, "shadows": 15, "blacks": 16 },
+            "presence": { "clarity": 10, "vibrance": 8, "saturation": -18 },
+            "tone_curve": {
+                "point_luma": [[0, 28], [64, 60], [192, 190], [255, 232]]
+            },
+            "color_grading_3way": {
+                "shadows": { "hue": 150, "sat": 14 },
+                "highlights": { "hue": 38, "sat": 24 }
+            },
+            "color_mixer": {
+                "hue": [0, 0, -15, -30, 0, 0, 0, 0],
+                "saturation": [5, 8, -25, -60, -30, -35, -20, -20]
+            }
+        }),
+
+        // 4. Golden Hour: chocolate-brown shadows (28°), golden midtones (40°), creamy peach highlights (24°)
+        "golden_hour" => json!({
+            "white_balance": { "temperature_k": 320, "tint": 6 },
+            "basic_tone": { "exposure": 0.1, "contrast": 16, "highlights": -15, "shadows": 12, "whites": -5 },
+            "presence": { "clarity": 6, "vibrance": 22, "saturation": 10 },
+            "color_grading_3way": {
+                "shadows": { "hue": 28, "sat": 22 },
+                "midtones": { "hue": 40, "sat": 20 },
+                "highlights": { "hue": 24, "sat": 32 }
+            },
+            "color_mixer": {
+                "hue": [5, 6, -10, -15, 0, 0, 0, 0],
+                "saturation": [15, 18, 12, -10, -10, -15, -10, -5],
+                "luminance": [5, 8, 8, 0, 0, -5, 0, 0]
+            }
+        }),
+
+        // 5. Nordic Noir: Prussian-blue shadows (215°), steel-gray midtones, heavily muted warm hues
+        "nordic_noir" => json!({
+            "white_balance": { "temperature_k": -350, "tint": -4 },
+            "basic_tone": { "exposure": -0.2, "contrast": 26, "highlights": -25, "shadows": -10, "whites": -8, "blacks": -5 },
+            "presence": { "clarity": 18, "dehaze": 8, "vibrance": -10, "saturation": -32 },
+            "color_grading_3way": {
+                "shadows": { "hue": 215, "sat": 36 },
+                "midtones": { "hue": 205, "sat": 18 },
+                "highlights": { "hue": 200, "sat": 10 }
+            },
+            "color_mixer": {
+                "hue": [0, 0, 0, 15, 5, 5, 0, 0],
+                "saturation": [-45, -35, -40, -45, 10, 15, -30, -30]
+            }
+        }),
+
+        // 6. Kodak Portra 400: soft contrast, pastel cyan skies, emerald greens, luminous warm golden skin
+        "kodak_portra" => json!({
+            "white_balance": { "temperature_k": 180, "tint": 4 },
+            "basic_tone": { "exposure": 0.1, "contrast": 12, "highlights": -12, "shadows": 10, "whites": 5, "blacks": 6 },
+            "presence": { "clarity": -4, "vibrance": 18, "saturation": 4 },
+            "tone_curve": {
+                "point_luma": [[0, 8], [64, 68], [192, 196], [255, 248]]
+            },
+            "color_grading_3way": {
+                "shadows": { "hue": 22, "sat": 8 },
+                "midtones": { "hue": 34, "sat": 14 },
+                "highlights": { "hue": 42, "sat": 20 }
+            },
+            "color_mixer": {
+                "hue": [5, 4, -6, 12, -14, -10, 5, 0],
+                "saturation": [5, 8, -5, -10, 8, 12, -10, -5],
+                "luminance": [5, 10, 8, 4, 10, 8, 0, 0]
+            },
+            "grain": { "amount": 12 }
+        }),
+
+        // 7. Fuji Velvia: deep blacks (-0.03), steep contrast (+0.38), high vibrance (+0.40), rich reds and emeralds
+        "fuji_velvia" => json!({
+            "basic_tone": { "exposure": -0.05, "contrast": 36, "highlights": -10, "shadows": -15, "whites": 10, "blacks": -15 },
+            "presence": { "clarity": 15, "dehaze": 10, "vibrance": 40, "saturation": 28 },
+            "tone_curve": {
+                "point_luma": [[0, 0], [60, 48], [195, 215], [255, 255]]
+            },
+            "color_grading_3way": {
+                "shadows": { "hue": 235, "sat": 15 },
+                "midtones": { "hue": 140, "sat": 8 },
+                "highlights": { "hue": 28, "sat": 16 }
+            },
+            "color_mixer": {
+                "hue": [-6, -4, 0, 8, 5, 4, 0, 0],
+                "saturation": [30, 25, 20, 35, 25, 30, 20, 20],
+                "luminance": [-5, 0, 5, 5, 0, -10, 0, 0]
+            }
+        }),
+
+        // 8. Emerald & Gold (Matrix/Fincher): forest-green shadows (135°), olive midtones (112°), gold highlights (45°)
+        "emerald_gold" => json!({
+            "basic_tone": { "exposure": -0.15, "contrast": 28, "highlights": -15, "shadows": -10, "blacks": 4 },
+            "presence": { "clarity": 12, "vibrance": 12, "saturation": -12 },
+            "color_grading_3way": {
+                "shadows": { "hue": 135, "sat": 38 },
+                "midtones": { "hue": 112, "sat": 25 },
+                "highlights": { "hue": 45, "sat": 40 }
+            },
+            "color_mixer": {
+                "hue": [8, 12, 10, 10, -25, -35, -20, 0],
+                "saturation": [-10, 5, 10, 15, -15, -25, -30, -20]
+            }
+        }),
+
+        // 9. Pastel Airy: high-key lift (+0.35), negative contrast (-0.20), lifted milky shadows, soft pastel tones
+        "pastel_airy" => json!({
+            "basic_tone": { "exposure": 0.35, "contrast": -18, "highlights": -30, "shadows": 35, "whites": -10, "blacks": 28 },
+            "presence": { "clarity": -12, "vibrance": 25, "saturation": -14 },
+            "tone_curve": {
+                "point_luma": [[0, 32], [64, 80], [192, 198], [255, 252]]
+            },
+            "color_grading_3way": {
+                "shadows": { "hue": 270, "sat": 14 },
+                "midtones": { "hue": 165, "sat": 12 },
+                "highlights": { "hue": 35, "sat": 18 }
+            },
+            "color_mixer": {
+                "hue": [4, 6, -5, 18, -16, -12, 10, 5],
+                "saturation": [-10, -5, -15, -20, 5, 8, 10, 5]
+            }
+        }),
+
+        // 10. Cross-Processed: asymmetric per-channel curves, cyan-tinted blacks, yellow-skewed highlights
+        "cross_processed" => json!({
+            "basic_tone": { "exposure": 0.05, "contrast": 30, "highlights": 20, "shadows": -15, "whites": 15, "blacks": 8 },
+            "presence": { "clarity": 15, "vibrance": 20, "saturation": 18 },
+            "color_grading_3way": {
+                "shadows": { "hue": 195, "sat": 35 },
+                "midtones": { "hue": 95, "sat": 20 },
+                "highlights": { "hue": 52, "sat": 42 }
+            },
+            "tone_curve": {
+                "point_red": [[0, 0], [64, 52], [192, 210], [255, 255]],
+                "point_green": [[0, 0], [64, 60], [192, 195], [255, 255]],
+                "point_blue": [[0, 25], [64, 75], [192, 175], [255, 235]]
+            }
+        }),
+
+        // 11. Muted / Matte Teal & Orange: dusty slate-blue shadows (200°), soft terracotta highlights (28°)
+        "teal_orange_muted" => json!({
+            "basic_tone": { "exposure": 0.0, "contrast": -8, "highlights": -25, "shadows": 15, "blacks": 20 },
+            "presence": { "clarity": 8, "vibrance": 10, "saturation": -22 },
+            "tone_curve": {
+                "point_luma": [[0, 25], [64, 68], [192, 192], [255, 235]]
+            },
+            "color_grading_3way": {
+                "shadows": { "hue": 200, "sat": 26 },
+                "midtones": { "hue": 195, "sat": 8 },
+                "highlights": { "hue": 28, "sat": 30 }
+            },
+            "color_mixer": {
+                "hue": [0, -4, -15, 22, -10, -18, 0, 0],
+                "saturation": [-5, 5, -20, -45, 10, 15, -25, -20]
+            }
+        }),
+
+        // 12. Dark & Moody Teal & Orange: abyssal dark cyan (190°), fiery bronze-amber highlights (25°)
+        "teal_orange_dark" => json!({
+            "basic_tone": { "exposure": -0.35, "contrast": 38, "highlights": -45, "shadows": -15, "blacks": -15 },
+            "presence": { "clarity": 22, "dehaze": 8, "vibrance": 24, "saturation": -5 },
+            "color_grading_3way": {
+                "shadows": { "hue": 190, "sat": 48 },
+                "midtones": { "hue": 194, "sat": 18 },
+                "highlights": { "hue": 25, "sat": 52 }
+            },
+            "color_mixer": {
+                "hue": [5, -6, -20, 35, -15, -22, -15, 0],
+                "saturation": [15, 22, -30, -50, 25, 30, -30, -25]
+            },
+            "effects": { "vignette": -20 }
+        }),
+
+        // 13. Bright & Airy Teal & Orange: aqua/mint shadows (172°), pastel coral/peach highlights (20°)
+        "teal_orange_airy" => json!({
+            "basic_tone": { "exposure": 0.3, "contrast": -12, "highlights": -25, "shadows": 25, "whites": 8, "blacks": 16 },
+            "presence": { "clarity": -6, "vibrance": 28, "saturation": 6 },
+            "color_grading_3way": {
+                "shadows": { "hue": 172, "sat": 30 },
+                "midtones": { "hue": 178, "sat": 12 },
+                "highlights": { "hue": 20, "sat": 35 }
+            },
+            "color_mixer": {
+                "hue": [0, -4, -10, 32, -12, -28, 0, 0],
+                "saturation": [10, 12, -10, -15, 18, 22, -15, -10]
+            }
+        }),
+
+        // 14. Golden Brown & Slate (Earthy): steel-slate shadows (212°), ochre/coffee-brown highlights (22°)
+        "teal_orange_earthy" => json!({
+            "basic_tone": { "exposure": -0.1, "contrast": 22, "highlights": -20, "shadows": -5, "whites": -5, "blacks": 8 },
+            "presence": { "clarity": 14, "vibrance": 14, "saturation": -24 },
+            "color_grading_3way": {
+                "shadows": { "hue": 212, "sat": 24 },
+                "midtones": { "hue": 28, "sat": 12 },
+                "highlights": { "hue": 22, "sat": 40 }
+            },
+            "color_mixer": {
+                "hue": [4, -6, -18, -25, -5, -10, 0, 0],
+                "saturation": [12, 15, -35, -80, -20, -30, -40, -35]
+            }
+        }),
+
+        // 15. Neon Night: electric turquoise (184°), luminous tangerine highlights (30°), crisp true blacks
+        "teal_orange_neon" => json!({
+            "basic_tone": { "exposure": 0.0, "contrast": 34, "highlights": 10, "shadows": -20, "whites": 10, "blacks": -16 },
+            "presence": { "clarity": 20, "dehaze": 10, "vibrance": 38, "saturation": 18 },
+            "color_grading_3way": {
+                "shadows": { "hue": 184, "sat": 50 },
+                "midtones": { "hue": 188, "sat": 22 },
+                "highlights": { "hue": 30, "sat": 55 }
+            },
+            "color_mixer": {
+                "hue": [8, -4, -15, 42, -10, -26, 0, 0],
+                "saturation": [25, 30, -20, 15, 35, 42, 10, 10]
+            }
+        }),
+
+        // --- Classic Profiles ---
         "natural" => json!({ "presence": { "vibrance": 10 } }),
         "neutral" => json!({ "basic_tone": { "contrast": -20, "highlights": -15, "shadows": 15 }, "presence": { "vibrance": -10 } }),
         "vivid" => json!({ "basic_tone": { "contrast": 15 }, "presence": { "clarity": 10, "vibrance": 35, "saturation": 5 } }),

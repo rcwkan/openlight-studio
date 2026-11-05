@@ -240,6 +240,7 @@ export function Develop(p: Props) {
   devRef.current = dev;
   const idRef = useRef(id);
   idRef.current = id;
+  const profileStrengthSeq = useRef(0);
   const pending = useRef<{ id: number; d: Dev; label: string; replacePrefix?: string; timer: number } | null>(null);
 
   // Keep per-photo session cache synchronized for instant switching between working images
@@ -1405,6 +1406,36 @@ export function Develop(p: Props) {
   const autoHdr = () => measured("Auto HDR toning", (i) => api.autoHdr(i), (cur, hdr) => ({ ...cur, hdr }));
   const autoWb = () => measured("Auto white balance", api.autoWhiteBalance, (cur, white_balance) => ({ ...cur, white_balance }));
   const autoDevelop = () => measured("Auto", (i, cur) => api.autoDevelop(i, cur, "natural", 100), (_, d) => d);
+  const autoProfile = async (profile: string, label: string, strength: number = profileStrength) => {
+    setActiveProfile(profile);
+    const profLabel = PROFILES.find(([k]) => k === profile)?.[1] || label;
+    await measured(
+      `Profile: ${profLabel} (${strength}%)`,
+      (i, cur) => api.autoDevelop(i, cur, profile, strength),
+      (_, d) => d,
+      `Profile: ${profLabel}`,
+    );
+  };
+  const handleProfileStrength = async (strength: number) => {
+    setProfileStrength(strength);
+    if (id == null || !devRef.current) return;
+    const prof = activeProfile || "bleach_bypass";
+    const label = PROFILES.find(([k]) => k === prof)?.[1] || "Bleach Bypass";
+    if (!activeProfile) {
+      setActiveProfile(prof);
+    }
+    const seq = ++profileStrengthSeq.current;
+    try {
+      const d = await api.autoDevelop(id, devRef.current, prof, strength);
+      if (idRef.current === id && seq === profileStrengthSeq.current) {
+        change(d, `Profile: ${label} (${strength}%)`, `Profile: ${label}`);
+      }
+    } catch (e) {
+      if (seq === profileStrengthSeq.current) {
+        setError(`Profile strength: ${e}`);
+      }
+    }
+  };
   // Auto › remove: the engine heals the selection's objects away and commits the step
   const removeSelection = async (i: number) => {
     if (id == null) return;
@@ -2601,6 +2632,10 @@ export function Develop(p: Props) {
         {dev && rtab === "auto" && (
           <AutoTab
             auto={autoDevelop}
+            profile={autoProfile}
+            activeProfile={activeProfile}
+            profileStrength={profileStrength}
+            onStrengthChange={handleProfileStrength}
             whiteBalance={autoWb}
             tone={autoTone}
             levels={autoLevels}

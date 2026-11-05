@@ -106,7 +106,7 @@ The Develop panel groups every tool by the kind of tuning it does:
 | **HDR** | Everything HDR in one place: on/off, ✦ Auto HDR, method, simulated bracket / edge glow, tone & detail, colour, toning curve |
 | **Geometry** | Crop, rotate & flip, Upright transform, lens corrections (whole photo) |
 | **Masks** | ✦ AI select (subject, sky, click objects), masks, remove a selected object |
-| **Auto** | ✦ Auto, AI fine tune, one-at-a-time auto, and auto rotate |
+| **Auto** | ✦ Auto, 16 photo styles (Bleach Bypass, Portra, Velvia, Nordic Noir, classic Teal & Orange + 5 variants, etc.) with strength slider, AI fine tune, one-at-a-time auto, and auto rotate |
 | **AI** | Local models: AI auto adjust, object removal, face swap, neural denoise |
 
 With a mask selected, the Adjust, Color, Detail and HDR tools tune only that mask.
@@ -257,7 +257,7 @@ openlight-studio --mcp-stdio
 │   ├── AiDenoise.tsx        # AI object removal, neural denoise & progress
 │   ├── Advanced.tsx         # Whole-photo panels: lens, Upright, calibration, grain, spots, proofing
 │   ├── Pro.tsx              # Levels, HDR tab, hue/sat, selective color, Photoshop tools
-│   ├── Auto.tsx             # One-click auto adjustments, AI fine tune & auto rotate
+│   ├── Auto.tsx             # 15 photo styles, strength slider, auto fine tune & auto rotate
 │   ├── AutoView.tsx         # Batch auto culling & processing jobs
 │   ├── Storage.tsx          # Cloud storage, network drives, clean up
 │   └── Agent.tsx            # AI provider router & MCP token settings
