@@ -39,6 +39,28 @@ Pre-built beta release packages are available for direct download from the [GitH
 | **Linux** (Fedora/RHEL) | x86_64 | `.rpm` Package | [**Download for Linux (.rpm)**](https://github.com/rcwkan/openlight-studio/releases/latest) — `OpenLight.Studio-<version>-1.x86_64.rpm` |
 | **Windows** (10/11) | x64 | `.exe` / `.msi` | [**Download for Windows**](https://github.com/rcwkan/openlight-studio/releases/latest) — `OpenLight.Studio_<version>_x64-setup.exe` or `_x64_en-US.msi` |
 
+### 🔐 Package Integrity & Checksums
+
+Every GitHub release includes a canonical [`SHA256SUMS.txt`](https://github.com/rcwkan/openlight-studio/releases/latest) file to verify package authenticity:
+
+```bash
+# macOS
+shasum -a 256 OpenLight.Studio_0.2.1_aarch64.dmg
+
+# Linux
+sha256sum -c SHA256SUMS.txt
+
+# Windows (PowerShell)
+Get-FileHash .\OpenLight.Studio_0.2.1_x64-setup.exe -Algorithm SHA256
+```
+
+| Latest Package (v0.2.1) | SHA-256 Checksum |
+| :--- | :--- |
+| `OpenLight.Studio_0.2.1_aarch64.dmg` | `a8772dedefedf8c688d3cc81b44335a23f1d4fe7d19da4a8c511851852e45b91` |
+| `OpenLight.Studio_0.2.1_x64-setup.exe` | `61a86a3af545f81088365f17e54ef46603687e7b0ea35b208c37ca7d542fab60` |
+| `OpenLight.Studio_0.2.1_x64_en-US.msi` | `d3ded66a77324a9f6e33599f438d3b984f5677ede44239f079c40d3f0652fdff` |
+| `OpenLight.Studio_aarch64.app.tar.gz` | `875600356ec44c3e3d94ce692b8b78cde2dd2b73e7fb3a9d0120e970f58e5d43` |
+
 ### 🍎 Installing on macOS
 
 Intel Macs are not supported: the AI engine (ONNX Runtime + CoreML) ships for Apple Silicon only.

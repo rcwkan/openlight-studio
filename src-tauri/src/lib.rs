@@ -14,6 +14,7 @@ mod remote;
 mod retouch;
 mod sdfill;
 mod storage;
+mod updater;
 mod vision;
 
 use develop::{Develop, Img, Opts, es};
@@ -30,6 +31,10 @@ use tauri::{Emitter, Manager};
 pub const APP_ID: &str = "org.openlight.studio";
 /// Long edge of the in-memory develop proxy.
 pub const PROXY_EDGE: u32 = 1600;
+
+fn default_true() -> bool {
+    true
+}
 
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(default)]
@@ -61,6 +66,9 @@ pub struct Settings {
     pub network_drives: Vec<storage::NetworkDrive>,
     /// Cloud storage accounts; their secrets are in the keychain.
     pub clouds: Vec<cloud::Account>,
+    /// Automatically check for updates on startup.
+    #[serde(default = "default_true")]
+    pub auto_check_updates: bool,
 }
 
 impl Default for Settings {
@@ -83,6 +91,7 @@ impl Default for Settings {
             ai_removal_model: String::new(),
             network_drives: vec![],
             clouds: vec![],
+            auto_check_updates: true,
         }
     }
 }
@@ -1567,6 +1576,10 @@ pub fn run() {
             cloud_local_dirs,
             cloud_forget_folder,
             duplicate,
+            updater::check_for_updates,
+            updater::download_update,
+            updater::install_update,
+            updater::open_external_url,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
