@@ -240,7 +240,6 @@ export function Develop(p: Props) {
   devRef.current = dev;
   const idRef = useRef(id);
   idRef.current = id;
-  const profileStrengthSeq = useRef(0);
   const pending = useRef<{ id: number; d: Dev; label: string; replacePrefix?: string; timer: number } | null>(null);
 
   // Keep per-photo session cache synchronized for instant switching between working images
@@ -1405,47 +1404,7 @@ export function Develop(p: Props) {
   };
   const autoHdr = () => measured("Auto HDR toning", (i) => api.autoHdr(i), (cur, hdr) => ({ ...cur, hdr }));
   const autoWb = () => measured("Auto white balance", api.autoWhiteBalance, (cur, white_balance) => ({ ...cur, white_balance }));
-  const autoProfile = async (profile: string, label: string, strength: number = profileStrength) => {
-    setActiveProfile(profile);
-    const profLabel = PROFILES.find(([k]) => k === profile)?.[1] || label;
-    await measured(
-      `Profile: ${profLabel} (${strength}%)`,
-      (i, cur) => api.autoDevelop(i, cur, profile, strength),
-      (_, d) => d,
-      `Profile: ${profLabel}`,
-    );
-  };
-  const handleProfileStrength = async (strength: number) => {
-    setProfileStrength(strength);
-    if (id == null || !devRef.current) return;
-    const prof = activeProfile || "natural";
-    const label = PROFILES.find(([k]) => k === prof)?.[1] || "Natural";
-    if (!activeProfile) {
-      setActiveProfile(prof);
-    }
-    const seq = ++profileStrengthSeq.current;
-    try {
-      const d = await api.autoDevelop(id, devRef.current, prof, strength);
-      if (idRef.current === id && seq === profileStrengthSeq.current) {
-        change(d, `Profile: ${label} (${strength}%)`, `Profile: ${label}`);
-      }
-    } catch (e) {
-      if (seq === profileStrengthSeq.current) {
-        setError(`Profile strength: ${e}`);
-      }
-    }
-  };
-  // Auto › by photo type: the AI (or, failing that, the photo's keywords) picks the profile
-  const autoByType = async () => {
-    if (id == null) return;
-    try {
-      const [type, err] = await waitFor("Finding the photo type", () => api.photoType(id));
-      await autoProfile(type, `${type} (by photo type)`);
-      if (err) setError(`The AI could not tell the photo type, so its keywords did: ${err}`);
-    } catch (e) {
-      setError(`Auto by photo type: ${e}`);
-    }
-  };
+  const autoDevelop = () => measured("Auto", (i, cur) => api.autoDevelop(i, cur, "natural", 100), (_, d) => d);
   // Auto › remove: the engine heals the selection's objects away and commits the step
   const removeSelection = async (i: number) => {
     if (id == null) return;
@@ -2641,11 +2600,7 @@ export function Develop(p: Props) {
         {/* Auto: one-click measured and AI adjustments */}
         {dev && rtab === "auto" && (
           <AutoTab
-            profile={autoProfile}
-            activeProfile={activeProfile}
-            profileStrength={profileStrength}
-            onStrengthChange={handleProfileStrength}
-            byType={autoByType}
+            auto={autoDevelop}
             whiteBalance={autoWb}
             tone={autoTone}
             levels={autoLevels}
