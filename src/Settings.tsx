@@ -123,10 +123,12 @@ function Appearance({ settings, setSettings }: { settings: Settings; setSettings
     api.saveSettings(updated);
   };
 
-  const categories = ["All", "Vibrant", "Neutral", "Warm", "Light"];
+  const categories = ["All", "Dark", "Light", "Neutral", "Warm", "Modern", "Vibrant"];
   const filteredThemes = THEMES.filter((th) => {
     if (categoryFilter === "All") return true;
-    if (categoryFilter === "Neutral" && (th.category === "Neutral" || th.id === "system")) return true;
+    if (categoryFilter === "Dark") return th.mode === "dark";
+    if (categoryFilter === "Light") return th.mode === "light";
+    if (categoryFilter === "Neutral") return th.category === "Neutral" || th.id === "system";
     return th.category === categoryFilter;
   });
 
@@ -173,7 +175,13 @@ function Appearance({ settings, setSettings }: { settings: Settings; setSettings
             const count =
               cat === "All"
                 ? THEMES.length
-                : THEMES.filter((t) => (cat === "Neutral" ? t.category === "Neutral" || t.id === "system" : t.category === cat)).length;
+                : cat === "Dark"
+                ? THEMES.filter((t) => t.mode === "dark").length
+                : cat === "Light"
+                ? THEMES.filter((t) => t.mode === "light").length
+                : cat === "Neutral"
+                ? THEMES.filter((t) => t.category === "Neutral" || t.id === "system").length
+                : THEMES.filter((t) => t.category === cat).length;
             const isCur = categoryFilter === cat;
             return (
               <button
@@ -238,14 +246,23 @@ function Appearance({ settings, setSettings }: { settings: Settings; setSettings
                         className="flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold tracking-wide shadow-xs"
                         style={{
                           backgroundColor: th.colors.accent,
-                          color: th.colors.bg === "#000000" || th.colors.bg.startsWith("#0") || th.colors.bg.startsWith("#1") ? "#ffffff" : "#0f172a",
+                          color: "#ffffff",
                         }}
                       >
                         ✓ Active
                       </span>
                     ) : (
-                      <span className="rounded bg-neutral-800/90 px-1.5 py-0.5 text-[10px] text-neutral-400">
-                        {th.category}
+                      <span
+                        className={`flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                          th.mode === "light"
+                            ? "bg-amber-500/10 text-amber-500 border border-amber-500/20"
+                            : th.mode === "dark"
+                            ? "bg-sky-500/10 text-sky-400 border border-sky-500/20"
+                            : "bg-neutral-800/90 text-neutral-400"
+                        }`}
+                      >
+                        <span>{th.mode === "light" ? "☀️" : th.mode === "dark" ? "🌙" : "💻"}</span>
+                        <span>{th.mode === "system" ? "Auto" : th.mode === "light" ? "Light" : "Dark"}</span>
                       </span>
                     )}
                   </div>

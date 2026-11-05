@@ -1,28 +1,30 @@
 import { ReactNode, useState } from "react";
 import { Develop as Dev } from "./api";
-import { Btn, Panel } from "./controls";
+import { Btn, Panel, Slider } from "./controls";
 
-/** id (develop::PROFILES), label, what it does */
+/** The 15 professional photographic color grading styles (from 15_photo_styles_color_grading_engine.rs) */
 export const PROFILES: [string, string, string][] = [
-  ["natural", "Natural", "Balanced colour and tone (the same as ✦ Auto)"],
-  ["neutral", "Neutral", "Flat and low contrast: a starting point for your own grade"],
-  ["vivid", "Vivid", "More contrast, clarity and colour"],
-  ["portrait", "Portrait", "Warmer, softer skin texture, gentle contrast"],
-  ["landscape", "Landscape", "Held-back skies, open shadows, more clarity and colour"],
-  ["bw", "B&W", "Black and white with extra contrast"],
-  ["film", "Film", "Matte blacks, teal shadows, warm highlights and grain"],
-  ["moody", "Moody", "Darker and muted, with a vignette"],
-  ["street", "Street", "Muted and cinematic: teal shadows, warm highlights, matte blacks, light grain"],
-  ["food", "Food", "Bright and warm, open shadows, rich reds, oranges and greens"],
-  ["architecture", "Architecture", "Clean and cool: crisp lines, even tones, pastel skies, little colour"],
-  ["night", "Night", "Teal and orange city light, neon held back, deep blacks"],
-  ["nature", "Nature", "Macro, flowers and wildlife: lush greens, fine detail, soft vignette"],
-  ["teal_orange", "Teal & Orange", "Cinematic: teal shadows, amber highlights, deep shadows, held-back highlights"],
-  ["soft_editorial", "Editorial", "Soft and airy: bright, warm midtones, luminous skin, dusty muted colour"],
-  ["dark_moody", "Dark Moody", "Low key and atmospheric: compressed highlights, pine greens, muted yellows, vignette"],
-  ["analog_film", "35mm Film", "Vintage emulsion: lifted blacks, rolled-off whites, golden warmth, heavy grain"],
-  ["fine_art_bw", "Fine-Art B&W", "Zone-system black and white: deep S-curve, dark skies, bright skin, fine grain"],
+  // Group A: 10 Professional Color Grading Styles
+  ["bleach_bypass", "Bleach Bypass", "Silver-retention simulation: high contrast, desaturated cold slate shadows"],
+  ["cyberpunk", "Cyberpunk", "Dual-tone neon grade: electric cyan and magenta over deep violet shadows"],
+  ["moody_matte", "Moody Matte", "Lifted matte blacks, olive-drab desaturated greens, and warm amber skin"],
+  ["golden_hour", "Golden Hour", "Chocolate-brown shadows, warm golden midtones, creamy peach highlights"],
+  ["nordic_noir", "Nordic Noir", "Prussian-blue shadows, crisp steel-gray midtones, and muted warm hues"],
+  ["kodak_portra", "Portra 400", "Analog C-41 response: soft contrast, pastel cyan skies, emerald greens, golden skin"],
+  ["fuji_velvia", "Fuji Velvia", "Reversal slide film: deep ink blacks, steep contrast, punchy greens and rich reds"],
+  ["emerald_gold", "Emerald & Gold", "Matrix/Fincher aesthetic: forest-green shadows, olive midtones, warm gold"],
+  ["pastel_airy", "Pastel Airy", "Airy high-key exposure: lifted milky shadows, negative contrast, pastel tones"],
+  ["cross_processed", "Cross-Process", "C-41 slide cross-processing: asymmetric curves, cyan shadows, yellow highlights"],
+
+  // Group B: Classic Teal & Orange + 5 Variations
+  ["teal_orange", "Teal & Orange", "Classic cinematic: teal shadows, amber highlights, deep shadows, held-back highlights"],
+  ["teal_orange_muted", "Matte T&O", "Dusty slate-blue shadows, soft terracotta highlights, and lifted matte blacks"],
+  ["teal_orange_dark", "Dark T&O", "Abyssal cyan shadows, fiery bronze-amber highlights, and deep crushed blacks"],
+  ["teal_orange_airy", "Bright T&O", "High-luminance mint/aqua shadows with soft pastel coral/peach highlights"],
+  ["teal_orange_earthy", "Earthy T&O", "Steel-slate shadows, ochre/coffee-brown highlights, and muted greens"],
+  ["teal_orange_neon", "Neon T&O", "Electric turquoise and glowing tangerine over crisp high-contrast blacks"],
 ];
+
 const sub = "mb-1 mt-3 text-[10px] uppercase tracking-wider text-neutral-500";
 const hint = "mt-1 text-[10px] text-neutral-500";
 
@@ -73,6 +75,10 @@ function useRunners(p: Ask) {
 export function AutoTab(
   p: Ask & {
     auto: () => Promise<void>;
+    profile: (id: string, label: string, strength?: number) => Promise<void>;
+    activeProfile?: string | null;
+    profileStrength?: number;
+    onStrengthChange?: (strength: number) => void;
     whiteBalance: () => Promise<void>;
     tone: () => Promise<void>;
     levels: () => Promise<void>;
@@ -83,6 +89,27 @@ export function AutoTab(
   },
 ) {
   const { run, ai } = useRunners(p);
+  const [localProfile, setLocalProfile] = useState<string | null>(null);
+  const [localStrength, setLocalStrength] = useState<number>(100);
+
+  const activeProfile = p.activeProfile !== undefined ? p.activeProfile : localProfile;
+  const strength = p.profileStrength !== undefined ? p.profileStrength : localStrength;
+
+  const onSelect = async (id: string, label: string) => {
+    setLocalProfile(id);
+    await p.profile(id, label, strength);
+  };
+
+  const onStrength = (v: number) => {
+    setLocalStrength(v);
+    if (p.onStrengthChange) {
+      p.onStrengthChange(v);
+    } else {
+      const profId = activeProfile || "bleach_bypass";
+      const profLabel = PROFILES.find(([k]) => k === profId)?.[1] || "Bleach Bypass";
+      p.profile(profId, profLabel, v);
+    }
+  };
 
   return (
     <>
@@ -96,7 +123,23 @@ export function AutoTab(
             p.level,
           )}
         </div>
-        <p className={hint}>Automatically balances white balance, exposure and tone across the whole photo.</p>
+        <div className={sub}>To a profile</div>
+        <div className="grid grid-cols-3 gap-1">
+          {PROFILES.map(([id, label, title]) => run(id, label, () => onSelect(id, label), title, "", activeProfile === id))}
+        </div>
+        <div className="mt-2.5">
+          <Slider
+            label="Strength"
+            value={strength}
+            min={0}
+            max={200}
+            step={1}
+            def={100}
+            format={(v) => `${v}%`}
+            onChange={onStrength}
+          />
+        </div>
+        <p className={hint}>Sets white balance, Basic and presence from the photo, then the profile's look at {strength}% strength. Your other edits stay.</p>
       </Panel>
 
       <Panel title="One at a time">
