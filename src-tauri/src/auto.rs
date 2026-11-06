@@ -397,6 +397,7 @@ pub fn run(core: &Arc<Core>, function: &str, ids: &[i64], settings: &Value, job:
 /// New photos arrived from `source` (folders | cloud | immich | duplicates): when switched on, Auto Catalog &
 /// Culling runs on them in the background.
 pub fn after_import(core: &Arc<Core>, ids: Vec<i64>, source: &str) {
+    crate::faces::after_import(core, &ids);
     let (s, provider) = {
         let s = core.settings.lock().unwrap();
         (s.auto.clone(), s.active_provider.clone())

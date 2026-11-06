@@ -4,6 +4,7 @@ import { ReactNode, useEffect, useId, useRef, useState } from "react";
 import { api, AutoFunction, CloudAccount, CloudFolder, Culling, fileManagerName, Filter, flagName, FolderLoading, FolderProgress, ImmichAlbum, JobProgress, LABEL_COLORS, LABELS, NetworkDrive, Photo, Settings, Source, thumbUrl } from "./api";
 import { AutoView, FUNCS } from "./AutoView";
 import { Btn, HUE, Hue, Icon, Panel, Stars } from "./controls";
+import { FaceSearch } from "./People";
 import { PhotoViewer } from "./PhotoViewer";
 import { CloudBrowser } from "./Storage";
 
@@ -197,7 +198,7 @@ export function Library(p: Props) {
             label="All Photographs"
             hue="blue"
             icon={<Icon d={ICONS.photos} />}
-            active={(f.view === "all" || (!f.folder && !f.immich_album && !f.ids && !f.in_bin && f.view !== "bin")) && f.view !== "loading" && !p.loadingFolder}
+            active={(f.view === "all" || (!f.folder && !f.immich_album && !f.ids && !f.people && !f.in_bin && f.view !== "bin")) && f.view !== "loading" && !p.loadingFolder}
             loading={p.loadingFolder?.viewId === "all"}
             progress={p.loadingFolder?.viewId === "all" ? p.loadingFolder.progress : undefined}
             onClick={() => (p.onShowAll ? p.onShowAll() : show({ view: "all" }))}
@@ -391,10 +392,20 @@ export function Library(p: Props) {
           <div className="flex flex-wrap items-center gap-2 border-b border-neutral-800 bg-neutral-900 px-3 py-2 text-[11px]">
           <input
             className="w-56 rounded bg-neutral-800 px-2 py-1 outline-none placeholder:text-neutral-500 focus:ring-1 focus:ring-sky-600"
-            placeholder="Search filename, camera, lens, keywords"
+            placeholder="Search filename, camera, lens, keywords, people"
             value={f.text ?? ""}
             onChange={(e) => p.setFilter({ ...f, text: e.target.value })}
           />
+          {(p.settings?.faces_enabled || !!f.people?.length) && (
+            <FaceSearch
+              people={f.people ?? []}
+              label={f.view?.startsWith("people:") ? f.view.slice(7) : undefined}
+              onChange={(people, label) =>
+                // from the People view the whole library is shown; picked here, the current folder or album is kept
+                p.setFilter({ ...f, people: people.length ? people : null, view: f.view?.startsWith("people:") ? (people.length ? `people:${label}` : "all") : f.view })
+              }
+            />
+          )}
           <label className="flex items-center gap-1 text-neutral-400">
             Rating ≥
             <select className="rounded bg-neutral-800 px-1 py-1" value={f.min_rating ?? 0} onChange={(e) => p.setFilter({ ...f, min_rating: +e.target.value || null })}>
@@ -705,7 +716,7 @@ export function Library(p: Props) {
             onOpenCompare={p.onOpenCompare}
             onVirtualCopy={p.onVirtualCopy}
             selectedIds={p.selected}
-            folderName={f.folder ? short(f.folder) : f.view === "bin" ? "Bin" : f.view === "loading" ? "" : "All Photographs"}
+            folderName={f.folder ? short(f.folder) : f.view?.startsWith("people:") ? f.view.slice(7) : f.view === "bin" ? "Bin" : f.view === "loading" ? "" : "All Photographs"}
           />
         ) : p.loadingFolder && p.photos.length === 0 ? (
           <FolderLoadingScreen loading={p.loadingFolder} />

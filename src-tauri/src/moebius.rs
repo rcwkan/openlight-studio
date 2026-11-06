@@ -71,6 +71,8 @@ fn open_session(env: &ort::environment::Environment, path: &Path, key: &str, gpu
         let mut b = Session::builder(env).map_err(|e| fail(e.to_string()))?;
         if use_gpu && std::env::var_os("OPENLIGHT_AI_CPU").is_none() {
             b = b.with_execution_providers([crate::aimodel::accel(key)]).map_err(|e| fail(e.to_string()))?;
+        } else {
+            b = b.with_auto_device(ort::session::builder::AutoDevicePolicy::PreferCPU).map_err(|e| fail(e.to_string()))?;
         }
         b = b.with_memory_pattern(false).map_err(|e| fail(e.to_string()))?;
         #[cfg(target_os = "macos")]

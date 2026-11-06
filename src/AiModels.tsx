@@ -121,6 +121,25 @@ export function AiModelsSettings({ settings, setSettings }: { settings: Settings
           models.filter((m) => m.kind === "inpaint" || m.kind === "generate"),
           "ai_removal_model",
         )}
+        <section className="rounded-lg border border-neutral-800 bg-neutral-900 p-4">
+          <label className="flex items-center gap-2 font-semibold">
+            <input
+              type="checkbox"
+              checked={!!settings.faces_enabled}
+              onChange={(e) => {
+                const updated = { ...settings, faces_enabled: e.target.checked };
+                setSettings(updated);
+                void api.saveSettings(updated);
+              }}
+            />
+            People: find faces and search by person
+          </label>
+          <p className={`${hint} mt-1`}>
+            Adds the People view: faces are found with YOLOFace and grouped into people with ArcFace, new imports are scanned automatically, and the library can be searched by
+            person or by name. Everything runs on this computer. Needs the face recognition model below (or the face swap model, which includes it).
+          </p>
+        </section>
+        {section("Face recognition", "Used by People. Runs on the CPU.", models.filter((m) => m.kind === "faces"))}
         {section("Face swap", "Used by Develop → AI → Face swap. Runs on the CPU.", models.filter((m) => m.kind === "faceswap"))}
         {section("Denoise", "Used by Develop → AI → Denoise. Both make a new, cleaner copy of the photo.", models.filter((m) => m.kind === "denoise"), "ai_denoise_model")}
         {error && <p className="break-words text-red-400">{error}</p>}

@@ -51,6 +51,8 @@ export type Filter = {
   in_bin?: boolean | null;
   /** at most this many photos */
   limit?: number | null;
+  /** only photos showing every one of these people */
+  people?: number[] | null;
 };
 
 export type FolderProgress = {
@@ -242,6 +244,25 @@ export type Settings = {
   network_drives: NetworkDrive[];
   clouds: CloudAccount[];
   auto_check_updates?: boolean;
+  /** People: find and group faces, search by person */
+  faces_enabled?: boolean;
+};
+
+// --- people (faces.rs) ---
+export type Person = { id: number; name: string; hidden: boolean; faces: number; photos: number; cover: number | null };
+/** bbox: x, y, w, h as fractions of the photo */
+export type Face = { id: number; photo_id: number; person_id: number | null; bbox: [number, number, number, number]; score: number; captured_at: string | null; filename: string; similarity: number | null };
+export type FaceStats = {
+  eligible: number;
+  scanned: number;
+  with_faces: number;
+  faces: number;
+  people: number;
+  named: number;
+  hidden: number;
+  by_year: [string, number][];
+  /** [faces in the photo (6 = 6 or more), photos] */
+  per_photo: [number, number][];
 };
 
 export type ReleaseAsset = {
@@ -646,6 +667,24 @@ export const api = {
     invoke<string>("download_update", { url, filename, expectedSha256: expectedSha256 ?? null }),
   /** Launch or open the downloaded update installer / package */
   installUpdate: (path: string) => invoke<void>("install_update", { path }),
+  /** Find and group faces in photos not scanned yet (job "faces-scan") */
+  facesScan: (ids?: number[]) => invoke<{ photos: number; faces: number; failed: number }>("faces_scan", { ids: ids ?? null }),
+  people: () => invoke<Person[]>("faces_people"),
+  facesOf: (person: number) => invoke<Face[]>("faces_of_person", { person }),
+  /** faces of other people that look like this one, most alike first */
+  facesSimilar: (face: number) => invoke<Face[]>("faces_similar", { face }),
+  faceStats: () => invoke<FaceStats>("faces_stats"),
+  /** a name someone else has merges the two; returns the person the faces end up in */
+  renamePerson: (person: number, name: string) => invoke<number>("faces_rename", { person, name }),
+  hidePeople: (people: number[], hidden: boolean) => invoke<void>("faces_hide", { people, hidden }),
+  setCover: (person: number, face: number) => invoke<void>("faces_set_cover", { person, face }),
+  /** everyone into the first; returns it */
+  mergePeople: (people: number[]) => invoke<number>("faces_merge", { people }),
+  /** to `person`, or a new person when null; returns the person */
+  moveFaces: (faces: number[], person: number | null) => invoke<number>("faces_move", { faces, person }),
+  deleteFaces: (faces: number[]) => invoke<void>("faces_delete", { faces }),
+  deletePeople: (people: number[]) => invoke<void>("faces_delete_people", { people }),
+  resetFaces: () => invoke<void>("faces_reset"),
   /** Open an external URL safely in the default system browser */
   openExternalUrl: (url: string) => invoke<void>("open_external_url", { url }),
 };
@@ -662,6 +701,7 @@ let thumbsDir = "";
 export function setThumbsDir(dir: string) {
   thumbsDir = dir + (dir.includes("\\") ? "\\" : "/");
 }
+export const faceUrl = (face: number) => convertFileSrc(`${thumbsDir}faces${thumbsDir.slice(-1)}${face}.jpg`);
 export const thumbUrl = (p: Photo) => `${convertFileSrc(`${thumbsDir}${p.id}.jpg`)}?v=${p.thumb_v}`;
 
 export const FLAGS = ["reject", "unflagged", "pick"] as const;

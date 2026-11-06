@@ -6,6 +6,7 @@ mod catalog;
 mod cloud;
 mod develop;
 mod enhance;
+mod faces;
 mod faceswap;
 mod gpu;
 mod mcp;
@@ -69,6 +70,8 @@ pub struct Settings {
     /// Automatically check for updates on startup.
     #[serde(default = "default_true")]
     pub auto_check_updates: bool,
+    /// People: find and group faces (ArcFace), scan new imports, search by person.
+    pub faces_enabled: bool,
 }
 
 impl Default for Settings {
@@ -92,6 +95,7 @@ impl Default for Settings {
             network_drives: vec![],
             clouds: vec![],
             auto_check_updates: true,
+            faces_enabled: false,
         }
     }
 }
@@ -1576,6 +1580,19 @@ pub fn run() {
             cloud_local_dirs,
             cloud_forget_folder,
             duplicate,
+            faces::faces_scan,
+            faces::faces_people,
+            faces::faces_of_person,
+            faces::faces_similar,
+            faces::faces_stats,
+            faces::faces_rename,
+            faces::faces_hide,
+            faces::faces_set_cover,
+            faces::faces_merge,
+            faces::faces_move,
+            faces::faces_delete,
+            faces::faces_delete_people,
+            faces::faces_reset,
             updater::check_for_updates,
             updater::download_update,
             updater::install_update,

@@ -32,7 +32,13 @@ fn lut_for(srgb: &[Px], w: usize, h: usize) -> Result<Vec<f32>, String> {
         }
     }
     let fail = |e: String| format!("AI auto adjust: {e}");
-    let mut session = Session::builder(crate::sdfill::env()?).map_err(|e| fail(e.to_string()))?.commit_from_memory(MODEL).map_err(|e| fail(e.to_string()))?;
+    // the 3D-LUT model is tiny and CoreML cannot compile it (error code -1), so pin it to the CPU provider
+    let mut session = Session::builder(crate::sdfill::env()?)
+        .map_err(|e| fail(e.to_string()))?
+        .with_auto_device(ort::session::builder::AutoDevicePolicy::PreferCPU)
+        .map_err(|e| fail(e.to_string()))?
+        .commit_from_memory(MODEL)
+        .map_err(|e| fail(e.to_string()))?;
     let input = Tensor::from_array(([1usize, 3, 256, 256], planes)).map_err(|e| fail(e.to_string()))?;
     let out = session.run(ort::inputs!["image" => input]).map_err(|e| fail(e.to_string()))?;
     let (shape, lut) = out["lut"].try_extract_tensor::<f32>().map_err(|e| fail(e.to_string()))?;
@@ -139,6 +145,13 @@ pub fn adjust(img: &Img, cur: &Develop, profile: Option<&str>, strength: f32, am
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lut_runs_on_cpu_without_coreml_error() {
+        let px = vec![[0.2, 0.4, 0.6]; 32 * 32];
+        let lut = lut_for(&px, 32, 32).expect("3D-LUT inference should succeed on CPU");
+        assert_eq!(lut.len(), 3 * DIM * DIM * DIM);
+    }
 
     /// A photo through the model: OPENLIGHT_TEST_RAW=<file>, OPENLIGHT_TEST_OUT=<folder> for before/after PNGs.
     #[test]
