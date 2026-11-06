@@ -8,11 +8,13 @@ import { ExportDialog, Library, RemoteDialog, SelectMods } from "./Library";
 import { CompareModal } from "./CompareModal";
 import { SettingsTab, SettingsView } from "./Settings";
 import { UpdateModal } from "./UpdateModal";
+import { People } from "./People";
 import { applyTheme, getStoredTheme } from "./theme";
 
-type Module = "library" | "develop" | "settings";
+type Module = "library" | "people" | "develop" | "settings";
 const MODULES: [Module, string][] = [
   ["library", "Library"],
+  ["people", "People"],
   ["develop", "Develop"],
   ["settings", "Settings"],
 ];
@@ -414,7 +416,7 @@ export default function App() {
     if (isSwitching) {
       setPhotos([]);
     }
-    setFilter((f) => ({ ...f, folder, flat: true, immich_album: null, ids: null, view: viewId, in_bin: null }));
+    setFilter((f) => ({ ...f, folder, flat: true, immich_album: null, ids: null, people: null, view: viewId, in_bin: null }));
     if (!images) {
       setStatus("");
       await reloadRef.current();
@@ -441,7 +443,7 @@ export default function App() {
     if (isSwitching) {
       setPhotos([]);
     }
-    setFilter((f) => ({ ...f, folder: null, immich_album: null, ids: null, view: "all", in_bin: null }));
+    setFilter((f) => ({ ...f, folder: null, immich_album: null, ids: null, people: null, view: "all", in_bin: null }));
     try {
       await reloadRef.current();
     } finally {
@@ -464,7 +466,7 @@ export default function App() {
     if (isSwitching) {
       setPhotos([]);
     }
-    setFilter((f) => ({ ...f, folder: null, immich_album: album ?? "favorites", ids: null, view: viewId, in_bin: null }));
+    setFilter((f) => ({ ...f, folder: null, immich_album: album ?? "favorites", ids: null, people: null, view: viewId, in_bin: null }));
     setStatus(`Opening ${name}…`);
     try {
       const { next } = await api.immichOpen(album, 1);
@@ -502,7 +504,7 @@ export default function App() {
       const r = await api.googleImport();
       const notes = [r.skipped && `${r.skipped} skipped (format not supported)`, r.failed && `${r.failed} failed (${r.error})`];
       setStatus([`Added ${r.imported} photo(s) from Google Photos`, ...notes.filter(Boolean)].join(", "));
-      setFilter((f) => ({ ...f, folder: r.folder, immich_album: null, ids: null, view: "google", in_bin: null }));
+      setFilter((f) => ({ ...f, folder: r.folder, immich_album: null, ids: null, people: null, view: "google", in_bin: null }));
     } catch (e) {
       setStatus(`Google Photos: ${e}`);
     } finally {
@@ -520,7 +522,7 @@ export default function App() {
       const r = await api.appleImport();
       const notes = [r.skipped && `${r.skipped} up to date`, r.failed && `${r.failed} failed`];
       setStatus([`Synced ${r.imported} photo(s) from Apple iCloud Photos`, ...notes.filter(Boolean)].join(", "));
-      setFilter((f) => ({ ...f, folder: r.folder, immich_album: null, ids: null, view: "apple", in_bin: null }));
+      setFilter((f) => ({ ...f, folder: r.folder, immich_album: null, ids: null, people: null, view: "apple", in_bin: null }));
     } catch (e) {
       setStatus(`Apple iCloud Photos: ${e}`);
     } finally {
@@ -538,7 +540,7 @@ export default function App() {
       const r = await api.amazonImport();
       const notes = [r.skipped && `${r.skipped} up to date`, r.failed && `${r.failed} failed`];
       setStatus([`Synced ${r.imported} photo(s) from Amazon Photos`, ...notes.filter(Boolean)].join(", "));
-      setFilter((f) => ({ ...f, folder: r.folder, immich_album: null, ids: null, view: "amazon", in_bin: null }));
+      setFilter((f) => ({ ...f, folder: r.folder, immich_album: null, ids: null, people: null, view: "amazon", in_bin: null }));
     } catch (e) {
       setStatus(`Amazon Photos: ${e}`);
     } finally {
@@ -556,7 +558,7 @@ export default function App() {
       const r = await api.adobeImport();
       const notes = [r.skipped && `${r.skipped} up to date`, r.failed && `${r.failed} failed`];
       setStatus([`Synced ${r.imported} photo(s) from Adobe Cloud Photos`, ...notes.filter(Boolean)].join(", "));
-      setFilter((f) => ({ ...f, folder: r.folder, immich_album: null, ids: null, view: "adobe", in_bin: null }));
+      setFilter((f) => ({ ...f, folder: r.folder, immich_album: null, ids: null, people: null, view: "adobe", in_bin: null }));
     } catch (e) {
       setStatus(`Adobe Cloud Photos: ${e}`);
     } finally {
@@ -575,7 +577,7 @@ export default function App() {
     if (isSwitching) {
       setPhotos([]);
     }
-    setFilter((f) => ({ ...f, folder: d.path, flat: true, immich_album: null, ids: null, view: viewId, in_bin: null }));
+    setFilter((f) => ({ ...f, folder: d.path, flat: true, immich_album: null, ids: null, people: null, view: viewId, in_bin: null }));
     setStatus(`Opening ${d.name}…`);
     try {
       const r = await api.networkOpen(d.id);
@@ -598,7 +600,7 @@ export default function App() {
     if (isSwitching) {
       setPhotos([]);
     }
-    setFilter((f) => ({ ...f, folder: c.local, immich_album: null, ids: null, view: viewId, in_bin: null }));
+    setFilter((f) => ({ ...f, folder: c.local, immich_album: null, ids: null, people: null, view: viewId, in_bin: null }));
     try {
       await syncCloud(c.id, c.path, name);
     } finally {
@@ -645,7 +647,7 @@ export default function App() {
   const openBin = () => {
     setSelected([]);
     setActiveId(null);
-    setFilter({ folder: null, immich_album: null, ids: null, view: "bin", in_bin: true });
+    setFilter({ folder: null, immich_album: null, ids: null, people: null, view: "bin", in_bin: true });
   };
 
   // a second, explicit "are you sure" before acting on this many photos at once
@@ -836,7 +838,7 @@ export default function App() {
           </span>
         </span>
         <nav className="flex gap-1">
-          {MODULES.map(([m, label]) => {
+          {MODULES.filter(([m]) => m !== "people" || settings?.faces_enabled).map(([m, label]) => {
             const isCur = module === m;
             return (
               <button
@@ -1014,6 +1016,16 @@ export default function App() {
           onAiSettings={() => {
             setSettingsTab("agent");
             setModule("settings");
+          }}
+        />
+      )}
+      {module === "people" && (
+        <People
+          jobs={jobs}
+          onOpenSettings={() => (setSettingsTab("ai"), setModule("settings"))}
+          onShowPhotos={(people, label) => {
+            setFilter({ people, view: `people:${label}`, folder: null, immich_album: null, ids: null, in_bin: null });
+            setModule("library");
           }}
         />
       )}

@@ -174,6 +174,24 @@ const MODELS: &[Spec] = &[
         gpu: false,
         unzip: false,
     },
+    Spec {
+        id: "arcface-faces",
+        kind: "faces",
+        name: "YOLOFace + ArcFace · Face recognition",
+        blurb: "Finds the faces in your photos and groups them into people (Library → People), so you can name them and search by person. FaceFusion's YOLOFace detector and the ArcFace w600k recogniser.",
+        license: "FaceFusion models / InsightFace ArcFace (non-commercial research use)",
+        repo: "facefusion/models-3.0.0",
+        files: &[
+            (crate::faceswap::DETECT, 12_659_761, "821cdbb1e65fbbabdde7dd0933f754797a343e56fd962729c61ffcefcd135929"),
+            (crate::faceswap::RECOGNISE, 174_388_474, "f1f79dc3b0b79a69f94799af1fffebff09fbd78fd96a275fd8f0cbbea23270d1"),
+        ],
+        min_vram_mb: 0,
+        rank: 10,
+        multiple: 1,
+        dims: None,
+        gpu: false,
+        unzip: false,
+    },
 ];
 
 /// A file name may name its own repository, "@owner/repo/file", stored as "file": (repository, local name).
@@ -314,6 +332,7 @@ pub fn models(data: &Path, hw: &Hardware) -> Vec<ModelInfo> {
                     _ if m.kind == "generate" => "Best match for this machine (needs about 4 GB of GPU memory).".to_string(),
                     _ if m.id == "moebius" => "A fast 0.2B diffusion model running on GPU with learned conditioning for realistic object removal.".to_string(),
                     _ if m.kind == "faceswap" => "Runs on the CPU: about a second per face.".to_string(),
+                    _ if m.kind == "faces" => "Runs on the CPU: a fraction of a second per photo, plus decoding it.".to_string(),
                     _ if m.kind == "inpaint" => "A fast alternative that runs on the CPU (about 2 seconds per removal) and only continues what is around the object.".to_string(),
                     Some(v) => format!("Best quality for {}: runs at {} px tiles in {:.0} GB.", hw.gpu.as_deref().unwrap_or("your GPU"), tile_for(Some(v)), v as f32 / 1024.0),
                     None => "Best match for this machine (GPU memory could not be read).".to_string(),
@@ -491,7 +510,11 @@ pub(crate) fn open_session(path: &Path, dims: Option<[&str; 3]>, tile: usize, gp
     // DirectML needs sequential execution and no memory-pattern reuse; without a usable GPU it falls back to the CPU
     let b = Session::builder(env).map_err(|e| fail(e.to_string()))?;
     // OPENLIGHT_AI_CPU=1 skips the GPU (to tell a GPU-driver problem from a model problem)
-    let b = if !gpu || std::env::var_os("OPENLIGHT_AI_CPU").is_some() { b } else { b.with_execution_providers([accel(&format!("{}-{tile}", path.file_stem().and_then(|f| f.to_str()).unwrap_or("model")))]).map_err(|e| fail(e.to_string()))? };
+    let b = if !gpu || std::env::var_os("OPENLIGHT_AI_CPU").is_some() {
+        b.with_auto_device(ort::session::builder::AutoDevicePolicy::PreferCPU).map_err(|e| fail(e.to_string()))?
+    } else {
+        b.with_execution_providers([accel(&format!("{}-{tile}", path.file_stem().and_then(|f| f.to_str()).unwrap_or("model")))]).map_err(|e| fail(e.to_string()))?
+    };
     let b = b.with_memory_pattern(false).map_err(|e| fail(e.to_string()))?;
     // on Apple Silicon the efficiency cores straggle statically-split work: use the performance cores only
     let b = match perf_cores() { Some(n) => b.with_intra_threads(n).map_err(|e| fail(e.to_string()))?, None => b };
@@ -807,6 +830,16 @@ pub fn face_swap(data: &Path, id: &str, img: &Img, source: &Img, tick: &dyn Fn(&
         return Err("download the face swap model first (Settings → AI models)".into());
     }
     crate::faceswap::run(&dir(data, s), img, source, tick)
+}
+
+/// Where the face detector and ArcFace recogniser are: the People model, or the face swap one (which has both).
+pub fn faces_dir(data: &Path) -> Result<PathBuf, String> {
+    ["arcface-faces", "hyperswap-1a"]
+        .iter()
+        .filter_map(|id| spec(id).ok())
+        .find(|s| installed(data, s))
+        .map(|s| dir(data, s))
+        .ok_or_else(|| "download the face recognition model first (Settings → AI models)".into())
 }
 
 /// Fill the hole with LaMa. The model works on a 512 px square, so a square around the object (with its

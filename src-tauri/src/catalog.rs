@@ -74,6 +74,7 @@ CREATE TABLE IF NOT EXISTS analysis (
 pub fn open(path: &Path) -> Result<Connection, String> {
     let c = Connection::open(path).map_err(es)?;
     c.execute_batch(SCHEMA).map_err(es)?;
+    c.execute_batch(crate::faces::SCHEMA).map_err(es)?;
     let _ = c.execute("ALTER TABLE photos ADD COLUMN deleted_at TEXT", []);
     let _ = c.execute("CREATE INDEX IF NOT EXISTS photos_deleted ON photos(deleted_at)", []);
     let ids: Vec<i64> = c
@@ -168,9 +169,14 @@ pub struct Filter {
     pub limit: Option<i64>,
     /// Query items in the bin (true) or normal items (false / None).
     pub in_bin: Option<bool>,
+    /// Only photos showing every one of these people (faces.rs).
+    pub people: Option<Vec<i64>>,
 }
 
-const TEXT_COLS: &str = "(filename LIKE ? OR camera LIKE ? OR lens LIKE ? OR keywords LIKE ?)";
+const TEXT_COLS: &str = "(filename LIKE ? OR camera LIKE ? OR lens LIKE ? OR keywords LIKE ? \
+                         OR COALESCE(master_id, id) IN (SELECT f.photo_id FROM faces f JOIN people p ON p.id = f.person_id WHERE p.name LIKE ?))";
+/// Placeholders in TEXT_COLS.
+const TEXT_ARGS: usize = 5;
 
 /// pick | unflagged | reject for a stored flag.
 pub fn flag_name(f: i64) -> &'static str {
@@ -202,13 +208,13 @@ pub fn query(c: &Connection, f: &Filter) -> Result<Vec<Photo>, String> {
     };
     for w in words(&f.text) {
         sql += &format!(" AND {TEXT_COLS}");
-        args.extend(std::iter::repeat_n(Sql::from(w), 4));
+        args.extend(std::iter::repeat_n(Sql::from(w), TEXT_ARGS));
     }
     let any = words(&f.text_any);
     if !any.is_empty() {
         sql += &format!(" AND ({})", vec![TEXT_COLS; any.len()].join(" OR "));
         for w in any {
-            args.extend(std::iter::repeat_n(Sql::from(w), 4));
+            args.extend(std::iter::repeat_n(Sql::from(w), TEXT_ARGS));
         }
     }
     if let Some(r) = f.min_rating {
@@ -244,6 +250,9 @@ pub fn query(c: &Connection, f: &Filter) -> Result<Vec<Photo>, String> {
             "square" => sql += " AND width = height AND width > 0",
             _ => {}
         }
+    }
+    if let Some(people) = f.people.as_deref().filter(|p| !p.is_empty()) {
+        sql += &crate::faces::filter_sql(people);
     }
     if let Some(album) = &f.immich_album {
         sql += " AND path IN (SELECT path FROM immich_albums WHERE album = ?)";
