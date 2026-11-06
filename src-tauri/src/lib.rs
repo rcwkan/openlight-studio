@@ -11,6 +11,7 @@ mod faceswap;
 mod gpu;
 mod mcp;
 mod moebius;
+mod perspective;
 mod remote;
 mod retouch;
 mod sdfill;
@@ -63,6 +64,7 @@ pub struct Settings {
     /// The AI models the Develop AI tab uses (ids from aimodel.rs); empty: the best one installed.
     pub ai_denoise_model: String,
     pub ai_removal_model: String,
+    pub ai_align_model: String,
     /// Shares on a NAS or server, browsed in place like folders.
     pub network_drives: Vec<storage::NetworkDrive>,
     /// Cloud storage accounts; their secrets are in the keychain.
@@ -92,6 +94,7 @@ impl Default for Settings {
             gpu_accel: true,
             ai_denoise_model: String::new(),
             ai_removal_model: String::new(),
+            ai_align_model: String::new(),
             network_drives: vec![],
             clouds: vec![],
             auto_check_updates: true,
@@ -749,6 +752,17 @@ fn render_preview(core: St, id: i64, develop: Develop, skip_crop: bool, overlay_
 #[tauri::command(async)]
 fn upright(core: St, id: i64, develop: Develop, mode: String) -> Result<develop::Transform, String> {
     develop::upright(&*core.proxy(&core.photo(id)?.path)?, &develop, &mode)
+}
+
+/// AI Auto Align using PerspectiveFields (`mode`: `horizontal` | `vertical` | `both`).
+#[tauri::command(async)]
+fn ai_align(core: St, id: i64, develop: Develop, model: String, mode: String) -> Result<perspective::AlignResult, String> {
+    let p = core.photo(id)?;
+    let job = crate::auto::Job::start(&core, "ai-align");
+    let proxy = core.proxy(&p.path)?;
+    perspective::align(&core.dir(), &model, &proxy, &develop, &mode, &|label, done, total| {
+        job.progress(label, done, total);
+    })
 }
 
 /// Lateral chromatic aberration measured on the photo: [ca_red_cyan, ca_blue_yellow].
@@ -1508,6 +1522,7 @@ pub fn run() {
             default_develop,
             render_preview,
             upright,
+            ai_align,
             auto_ca,
             heal_spot,
             auto_develop,

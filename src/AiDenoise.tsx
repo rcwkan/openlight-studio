@@ -1,12 +1,26 @@
 import { listen } from "@tauri-apps/api/event";
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
-import { AiModel, api, Develop as Dev, Photo, Settings, Stroke, thumbUrl } from "./api";
+import { AiModel, AlignResult, api, Develop as Dev, Photo, Settings, Stroke, thumbUrl } from "./api";
 import { PROFILES } from "./Auto";
-import { Btn, Slider } from "./controls";
+import { Btn, HUE, Icon, Panel, Slider } from "./controls";
 
-const sub = "mb-1 mt-3 text-[10px] uppercase tracking-wider text-neutral-500";
 const hint = "mt-1 text-[10px] text-neutral-500";
+
+type Transform = Dev["transform"];
+
+const defTransform: Transform = {
+  upright: "off",
+  guides: [],
+  rotate: 0,
+  vertical: 0,
+  horizontal: 0,
+  aspect: 0,
+  scale: 100,
+  offset_x: 0,
+  offset_y: 0,
+  constrain_crop: true,
+};
 
 export type AiJobProgress = {
   label: string;
@@ -35,7 +49,7 @@ function AiProgressBar({
   percent: number;
   modelName?: string;
   elapsedSec: number;
-  onCancel: () => void;
+  onCancel?: () => void;
 }) {
   const isIndeterminate = total <= 1 && done === 0;
 
@@ -98,28 +112,33 @@ function AiProgressBar({
       </div>
 
       {/* Cancel button */}
-      <div className="flex justify-end pt-1 border-t border-neutral-900">
-        <button
-          type="button"
-          onClick={onCancel}
-          className="rounded px-2 py-0.5 text-[10px] text-neutral-400 hover:text-red-400 hover:bg-neutral-900 border border-neutral-800 transition-colors"
-          title="Cancel this AI operation"
-        >
-          ✕ Cancel
-        </button>
-      </div>
+      {onCancel && (
+        <div className="flex justify-end pt-1 border-t border-neutral-900">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="rounded px-2 py-0.5 text-[10px] text-neutral-400 hover:text-red-400 hover:bg-neutral-900 border border-neutral-800 transition-colors"
+            title="Cancel this AI operation"
+          >
+            ✕ Cancel
+          </button>
+        </div>
+      )}
     </div>
   );
 }
 
-/** Photo AI tools: non-destructive in-place object removal and denoise.
- *  Adjustments are stored non-destructively as adjustment layers inside Develop with pixel patches
- *  cached on disk. Original RAW / master files are never duplicated or modified. */
+/** Photo AI tools organized into workflow groups:
+ *  1. Tone & Color (Auto Adjust)
+ *  2. Geometry & Perspective (PerspectiveFields Auto Align)
+ *  3. Detail & Restoration (Neural Denoise)
+ *  4. Retouch & Faces (Object Removal, Generative Fill, Face Swap & AI Layers)
+ *  Adjustments are stored non-destructively inside Develop with pixel patches cached on disk. */
 export function AiTab(p: {
   photoId: number | null;
   settings: Settings | null;
   dev: Dev | null;
-  onChange: (d: Dev, label: string) => void;
+  onChange: (d: Dev, label: string, replacePrefix?: string) => void;
   setDev: (d: Dev) => void;
   /** the brush is on: paint over an object on the photo */
   drawing: boolean;
@@ -142,6 +161,8 @@ export function AiTab(p: {
   const [grow, setGrow] = useState(6);
   const [prompt, setPrompt] = useState("");
   const [job, setJob] = useState<AiJobProgress | null>(null);
+  const [alignJob, setAlignJob] = useState<AiJobProgress | null>(null);
+  const [alignInfo, setAlignInfo] = useState<AlignResult | null>(null);
   const [removing, setRemoving] = useState(false);
   const [fillJob, setFillJob] = useState<AiJobProgress | null>(null);
   const [style, setStyle] = useState("");
@@ -156,43 +177,58 @@ export function AiTab(p: {
 
   useEffect(() => void api.aiModels().then((r) => setModels(r.models), () => setModels([])), []);
   useEffect(() => {
+    setAlignInfo(null);
+  }, [photoId]);
+
+  useEffect(() => {
     const un = listen<{ job: string; label?: string; done: number; total: number; finished?: boolean }>("job-progress", (e) => {
-      const p = e.payload;
-      if (p.finished) {
-        if (p.job === "ai-denoise") setJob(null);
-        if (p.job === "ai-faceswap") setSwapJob(null);
-        if (p.job === "ai-remove") {
+      const ev = e.payload;
+      if (ev.finished) {
+        if (ev.job === "ai-denoise") setJob(null);
+        if (ev.job === "ai-align") setAlignJob(null);
+        if (ev.job === "ai-faceswap") setSwapJob(null);
+        if (ev.job === "ai-remove") {
           setFillJob(null);
           setRemoving(false);
         }
         return;
       }
-      const pct = p.total > 0 ? Math.min(100, Math.round((p.done / p.total) * 100)) : 0;
-      if (p.job === "ai-denoise") {
+      const pct = ev.total > 0 ? Math.min(100, Math.round((ev.done / ev.total) * 100)) : 0;
+      if (ev.job === "ai-denoise") {
         setJob((prev) => ({
-          label: p.label || "AI Denoising…",
-          done: p.done,
-          total: p.total,
+          label: ev.label || "AI Denoising…",
+          done: ev.done,
+          total: ev.total,
           percent: pct,
           startTime: prev?.startTime ?? Date.now(),
           elapsedSec: Math.floor((Date.now() - (prev?.startTime ?? Date.now())) / 1000),
         }));
       }
-      if (p.job === "ai-faceswap") {
+      if (ev.job === "ai-align") {
+        setAlignJob((prev) => ({
+          label: ev.label || "Estimating perspective fields…",
+          done: ev.done,
+          total: ev.total,
+          percent: pct,
+          startTime: prev?.startTime ?? Date.now(),
+          elapsedSec: Math.floor((Date.now() - (prev?.startTime ?? Date.now())) / 1000),
+        }));
+      }
+      if (ev.job === "ai-faceswap") {
         setSwapJob((prev) => ({
-          label: p.label || "Swapping faces…",
-          done: p.done,
-          total: p.total,
+          label: ev.label || "Swapping faces…",
+          done: ev.done,
+          total: ev.total,
           percent: pct,
           startTime: prev?.startTime ?? Date.now(),
           elapsedSec: Math.floor((Date.now() - (prev?.startTime ?? Date.now())) / 1000),
         }));
       }
-      if (p.job === "ai-remove") {
+      if (ev.job === "ai-remove") {
         setFillJob((prev) => ({
-          label: p.label || "Removing object…",
-          done: p.done,
-          total: p.total,
+          label: ev.label || "Removing object…",
+          done: ev.done,
+          total: ev.total,
           percent: pct,
           startTime: prev?.startTime ?? Date.now(),
           elapsedSec: Math.floor((Date.now() - (prev?.startTime ?? Date.now())) / 1000),
@@ -203,10 +239,13 @@ export function AiTab(p: {
   }, []);
 
   useEffect(() => {
-    if (!job && !fillJob && !swapJob && !removing) return;
+    if (!job && !alignJob && !fillJob && !swapJob && !removing) return;
     const interval = setInterval(() => {
       if (job) {
         setJob((prev) => (prev ? { ...prev, elapsedSec: Math.floor((Date.now() - prev.startTime) / 1000) } : null));
+      }
+      if (alignJob) {
+        setAlignJob((prev) => (prev ? { ...prev, elapsedSec: Math.floor((Date.now() - prev.startTime) / 1000) } : null));
       }
       if (fillJob) {
         setFillJob((prev) => (prev ? { ...prev, elapsedSec: Math.floor((Date.now() - prev.startTime) / 1000) } : null));
@@ -216,7 +255,7 @@ export function AiTab(p: {
       }
     }, 1000);
     return () => clearInterval(interval);
-  }, [job != null, fillJob != null, swapJob != null, removing]);
+  }, [job != null, alignJob != null, fillJob != null, swapJob != null, removing]);
 
   useEffect(() => {
     if (faceQuery == null) return;
@@ -232,6 +271,7 @@ export function AiTab(p: {
 
   // what each tool uses: the model chosen in Settings if it is installed, else the best installed one
   const use = (group: AiModel[], chosen?: string) => group.find((m) => m.id === chosen && m.installed) ?? group.find((m) => m.installed);
+  const alignModel = use(models.filter((m) => m.kind === "align"), p.settings?.ai_align_model);
   const denoiseModel = use(models.filter((m) => m.kind === "denoise"), p.settings?.ai_denoise_model);
   const removalModel = use(models.filter((m) => m.kind === "inpaint" || m.kind === "generate"), p.settings?.ai_removal_model);
   const faceModel = use(models.filter((m) => m.kind === "faceswap"));
@@ -246,6 +286,52 @@ export function AiTab(p: {
       setAdjusting(false);
     }
   };
+
+  const runAlign = async (mode: "horizontal" | "vertical" | "both") => {
+    if (photoId == null || !alignModel || !p.dev) return;
+    setMsg(null);
+    setAlignJob({
+      label: "Estimating dense gravity & latitude fields…",
+      done: 0,
+      total: 3,
+      percent: 15,
+      startTime: Date.now(),
+      elapsedSec: 0,
+    });
+    try {
+      const res = await api.aiAlign(photoId, p.dev, alignModel.id, mode);
+      setAlignInfo(res);
+      const label =
+        mode === "horizontal"
+          ? "AI Align Horizon"
+          : mode === "vertical"
+          ? "AI Align Vertical"
+          : "AI Align Horizon & Vertical";
+      p.onChange({ ...p.dev, transform: res.transform }, label);
+      const parts: string[] = [];
+      if (mode === "horizontal" || mode === "both") {
+        parts.push(`roll ${res.roll_deg >= 0 ? "+" : ""}${res.roll_deg.toFixed(2)}°`);
+      }
+      if (mode === "vertical" || mode === "both") {
+        parts.push(`pitch ${res.pitch_deg >= 0 ? "+" : ""}${res.pitch_deg.toFixed(2)}° (vertical ${res.transform.vertical >= 0 ? "+" : ""}${res.transform.vertical.toFixed(0)})`);
+      }
+      setMsg({
+        ok: true,
+        text: `Aligned (${parts.join(", ")} · vFOV ${res.vfov_deg.toFixed(1)}°).`,
+      });
+    } catch (e) {
+      setMsg({ ok: false, text: String(e) });
+    } finally {
+      setAlignJob(null);
+    }
+  };
+
+  const setTransform = (patch: Partial<Transform>, label: string, replacePrefix?: string) => {
+    if (!p.dev) return;
+    const cur = p.dev.transform ?? defTransform;
+    p.onChange({ ...p.dev, transform: { ...cur, ...patch } }, label, replacePrefix);
+  };
+
   const denoise = async () => {
     if (photoId == null || !denoiseModel) return;
     setMsg(null);
@@ -341,7 +427,7 @@ export function AiTab(p: {
     setStrength(val);
     if (p.dev && p.dev.ai_denoise?.model) {
       const updated = { ...p.dev, ai_denoise: { ...p.dev.ai_denoise, strength: val } };
-      p.onChange(updated, "AI Denoise Strength");
+      p.onChange(updated, "AI Denoise Strength", "AI Denoise Strength");
     }
   };
 
@@ -356,286 +442,614 @@ export function AiTab(p: {
 
   const hasDenoised = !!p.dev?.ai_denoise?.model;
   const denoiseEnabled = p.dev?.ai_denoise?.enabled ?? false;
+  const tr = p.dev?.transform ?? defTransform;
+  const hasAlignment = Math.abs(tr.rotate) > 0.01 || Math.abs(tr.vertical) > 0.1;
+  const layerCount = p.dev?.ai_removals?.length ?? 0;
 
-  const models_link = (
-    <button className="underline decoration-dotted hover:text-neutral-200" onClick={p.onOpenModels}>
+  const modelsLink = (
+    <button type="button" className="underline decoration-dotted hover:text-neutral-200" onClick={p.onOpenModels}>
       Settings → AI models
     </button>
   );
 
   return (
-    <div className="px-3 py-2 text-[11px] text-neutral-300">
-      <div className={sub} style={{ marginTop: 0 }}>
-        Auto adjust
-      </div>
-      <p className="text-neutral-400">A retouch model trained on photographers' edits looks at the photo and sets white balance, tone and colour for you. Every slider stays editable.</p>
-      <div className="mt-2">
-        <div className="mb-1 text-neutral-500">Style</div>
-        <select
-          className="w-full rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-[11px] text-neutral-100 outline-none focus:border-sky-600"
-          value={style}
-          onChange={(e) => setStyle(e.target.value)}
+    <div className="text-[11px] text-neutral-300">
+      {/* Top status bar */}
+      <div className="flex items-center justify-between border-b border-neutral-800 bg-neutral-900/50 px-3 py-1.5 text-[10px] text-neutral-400">
+        <span className="flex items-center gap-1.5">
+          <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+          <span>Non-destructive local AI</span>
+        </span>
+        <button
+          type="button"
+          onClick={p.onOpenModels}
+          className="rounded border border-neutral-700/80 bg-neutral-800/80 px-2 py-0.5 text-[10px] text-neutral-200 hover:border-sky-600 hover:text-white transition-colors"
         >
-          <option value="">None: the AI's own look</option>
-          {PROFILES.map(([id, label]) => (
-            <option key={id} value={id}>
-              {label}
-            </option>
-          ))}
-        </select>
-        {style && <p className={hint}>{PROFILES.find(([id]) => id === style)?.[2]}</p>}
+          ⚙ Manage AI Models
+        </button>
       </div>
-      <Slider label="Adjustment" value={amount} min={0} max={100} def={100} onChange={setAmount} />
-      {style && <Slider label="Style strength" value={styleStrength} min={0} max={100} def={100} onChange={setStyleStrength} />}
-      <Btn active className="mt-2" disabled={photoId == null || adjusting} onClick={() => void autoAdjust()} title="Sets the sliders on this photo; Ctrl+Z undoes it">
-        {adjusting ? "Adjusting…" : "✦ AI Auto Adjust"}
-      </Btn>
-      <p className={hint}>Built in, runs on this computer in about a second.</p>
 
-      <div className={sub}>Remove objects</div>
-      {removalModel ? (
-        <>
-          <p className="text-neutral-400">Paint over what you want gone; its edges snap to the photo, then you confirm.</p>
-          <div className="mt-2 flex flex-wrap items-center gap-1.5">
-            <Btn active={p.drawing} disabled={photoId == null || removing} onClick={p.onDraw} title="Paint over the object on the photo (Esc cancels)">
-              🖌 {p.drawing ? "Painting… drag on the photo" : p.selection ? "Paint more" : "Paint over the object"}
-            </Btn>
-            {p.selection && (
-              <Btn onClick={p.onClear} disabled={removing}>
-                Cancel
-              </Btn>
-            )}
-          </div>
-          <div className="mt-1">
-            <Slider label="Brush size" value={Math.round(p.brush * 1000)} min={5} max={120} def={12} onChange={(v) => p.setBrush(v / 1000)} />
-          </div>
-          {p.selection && (
-            <div className="mt-2">
-              <div className="text-emerald-300">The red area will be removed.</div>
-              <Slider label="Grow edge (px)" value={grow} min={0} max={30} def={6} onChange={setGrow} />
-              {generative && (
-                <input
-                  className="mt-1 w-full rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-[11px] text-neutral-100 outline-none focus:border-sky-600"
-                  placeholder="What should fill the gap? (optional: grass, sky…)"
-                  value={prompt}
-                  onChange={(e) => setPrompt(e.target.value)}
-                />
-              )}
-              <Btn active className="mt-2" disabled={removing} onClick={() => void remove()} title="Removes the object non-destructively in-place on this photo">
-                {removing
-                  ? fillJob && fillJob.total > 1
-                    ? `Removing… ${fillJob.percent}%`
-                    : "Removing…"
-                  : generative
-                  ? "✦ Generative fill"
-                  : "✦ Remove this object"}
-              </Btn>
-              {removing && (
-                <AiProgressBar
-                  title="Removing Object"
-                  label={fillJob?.label || (generative ? "Synthesizing generative fill…" : (removalModel.id === "moebius" || removalModel.id.startsWith("moebius")) ? "Synthesizing diffusion fill…" : "Inpainting patch…")}
-                  done={fillJob?.done ?? 0}
-                  total={fillJob?.total ?? (generative ? 25 : (removalModel.id === "moebius" || removalModel.id.startsWith("moebius")) ? 19 : 3)}
-                  percent={fillJob?.percent ?? (generative ? 0 : (removalModel.id === "moebius" || removalModel.id.startsWith("moebius")) ? 0 : 33)}
-                  modelName={removalModel.name}
-                  elapsedSec={fillJob?.elapsedSec ?? 0}
-                  onCancel={() => void api.cancelJob("ai-remove")}
-                />
-              )}
-            </div>
-          )}
-          <p className={hint}>Using {removalModel.name}. Change it in {models_link}.</p>
-
-        </>
-      ) : (
-        <p className="text-neutral-400">Needs an object removal model. Download one in {models_link}.</p>
-      )}
-
-      <div className={sub}>Face swap</div>
-      {faceModel ? (
-        <>
-          <p className="text-neutral-400">Pick a library photo of someone; their face goes onto every face in this photo.</p>
-          <Btn
-            active
-            className="mt-2"
-            disabled={photoId == null || !!swapJob}
-            onClick={() => setFaceQuery("")}
-            title="Choose the library photo with the face to use"
+      {msg && (
+        <div
+          className={`mx-3 mt-2 flex items-start justify-between gap-2 rounded border px-2.5 py-1.5 text-[10px] ${
+            msg.ok
+              ? "border-emerald-800/60 bg-emerald-950/30 text-emerald-300"
+              : "border-red-800/60 bg-red-950/30 text-red-300"
+          }`}
+        >
+          <span className="break-words">{msg.text}</span>
+          <button
+            type="button"
+            onClick={() => setMsg(null)}
+            className="shrink-0 text-neutral-400 hover:text-neutral-200"
+            title="Dismiss"
           >
-            {swapJob ? `Swapping… ${swapJob.percent}%` : "✦ Choose a face from the library…"}
-          </Btn>
-          {faceQuery != null &&
-            createPortal(
-              <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6" onClick={() => setFaceQuery(null)}>
-                <div
-                  className="flex max-h-full w-[760px] max-w-full flex-col rounded-lg border border-neutral-700 bg-neutral-900 p-4 text-[12px] text-neutral-300 shadow-2xl"
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <div className="mb-2 flex items-center justify-between gap-2">
-                    <h2 className="text-sm font-semibold text-neutral-100">Choose the face to use</h2>
-                    <Btn onClick={() => setFaceQuery(null)}>Close</Btn>
-                  </div>
-                  <input
-                    autoFocus
-                    className="w-full rounded border border-neutral-700 bg-neutral-950 px-2 py-1.5 text-neutral-100 outline-none focus:border-sky-600"
-                    placeholder="Search the library (name, keyword, camera…)"
-                    value={faceQuery}
-                    onChange={(e) => setFaceQuery(e.target.value)}
-                    onKeyDown={(e) => e.key === "Escape" && setFaceQuery(null)}
-                  />
-                  <div className="mt-3 min-h-0 flex-1 overflow-y-auto">
-                    <div className="grid grid-cols-[repeat(auto-fill,minmax(130px,1fr))] gap-2">
-                      {faces
-                        .filter((ph) => ph.id !== photoId)
-                        .map((ph) => (
-                          <button
-                            key={ph.id}
-                            type="button"
-                            onClick={() => void faceSwap(ph.id)}
-                            title={`Use the face in ${ph.filename}`}
-                            className="group rounded border border-neutral-800 bg-neutral-950 p-1 text-left hover:border-sky-500 focus:border-sky-500 focus:outline-none"
-                          >
-                            <img src={thumbUrl(ph)} alt={ph.filename} loading="lazy" className="aspect-square w-full rounded-sm object-cover" />
-                            <div className="mt-1 truncate text-[10px] text-neutral-400 group-hover:text-neutral-200">{ph.filename}</div>
-                          </button>
-                        ))}
-                    </div>
-                    {faces.length === 0 && <p className="py-6 text-center text-neutral-500">No photos match.</p>}
-                  </div>
-                </div>
-              </div>,
-              document.body,
-            )}
-          {swapJob && (
-            <AiProgressBar
-              title="Face Swap"
-              label={swapJob.label}
-              done={swapJob.done}
-              total={swapJob.total}
-              percent={swapJob.percent}
-              modelName={faceModel.name}
-              elapsedSec={swapJob.elapsedSec}
-              onCancel={() => void api.cancelJob("ai-faceswap")}
-            />
-          )}
-          <p className={hint}>Using {faceModel.name}. Only swap faces of people who agreed to it.</p>
-        </>
-      ) : (
-        <p className="text-neutral-400">Needs the face swap model. Download it in {models_link}.</p>
-      )}
-
-      {/* AI layers: object removals and face swaps */}
-      {p.dev?.ai_removals && p.dev.ai_removals.length > 0 && (
-        <div className="mt-3 space-y-1.5 border-t border-neutral-800/80 pt-2">
-          <div className="text-[10px] font-medium uppercase tracking-wider text-neutral-400">
-            AI layers ({p.dev.ai_removals.length})
-          </div>
-          <div className="max-h-48 space-y-1 overflow-y-auto pr-0.5">
-            {p.dev.ai_removals.map((r, i) => (
-              <div
-                key={r.id}
-                className="group flex items-center justify-between rounded bg-neutral-900/70 px-2 py-1 border border-neutral-800 text-[11px] hover:border-neutral-700"
-              >
-                <label className="flex items-center gap-2 cursor-pointer flex-1 min-w-0">
-                  <input
-                    type="checkbox"
-                    checked={r.enabled}
-                    onChange={() => toggleRemoval(r.id)}
-                    className="rounded border-neutral-700 text-sky-500 focus:ring-0"
-                  />
-                  <span className={`truncate ${r.enabled ? "text-neutral-200" : "text-neutral-500 line-through"}`}>
-                    {r.label || `Removal ${i + 1}`}
-                  </span>
-                </label>
-                <div className="flex items-center gap-1.5 shrink-0 ml-2">
-                  <span className="text-[9px] px-1 py-0.5 rounded bg-neutral-800 text-neutral-400">
-                    {r.model}
-                  </span>
-                  <button
-                    onClick={() => void deleteRemoval(r.id)}
-                    className="text-neutral-500 hover:text-red-400 p-0.5 rounded"
-                    title="Delete this layer"
-                  >
-                    ✕
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
+            ✕
+          </button>
         </div>
       )}
 
-      <div className={sub}>Denoise</div>
-      {denoiseModel ? (
-        <>
-          {hasDenoised && (
-            <label className="mb-2 flex items-center gap-2 cursor-pointer select-none">
-              <input
-                type="checkbox"
-                checked={denoiseEnabled}
-                onChange={toggleDenoise}
-                className="rounded border-neutral-700 text-sky-500 focus:ring-0"
-              />
-              <span className={`font-medium ${denoiseEnabled ? "text-neutral-200" : "text-neutral-500"}`}>
-                Enable AI Denoise {denoiseEnabled ? "" : "(Bypassed)"}
-              </span>
-            </label>
-          )}
+      {/* 1. TONE & COLOR — AI AUTO ADJUST */}
+      <Panel
+        title={
+          <span className="flex items-center gap-1.5">
+            <span className={HUE.amber.text}>
+              <Icon d="M12 3v3m0 12v3M3 12h3m12 0h3M5.6 5.6l2.1 2.1m8.6 8.6 2.1 2.1M5.6 18.4l2.1-2.1m8.6-8.6 2.1-2.1" />
+            </span>
+            <span>Tone & Color · Auto Adjust</span>
+          </span>
+        }
+        right={<span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[9px] font-medium text-amber-300">Built-in 3D-LUT</span>}
+      >
+        <p className="text-neutral-400 leading-relaxed">
+          Sets white balance, exposure, tone and colour using an image-adaptive 3D-LUT model trained on photographers&apos; edits. Every slider stays editable.
+        </p>
+        <div className="mt-2">
+          <div className="mb-1 text-[10px] uppercase tracking-wider text-neutral-500">Creative Look</div>
+          <select
+            className="w-full rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-[11px] text-neutral-100 outline-none focus:border-sky-600"
+            value={style}
+            onChange={(e) => setStyle(e.target.value)}
+          >
+            <option value="">None · Natural AI look</option>
+            {PROFILES.map(([id, label]) => (
+              <option key={id} value={id}>
+                {label}
+              </option>
+            ))}
+          </select>
+          {style && <p className={hint}>{PROFILES.find(([id]) => id === style)?.[2]}</p>}
+        </div>
+        <div className="mt-1.5">
+          <Slider label="Adjustment" value={amount} min={0} max={100} def={100} onChange={setAmount} />
+          {style && <Slider label="Style strength" value={styleStrength} min={0} max={100} def={100} onChange={setStyleStrength} />}
+        </div>
+        <Btn
+          active
+          className="mt-2 w-full"
+          disabled={photoId == null || adjusting}
+          onClick={() => void autoAdjust()}
+          title="Sets the tone & color sliders on this photo; Ctrl+Z undoes it"
+        >
+          {adjusting ? "Adjusting…" : "✦ AI Auto Adjust"}
+        </Btn>
+      </Panel>
 
-          <Slider
-            label="Strength"
-            value={Math.round(strength)}
-            min={0}
-            max={100}
-            def={80}
-            onChange={onStrengthChange}
-          />
-
-          <div className="mt-2 flex items-center gap-2">
-            <Btn
-              active
-              disabled={photoId == null || !!job}
-              onClick={() => void denoise()}
-              title="Runs AI Denoise non-destructively in-place on this photo"
-            >
-              {job ? (
-                job.total > 1 ? (
-                  `Denoising… ${job.percent}%`
-                ) : (
-                  "Starting…"
-                )
-              ) : hasDenoised ? (
-                "✦ Re-run AI Denoise"
-              ) : (
-                "✦ AI Denoise"
-              )}
-            </Btn>
-            {job && (
-              <Btn onClick={() => void api.cancelJob("ai-denoise")} title="Stop">
-                Cancel
+      {/* 2. GEOMETRY & PERSPECTIVE — PERSPECTIVEFIELDS AUTO ALIGN */}
+      <Panel
+        title={
+          <span className="flex items-center gap-1.5">
+            <span className={HUE.cyan.text}>
+              <Icon d="M3 12h18M12 3v18M5 5l14 0 0 14-14 0z" />
+            </span>
+            <span>Geometry · Auto Align</span>
+          </span>
+        }
+        right={
+          <span
+            className={`rounded px-1.5 py-0.5 text-[9px] font-medium ${
+              alignModel
+                ? hasAlignment
+                  ? "bg-cyan-500/20 text-cyan-300"
+                  : "bg-neutral-800 text-neutral-300"
+                : "bg-amber-500/15 text-amber-300"
+            }`}
+          >
+            {alignModel ? (hasAlignment ? `${tr.rotate.toFixed(1)}° / ${tr.vertical.toFixed(0)}` : "PerspectiveFields") : "Not installed"}
+          </span>
+        }
+      >
+        {alignModel ? (
+          <>
+            <p className="text-neutral-400 leading-relaxed">
+              Predicts dense per-pixel gravity (roll) and latitude (pitch) vector fields (~0.1°–0.5° accuracy) to level horizons or straighten converging verticals.
+            </p>
+            <div className="mt-2 grid grid-cols-3 gap-1.5">
+              <Btn
+                active
+                disabled={photoId == null || !!alignJob}
+                onClick={() => void runAlign("horizontal")}
+                title="Level the horizon using PerspectiveFields dense gravity vectors (sets Rotate)"
+                className="flex flex-col items-center justify-center py-1.5"
+              >
+                <span className="text-xs leading-none">↔</span>
+                <span className="mt-0.5 text-[10px]">Horizon</span>
               </Btn>
+              <Btn
+                active
+                disabled={photoId == null || !!alignJob}
+                onClick={() => void runAlign("vertical")}
+                title="Correct vertical keystoning using PerspectiveFields latitude & pitch (sets Vertical)"
+                className="flex flex-col items-center justify-center py-1.5"
+              >
+                <span className="text-xs leading-none">↕</span>
+                <span className="mt-0.5 text-[10px]">Vertical</span>
+              </Btn>
+              <Btn
+                active
+                disabled={photoId == null || !!alignJob}
+                onClick={() => void runAlign("both")}
+                title="Auto-align both horizontal roll and vertical perspective simultaneously"
+                className="flex flex-col items-center justify-center py-1.5"
+              >
+                <span className="text-xs leading-none">⊞</span>
+                <span className="mt-0.5 text-[10px]">Align Both</span>
+              </Btn>
+            </div>
+
+            {alignJob && (
+              <AiProgressBar
+                title="PerspectiveFields Align"
+                label={alignJob.label}
+                done={alignJob.done}
+                total={alignJob.total}
+                percent={alignJob.percent}
+                modelName={alignModel.name}
+                elapsedSec={alignJob.elapsedSec}
+              />
+            )}
+
+            {alignInfo && (
+              <div className="mt-2 grid grid-cols-4 gap-1 rounded border border-cyan-900/50 bg-cyan-950/20 px-2 py-1.5 text-center text-[10px]">
+                <div>
+                  <div className="text-[9px] uppercase text-neutral-500">Roll</div>
+                  <div className="font-mono font-semibold text-cyan-300">
+                    {alignInfo.roll_deg >= 0 ? "+" : ""}
+                    {alignInfo.roll_deg.toFixed(2)}°
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[9px] uppercase text-neutral-500">Pitch</div>
+                  <div className="font-mono font-semibold text-cyan-300">
+                    {alignInfo.pitch_deg >= 0 ? "+" : ""}
+                    {alignInfo.pitch_deg.toFixed(2)}°
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[9px] uppercase text-neutral-500">vFOV</div>
+                  <div className="font-mono font-semibold text-neutral-200">{alignInfo.vfov_deg.toFixed(1)}°</div>
+                </div>
+                <div>
+                  <div className="text-[9px] uppercase text-neutral-500">Conf</div>
+                  <div className="font-mono font-semibold text-emerald-300">{Math.round(alignInfo.confidence * 100)}%</div>
+                </div>
+              </div>
+            )}
+
+            <div className="mt-2 border-t border-neutral-800/80 pt-1.5">
+              <Slider
+                label="Horizon (°)"
+                value={tr.rotate}
+                min={-15}
+                max={15}
+                step={0.05}
+                digits={2}
+                def={0}
+                onChange={(v) => setTransform({ rotate: v }, "Rotate", "Rotate")}
+              />
+              <Slider
+                label="Vertical"
+                value={tr.vertical}
+                min={-100}
+                max={100}
+                step={1}
+                digits={0}
+                def={0}
+                onChange={(v) => setTransform({ vertical: v }, "Vertical", "Vertical")}
+              />
+              <div className="mt-1 flex items-center justify-between">
+                <label className="flex items-center gap-1.5 cursor-pointer select-none text-[10px] text-neutral-400">
+                  <input
+                    type="checkbox"
+                    checked={tr.constrain_crop}
+                    onChange={(e) => setTransform({ constrain_crop: e.target.checked }, "Constrain crop")}
+                    className="rounded border-neutral-700 text-sky-500 focus:ring-0"
+                  />
+                  <span>Constrain crop to image</span>
+                </label>
+                {hasAlignment && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAlignInfo(null);
+                      setTransform({ rotate: 0, vertical: 0 }, "Reset alignment");
+                    }}
+                    className="rounded px-1.5 py-0.5 text-[10px] text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200"
+                  >
+                    Reset
+                  </button>
+                )}
+              </div>
+            </div>
+            <p className={hint}>
+              Using <span className="text-neutral-300">{alignModel.name}</span>. Switch in {modelsLink}.
+            </p>
+          </>
+        ) : (
+          <div className="rounded border border-neutral-800 bg-neutral-900/50 p-2.5">
+            <div className="font-medium text-neutral-200">PerspectiveFields · Dense Gravity &amp; Roll Vector</div>
+            <p className="mt-0.5 text-neutral-400">
+              Auto-aligns horizons and vertical perspective (~0.1°–0.5°) for architecture, room scenes, and landscapes using SegFormer + ConvNeXt (~200 MB).
+            </p>
+            <Btn active className="mt-2" onClick={p.onOpenModels}>
+              Download in Settings → AI models
+            </Btn>
+          </div>
+        )}
+      </Panel>
+
+      {/* 3. DETAIL & RESTORATION — AI DENOISE */}
+      <Panel
+        title={
+          <span className="flex items-center gap-1.5">
+            <span className={HUE.emerald.text}>
+              <Icon d="M4 6h4v4H4zM10 6h4v4h-4zM16 6h4v4h-4zM4 14h4v4H4zM10 14h4v4h-4zM16 14h4v4h-4z" />
+            </span>
+            <span>Detail · Neural Denoise</span>
+          </span>
+        }
+        right={
+          <span
+            className={`rounded px-1.5 py-0.5 text-[9px] font-medium ${
+              hasDenoised && denoiseEnabled
+                ? "bg-emerald-500/20 text-emerald-300"
+                : denoiseModel
+                ? "bg-neutral-800 text-neutral-300"
+                : "bg-amber-500/15 text-amber-300"
+            }`}
+          >
+            {hasDenoised ? (denoiseEnabled ? `Active · ${Math.round(strength)}%` : "Bypassed") : denoiseModel ? "Ready" : "Not installed"}
+          </span>
+        }
+      >
+        {denoiseModel ? (
+          <>
+            <p className="text-neutral-400 leading-relaxed">
+              Removes high-ISO sensor noise and grain while preserving fine edges and textures as a non-destructive layer.
+            </p>
+            {hasDenoised && (
+              <label className="mt-2 mb-1 flex items-center gap-2 cursor-pointer select-none rounded border border-neutral-800 bg-neutral-900/60 px-2 py-1">
+                <input
+                  type="checkbox"
+                  checked={denoiseEnabled}
+                  onChange={toggleDenoise}
+                  className="rounded border-neutral-700 text-sky-500 focus:ring-0"
+                />
+                <span className={`font-medium ${denoiseEnabled ? "text-emerald-300" : "text-neutral-500"}`}>
+                  {denoiseEnabled ? "AI Denoise layer enabled" : "AI Denoise layer bypassed"}
+                </span>
+              </label>
+            )}
+
+            <div className="mt-1.5">
+              <Slider
+                label="Strength"
+                value={Math.round(strength)}
+                min={0}
+                max={100}
+                def={80}
+                onChange={onStrengthChange}
+              />
+            </div>
+
+            <div className="mt-2 flex items-center gap-2">
+              <Btn
+                active
+                className="flex-1"
+                disabled={photoId == null || !!job}
+                onClick={() => void denoise()}
+                title="Runs AI Denoise non-destructively in-place on this photo"
+              >
+                {job
+                  ? job.total > 1
+                    ? `Denoising… ${job.percent}%`
+                    : "Starting…"
+                  : hasDenoised
+                  ? "✦ Re-run AI Denoise"
+                  : "✦ AI Denoise"}
+              </Btn>
+              {job && (
+                <Btn onClick={() => void api.cancelJob("ai-denoise")} title="Stop">
+                  Cancel
+                </Btn>
+              )}
+            </div>
+            {job && (
+              <AiProgressBar
+                title="AI Denoise"
+                label={job.label}
+                done={job.done}
+                total={job.total}
+                percent={job.percent}
+                modelName={denoiseModel.name}
+                elapsedSec={job.elapsedSec}
+                onCancel={() => void api.cancelJob("ai-denoise")}
+              />
+            )}
+            <p className={hint}>
+              Using <span className="text-neutral-300">{denoiseModel.name}</span>. Switch in {modelsLink}.
+            </p>
+          </>
+        ) : (
+          <div className="rounded border border-neutral-800 bg-neutral-900/50 p-2.5">
+            <p className="text-neutral-400">Needs an AI Denoise model (SCUNet or NAFNet).</p>
+            <Btn active className="mt-2" onClick={p.onOpenModels}>
+              Download in Settings → AI models
+            </Btn>
+          </div>
+        )}
+      </Panel>
+
+      {/* 4. RETOUCH & FACES — OBJECT REMOVAL, FACE SWAP & AI LAYERS */}
+      <Panel
+        title={
+          <span className="flex items-center gap-1.5">
+            <span className={HUE.violet.text}>
+              <Icon d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
+            </span>
+            <span>Retouch &amp; Faces · Layers</span>
+          </span>
+        }
+        right={
+          layerCount > 0 ? (
+            <span className="rounded bg-violet-500/20 px-1.5 py-0.5 text-[9px] font-medium text-violet-300">
+              {layerCount} {layerCount === 1 ? "layer" : "layers"}
+            </span>
+          ) : null
+        }
+      >
+        {/* Sub-card: Object Removal & Generative Fill */}
+        <div className="rounded-md border border-neutral-800/90 bg-neutral-900/40 p-2.5">
+          <div className="flex items-center justify-between">
+            <span className="font-semibold text-neutral-200">Object Removal &amp; Fill</span>
+            {removalModel && (
+              <span className="rounded bg-neutral-800 px-1.5 py-0.5 text-[9px] text-neutral-400">
+                {generative ? "Generative Fill" : "Inpaint"}
+              </span>
             )}
           </div>
-          {job && (
-            <AiProgressBar
-              title="AI Denoise"
-              label={job.label}
-              done={job.done}
-              total={job.total}
-              percent={job.percent}
-              modelName={denoiseModel.name}
-              elapsedSec={job.elapsedSec}
-              onCancel={() => void api.cancelJob("ai-denoise")}
-            />
+          {removalModel ? (
+            <>
+              <p className="mt-0.5 text-neutral-400">
+                Paint over unwanted objects; edges snap automatically before you confirm.
+              </p>
+              <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                <Btn
+                  active={p.drawing}
+                  disabled={photoId == null || removing}
+                  onClick={p.onDraw}
+                  title="Paint over the object on the photo (Esc cancels)"
+                  className="flex-1"
+                >
+                  🖌 {p.drawing ? "Painting… drag on photo" : p.selection ? "Paint more" : "Paint over object"}
+                </Btn>
+                {p.selection && (
+                  <Btn onClick={p.onClear} disabled={removing}>
+                    Clear
+                  </Btn>
+                )}
+              </div>
+              <div className="mt-1">
+                <Slider
+                  label="Brush size"
+                  value={Math.round(p.brush * 1000)}
+                  min={5}
+                  max={120}
+                  def={12}
+                  onChange={(v) => p.setBrush(v / 1000)}
+                />
+              </div>
+              {p.selection && (
+                <div className="mt-2 rounded border border-emerald-800/50 bg-emerald-950/20 p-2">
+                  <div className="text-[10px] font-medium text-emerald-300">Selection ready — red area will be replaced</div>
+                  <Slider label="Grow edge (px)" value={grow} min={0} max={30} def={6} onChange={setGrow} />
+                  {generative && (
+                    <input
+                      className="mt-1 w-full rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-[11px] text-neutral-100 outline-none focus:border-sky-600"
+                      placeholder="What should fill the gap? (optional: grass, sky…)"
+                      value={prompt}
+                      onChange={(e) => setPrompt(e.target.value)}
+                    />
+                  )}
+                  <Btn
+                    active
+                    className="mt-2 w-full"
+                    disabled={removing}
+                    onClick={() => void remove()}
+                    title="Removes the object non-destructively in-place on this photo"
+                  >
+                    {removing
+                      ? fillJob && fillJob.total > 1
+                        ? `Removing… ${fillJob.percent}%`
+                        : "Removing…"
+                      : generative
+                      ? "✦ Generative Fill"
+                      : "✦ Remove Object"}
+                  </Btn>
+                  {removing && (
+                    <AiProgressBar
+                      title="Removing Object"
+                      label={
+                        fillJob?.label ||
+                        (generative
+                          ? "Synthesizing generative fill…"
+                          : removalModel.id === "moebius" || removalModel.id.startsWith("moebius")
+                          ? "Synthesizing diffusion fill…"
+                          : "Inpainting patch…")
+                      }
+                      done={fillJob?.done ?? 0}
+                      total={
+                        fillJob?.total ??
+                        (generative ? 25 : removalModel.id === "moebius" || removalModel.id.startsWith("moebius") ? 19 : 3)
+                      }
+                      percent={
+                        fillJob?.percent ??
+                        (generative ? 0 : removalModel.id === "moebius" || removalModel.id.startsWith("moebius") ? 0 : 33)
+                      }
+                      modelName={removalModel.name}
+                      elapsedSec={fillJob?.elapsedSec ?? 0}
+                      onCancel={() => void api.cancelJob("ai-remove")}
+                    />
+                  )}
+                </div>
+              )}
+              <p className={hint}>
+                Using <span className="text-neutral-300">{removalModel.name}</span>. Switch in {modelsLink}.
+              </p>
+            </>
+          ) : (
+            <p className="mt-1 text-neutral-400">
+              Needs an object removal model. Download one in {modelsLink}.
+            </p>
           )}
-          <p className={hint}>Using {denoiseModel.name}. Change it in {models_link}.</p>
-        </>
-      ) : (
-        <p className="text-neutral-400">Needs a denoise model. Download one in {models_link}.</p>
-      )}
+        </div>
 
-      <p className={hint}>Non-destructive in-place adjustments. Never creates duplicate master photos.</p>
-      {msg && <p className={`mt-2 break-words ${msg.ok ? "text-emerald-400" : "text-red-400"}`}>{msg.text}</p>}
+        {/* Sub-card: Face Swap */}
+        <div className="mt-2.5 rounded-md border border-neutral-800/90 bg-neutral-900/40 p-2.5">
+          <div className="flex items-center justify-between">
+            <span className="font-semibold text-neutral-200">Face Swap</span>
+            <span className="rounded bg-neutral-800 px-1.5 py-0.5 text-[9px] text-neutral-400">
+              {faceModel ? "HyperSwap 1A" : "Not installed"}
+            </span>
+          </div>
+          {faceModel ? (
+            <>
+              <p className="mt-0.5 text-neutral-400">
+                Pick a photo from your library to transfer its face onto detected faces in this photo.
+              </p>
+              <Btn
+                active
+                className="mt-2 w-full"
+                disabled={photoId == null || !!swapJob}
+                onClick={() => setFaceQuery("")}
+                title="Choose the library photo with the face to use"
+              >
+                {swapJob ? `Swapping… ${swapJob.percent}%` : "✦ Choose Face from Library…"}
+              </Btn>
+              {faceQuery != null &&
+                createPortal(
+                  <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6" onClick={() => setFaceQuery(null)}>
+                    <div
+                      className="flex max-h-full w-[760px] max-w-full flex-col rounded-lg border border-neutral-700 bg-neutral-900 p-4 text-[12px] text-neutral-300 shadow-2xl"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <div className="mb-2 flex items-center justify-between gap-2">
+                        <h2 className="text-sm font-semibold text-neutral-100">Choose the face to use</h2>
+                        <Btn onClick={() => setFaceQuery(null)}>Close</Btn>
+                      </div>
+                      <input
+                        autoFocus
+                        className="w-full rounded border border-neutral-700 bg-neutral-950 px-2 py-1.5 text-neutral-100 outline-none focus:border-sky-600"
+                        placeholder="Search the library (name, keyword, camera…)"
+                        value={faceQuery}
+                        onChange={(e) => setFaceQuery(e.target.value)}
+                        onKeyDown={(e) => e.key === "Escape" && setFaceQuery(null)}
+                      />
+                      <div className="mt-3 min-h-0 flex-1 overflow-y-auto">
+                        <div className="grid grid-cols-[repeat(auto-fill,minmax(130px,1fr))] gap-2">
+                          {faces
+                            .filter((ph) => ph.id !== photoId)
+                            .map((ph) => (
+                              <button
+                                key={ph.id}
+                                type="button"
+                                onClick={() => void faceSwap(ph.id)}
+                                title={`Use the face in ${ph.filename}`}
+                                className="group rounded border border-neutral-800 bg-neutral-950 p-1 text-left hover:border-sky-500 focus:border-sky-500 focus:outline-none"
+                              >
+                                <img src={thumbUrl(ph)} alt={ph.filename} loading="lazy" className="aspect-square w-full rounded-sm object-cover" />
+                                <div className="mt-1 truncate text-[10px] text-neutral-400 group-hover:text-neutral-200">{ph.filename}</div>
+                              </button>
+                            ))}
+                        </div>
+                        {faces.length === 0 && <p className="py-6 text-center text-neutral-500">No photos match.</p>}
+                      </div>
+                    </div>
+                  </div>,
+                  document.body,
+                )}
+              {swapJob && (
+                <AiProgressBar
+                  title="Face Swap"
+                  label={swapJob.label}
+                  done={swapJob.done}
+                  total={swapJob.total}
+                  percent={swapJob.percent}
+                  modelName={faceModel.name}
+                  elapsedSec={swapJob.elapsedSec}
+                  onCancel={() => void api.cancelJob("ai-faceswap")}
+                />
+              )}
+              <p className={hint}>Only swap faces of people who agreed to it.</p>
+            </>
+          ) : (
+            <p className="mt-1 text-neutral-400">
+              Needs the Face Swap model. Download it in {modelsLink}.
+            </p>
+          )}
+        </div>
+
+        {/* Sub-card: AI Layers Stack */}
+        {p.dev?.ai_removals && p.dev.ai_removals.length > 0 && (
+          <div className="mt-2.5 space-y-1.5 rounded-md border border-neutral-800/90 bg-neutral-900/40 p-2.5">
+            <div className="flex items-center justify-between text-[10px] font-semibold uppercase tracking-wider text-neutral-400">
+              <span>AI Retouch Layers ({p.dev.ai_removals.length})</span>
+              <span className="font-normal normal-case text-neutral-500">Toggle or remove</span>
+            </div>
+            <div className="max-h-48 space-y-1 overflow-y-auto pr-0.5">
+              {p.dev.ai_removals.map((r, i) => (
+                <div
+                  key={r.id}
+                  className="group flex items-center justify-between rounded border border-neutral-800 bg-neutral-950/70 px-2 py-1 text-[11px] hover:border-neutral-700"
+                >
+                  <label className="flex min-w-0 flex-1 cursor-pointer items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={r.enabled}
+                      onChange={() => toggleRemoval(r.id)}
+                      className="rounded border-neutral-700 text-sky-500 focus:ring-0"
+                    />
+                    <span className={`truncate ${r.enabled ? "text-neutral-200" : "text-neutral-500 line-through"}`}>
+                      {r.label || `Removal ${i + 1}`}
+                    </span>
+                  </label>
+                  <div className="ml-2 flex shrink-0 items-center gap-1.5">
+                    <span className="rounded bg-neutral-800 px-1 py-0.5 text-[9px] text-neutral-400">{r.model}</span>
+                    <button
+                      type="button"
+                      onClick={() => void deleteRemoval(r.id)}
+                      className="rounded p-0.5 text-neutral-500 hover:text-red-400"
+                      title="Delete this layer"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </Panel>
     </div>
   );
 }

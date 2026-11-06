@@ -192,6 +192,40 @@ const MODELS: &[Spec] = &[
         gpu: false,
         unzip: false,
     },
+    Spec {
+        id: "perspective-fields-gsv",
+        kind: "align",
+        name: "PerspectiveFields · Architecture & Street (GSV)",
+        blurb: "Dense gravity & roll vector field + ParamNet camera calibration (SegFormer-B3 + ConvNeXt, ~0.1°–0.5° accuracy). Trained on Google Street View for architecture, building facades, and street scenes.",
+        license: "MIT (PerspectiveFields, Jin et al. CVPR 2023)",
+        repo: "spaces/jinlinyi/PerspectiveFields",
+        files: &[
+            ("models/paramnet_gsv_rpf.pth", 418_607_881, "3965db8523f573f8037b43696cd08d1e63a498218e28a4ee7ebd50b373bbd56d"),
+        ],
+        min_vram_mb: 1000,
+        rank: 25,
+        multiple: 32,
+        dims: None,
+        gpu: true,
+        unzip: false,
+    },
+    Spec {
+        id: "perspective-fields-edina",
+        kind: "align",
+        name: "PerspectiveFields · Room, Landscape & General (EDINA)",
+        blurb: "Dense gravity & latitude vector fields + ParamNet camera calibration (SegFormer-B3 + ConvNeXt, ~0.1°–0.5° accuracy). Trained on 360Cities & EDINA for interior rooms, landscapes, and general photos.",
+        license: "MIT (PerspectiveFields, Jin et al. CVPR 2023)",
+        repo: "spaces/jinlinyi/PerspectiveFields",
+        files: &[
+            ("models/paramnet_360cities_edina_rpf.pth", 837_147_876, "58fe0285fe5d4592aec77e9ef57ac94273deb79bcb99f27d08bae68a2d1efc4a"),
+        ],
+        min_vram_mb: 1000,
+        rank: 20,
+        multiple: 32,
+        dims: None,
+        gpu: true,
+        unzip: false,
+    },
 ];
 
 /// A file name may name its own repository, "@owner/repo/file", stored as "file": (repository, local name).
@@ -202,7 +236,11 @@ fn source<'a>(s: &'a Spec, name: &'a str) -> (&'a str, &'a str) {
 fn spec(id: &str) -> Result<&'static Spec, String> {
     MODELS
         .iter()
-        .find(|m| m.id == id || (m.id == "moebius" && (id == "moebius-removal" || id == "Moebius" || id == "moebius-onnx")))
+        .find(|m| {
+            m.id == id
+                || (m.id == "moebius" && (id == "moebius-removal" || id == "Moebius" || id == "moebius-onnx"))
+                || (m.id == "perspective-fields-gsv" && id == "perspective-fields")
+        })
         .ok_or_else(|| format!("unknown AI model: {id}"))
 }
 
@@ -211,6 +249,9 @@ fn dir(data: &Path, s: &Spec) -> PathBuf {
 }
 
 fn installed(data: &Path, s: &Spec) -> bool {
+    if s.kind == "align" {
+        return dir(data, s).join("perspective_fields.onnx").is_file();
+    }
     if s.unzip {
         return dir(data, s).join(".unpacked").is_file();
     }
@@ -333,6 +374,7 @@ pub fn models(data: &Path, hw: &Hardware) -> Vec<ModelInfo> {
                     _ if m.id == "moebius" => "A fast 0.2B diffusion model running on GPU with learned conditioning for realistic object removal.".to_string(),
                     _ if m.kind == "faceswap" => "Runs on the CPU: about a second per face.".to_string(),
                     _ if m.kind == "faces" => "Runs on the CPU: a fraction of a second per photo, plus decoding it.".to_string(),
+                    _ if m.kind == "align" => "PyTorch-to-ONNX exported on download (~200 MB FP16 ONNX). Sub-degree (~0.1°–0.5°) horizon & vertical alignment.".to_string(),
                     _ if m.kind == "inpaint" => "A fast alternative that runs on the CPU (about 2 seconds per removal) and only continues what is around the object.".to_string(),
                     Some(v) => format!("Best quality for {}: runs at {} px tiles in {:.0} GB.", hw.gpu.as_deref().unwrap_or("your GPU"), tile_for(Some(v)), v as f32 / 1024.0),
                     None => "Best match for this machine (GPU memory could not be read).".to_string(),
@@ -340,11 +382,20 @@ pub fn models(data: &Path, hw: &Hardware) -> Vec<ModelInfo> {
             } else if fits {
                 if m.id == "moebius" {
                     "Runs on your GPU; fast 0.2B diffusion inpainting with learned conditioning.".to_string()
+                } else if m.kind == "align" {
+                    "PyTorch-to-ONNX exported on download (~200 MB FP16 ONNX). Ideal for interior room scenes and landscapes.".to_string()
                 } else {
                     "Runs on your GPU; lower quality than the recommended one.".to_string()
                 }
             } else {
                 format!("Needs about {:.0} GB of GPU memory.", m.min_vram_mb as f32 / 1024.0)
+            };
+            let size_mb = if m.kind == "align" {
+                fs::metadata(dir(data, m).join("perspective_fields.onnx"))
+                    .map(|meta| meta.len() as f32 / 1_048_576.0)
+                    .unwrap_or(199.5)
+            } else {
+                m.files.iter().map(|f| f.1).sum::<u64>() as f32 / 1_048_576.0
             };
             ModelInfo {
                 id: m.id,
@@ -353,7 +404,7 @@ pub fn models(data: &Path, hw: &Hardware) -> Vec<ModelInfo> {
                 blurb: m.blurb,
                 license: m.license,
                 source: format!("huggingface.co/{}", m.repo),
-                size_mb: m.files.iter().map(|f| f.1).sum::<u64>() as f32 / 1_048_576.0,
+                size_mb,
                 installed: installed(data, m),
                 fits,
                 recommended,
@@ -420,6 +471,7 @@ pub fn remove(data: &Path, id: &str) -> Result<(), String> {
     *SESSION.lock().unwrap() = None;
     *SD.lock().unwrap() = None;
     crate::moebius::reset();
+    crate::perspective::reset();
     Ok(())
 }
 
@@ -477,6 +529,12 @@ pub fn download(data: &Path, id: &str, progress: &(dyn Fn(u64, u64) + Sync)) -> 
         }
         fs::rename(&part, &out).map_err(es)?;
         done += size;
+    }
+    if s.kind == "align" {
+        let pth_path = d.join(source(s, s.files[0].0).1);
+        let onnx_path = d.join("perspective_fields.onnx");
+        crate::perspective::convert_pth_to_onnx(&pth_path, &onnx_path)?;
+        let _ = fs::remove_file(pth_path);
     }
     if s.unzip {
         let zip_path = d.join(s.files[0].0);

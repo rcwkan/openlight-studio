@@ -26,7 +26,7 @@ const hint = "mt-1 text-[10px] text-neutral-500";
 export type WholeProps = {
   dev: Dev;
   defaults: Dev;
-  change: (d: Dev, label: string) => void;
+  change: (d: Dev, label: string, replacePrefix?: string) => void;
   /** sliders bound to the whole photo */
   S: SliderFor;
 };

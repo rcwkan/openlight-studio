@@ -2777,7 +2777,7 @@ function SelectionsTab({
   onTune,
 }: {
   dev: Dev;
-  change: (d: Dev, label: string) => void;
+  change: (d: Dev, label: string, replacePrefix?: string) => void;
   sel: number | null;
   setSel: (i: number | null) => void;
   compSel: number;
@@ -2857,7 +2857,7 @@ function SelectionsTab({
       {m && sel != null && (
         <div className="space-y-2 rounded border border-neutral-700 p-2">
           <div className="flex items-center gap-1">
-            <input className={`${field} min-w-0 flex-1`} value={m.name} onChange={(e) => change(setPath(dev, ["masks", sel, "name"], e.target.value), "Rename selection")} />
+            <input className={`${field} min-w-0 flex-1`} value={m.name} onChange={(e) => change(setPath(dev, ["masks", sel, "name"], e.target.value), "Rename selection", "Rename selection")} />
             <Btn active={overlay} onClick={() => setOverlay(!overlay)} title="Show the selection (O)">
               Overlay
             </Btn>
