@@ -397,7 +397,7 @@ pub fn stats(c: &Connection) -> Result<Value, String> {
         "people": one("SELECT COUNT(DISTINCT person_id) FROM faces WHERE person_id IS NOT NULL")?,
         "named": one("SELECT COUNT(*) FROM people WHERE name != ''")?,
         "hidden": one("SELECT COUNT(*) FROM people WHERE hidden")?,
-        "by_year": pairs(&format!("SELECT substr(ph.captured_at, 1, 4) AS y, COUNT(DISTINCT f.photo_id) FROM faces f {live} WHERE ph.captured_at IS NOT NULL GROUP BY y ORDER BY y"))?,
+        "by_year": pairs(&format!("SELECT substr(ph.captured_at, 1, 4), COUNT(DISTINCT f.photo_id) FROM faces f {live} WHERE ph.captured_at IS NOT NULL GROUP BY 1 ORDER BY 1"))?,
         "per_photo": pairs("SELECT MIN(faces, 6), COUNT(*) FROM face_scans s JOIN photos ph ON ph.id = s.photo_id AND ph.deleted_at IS NULL GROUP BY MIN(faces, 6) ORDER BY 1")?,
     }))
 }
@@ -490,7 +490,7 @@ mod tests {
     }
 
     fn face(c: &Connection, photo: i64, person: i64, e: &[f32]) -> i64 {
-        c.execute("INSERT OR IGNORE INTO photos (id) VALUES (?)", [photo]).unwrap();
+        c.execute("INSERT OR IGNORE INTO photos (id, captured_at) VALUES (?, ?)", params![photo, format!("{}:06:01", 2020 + photo % 2)]).unwrap();
         c.execute("INSERT OR IGNORE INTO people (id) VALUES (?)", [person]).unwrap();
         c.execute("INSERT INTO faces (photo_id, person_id, x, y, w, h, score, embedding) VALUES (?, ?, 0, 0, 0.1, 0.1, 0.9, ?)", params![photo, person, blob(e)]).unwrap();
         c.last_insert_rowid()
@@ -518,7 +518,10 @@ mod tests {
         // the library filter: photos showing everyone listed
         let n: i64 = c.query_row(&format!("SELECT COUNT(*) FROM photos WHERE 1=1{}", filter_sql(&[10])), [], |r| r.get(0)).unwrap();
         assert_eq!(n, 3);
-        assert!(stats(&c).unwrap()["faces"] == 3);
+        let st = stats(&c).unwrap();
+        assert!(st["faces"] == 3);
+        // grouped by year, not by the faces' own `y` column
+        assert_eq!(st["by_year"], json!([["2020", 1], ["2021", 2]]));
     }
 
     /// Needs OPENLIGHT_TEST_AI=1 and the face model (or face swap model) installed in the app's data folder:
