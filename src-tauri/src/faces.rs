@@ -295,9 +295,22 @@ pub fn similar(c: &Connection, face: i64, limit: usize) -> Result<Vec<Face>, Str
     Ok(out)
 }
 
-pub fn rename(c: &Connection, person: i64, name: &str) -> Result<(), String> {
-    c.execute("UPDATE people SET name = ? WHERE id = ?", params![name.trim(), person]).map_err(es)?;
-    Ok(())
+/// Name a person. A name someone else already has (ignoring case) means they are the same person: the two are
+/// merged into the one that had it. Returns the person the faces end up in.
+pub fn rename(c: &mut Connection, person: i64, name: &str) -> Result<i64, String> {
+    let name = name.trim();
+    let same: Option<i64> = if name.is_empty() {
+        None
+    } else {
+        c.query_row("SELECT id FROM people WHERE name = ? COLLATE NOCASE AND id != ? ORDER BY id LIMIT 1", params![name, person], |r| r.get(0)).optional().map_err(es)?
+    };
+    match same {
+        Some(into) => merge(c, &[into, person]),
+        None => {
+            c.execute("UPDATE people SET name = ? WHERE id = ?", params![name, person]).map_err(es)?;
+            Ok(person)
+        }
+    }
 }
 
 pub fn set_hidden(c: &Connection, people: &[i64], hidden: bool) -> Result<(), String> {
@@ -434,8 +447,8 @@ pub fn faces_stats(core: St) -> Result<Value, String> {
 }
 
 #[tauri::command(async)]
-pub fn faces_rename(core: St, person: i64, name: String) -> Result<(), String> {
-    rename(&core.db(), person, &name)
+pub fn faces_rename(core: St, person: i64, name: String) -> Result<i64, String> {
+    rename(&mut core.db(), person, &name)
 }
 
 #[tauri::command(async)]
@@ -507,7 +520,7 @@ mod tests {
         assert_eq!(cs.best(&[0.0, 1.0]).unwrap().0, 20);
         // similar: face a looks like nothing in person 20 at this threshold, and never lists its own person
         assert!(similar(&c, a, 10).unwrap().iter().all(|f| f.person_id != Some(10)));
-        rename(&c, 20, " Bo ").unwrap();
+        rename(&mut c, 20, " Bo ").unwrap();
         assert_eq!(merge(&mut c, &[10, 20]).unwrap(), 10);
         let p = people(&c).unwrap();
         assert_eq!((p.len(), p[0].name.as_str(), p[0].photos), (1, "Bo", 3));
@@ -516,6 +529,11 @@ mod tests {
         move_faces(&mut c, &[b], Some(10)).unwrap();
         assert!(people(&c).unwrap().iter().all(|p| p.id != new), "an emptied person is pruned");
         // the library filter: photos showing everyone listed
+        // typing a name someone else has merges the two into that person
+        let other = move_faces(&mut c, &[b], None).unwrap();
+        assert_eq!(rename(&mut c, other, "bo").unwrap(), 10);
+        let p = people(&c).unwrap();
+        assert_eq!((p.len(), p[0].name.as_str(), p[0].photos), (1, "Bo", 3));
         let n: i64 = c.query_row(&format!("SELECT COUNT(*) FROM photos WHERE 1=1{}", filter_sql(&[10])), [], |r| r.get(0)).unwrap();
         assert_eq!(n, 3);
         let st = stats(&c).unwrap();
@@ -548,7 +566,7 @@ mod tests {
         let ps = people(&core.db()).unwrap();
         assert_eq!(ps[0].photos, 2, "the same face in two photos is one person");
         assert!(crops_dir(&core).join(format!("{}.jpg", ps[0].cover.unwrap())).is_file());
-        rename(&core.db(), ps[0].id, "Demo").unwrap();
+        rename(&mut core.db(), ps[0].id, "Demo").unwrap();
         let by_name = catalog::query(&core.db(), &catalog::Filter { text: Some("demo".into()), ..Default::default() }).unwrap();
         let by_person = catalog::query(&core.db(), &catalog::Filter { people: Some(vec![ps[0].id]), ..Default::default() }).unwrap();
         assert_eq!((by_name.len(), by_person.len()), (2, 2));

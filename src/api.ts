@@ -674,7 +674,8 @@ export const api = {
   /** faces of other people that look like this one, most alike first */
   facesSimilar: (face: number) => invoke<Face[]>("faces_similar", { face }),
   faceStats: () => invoke<FaceStats>("faces_stats"),
-  renamePerson: (person: number, name: string) => invoke<void>("faces_rename", { person, name }),
+  /** a name someone else has merges the two; returns the person the faces end up in */
+  renamePerson: (person: number, name: string) => invoke<number>("faces_rename", { person, name }),
   hidePeople: (people: number[], hidden: boolean) => invoke<void>("faces_hide", { people, hidden }),
   setCover: (person: number, face: number) => invoke<void>("faces_set_cover", { person, face }),
   /** everyone into the first; returns it */

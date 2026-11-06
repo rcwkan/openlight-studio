@@ -106,7 +106,7 @@ export function People({ jobs, onShowPhotos, onOpenSettings }: { jobs: Record<st
   const show = (ids: number[]) => onShowPhotos(ids, ids.map((id) => (byId.get(id) ? nameOf(byId.get(id)!) : `#${id}`)).join(" & "));
 
   if (open != null && byId.get(open))
-    return <PersonView person={byId.get(open)!} people={people} onBack={() => (setOpen(null), load())} onShow={() => show([open])} onChanged={load} />;
+    return <PersonView person={byId.get(open)!} people={people} onBack={() => (setOpen(null), load())} onShow={() => show([open])} onChanged={load} onRenamed={(id) => (setOpen(id), load())} />;
 
   const remaining = stats ? stats.eligible - stats.scanned : 0;
   return (
@@ -258,13 +258,14 @@ export function People({ jobs, onShowPhotos, onOpenSettings }: { jobs: Record<st
   );
 }
 
-function NameInput({ person, onDone }: { person: Person; onDone: () => void }) {
+function NameInput({ person, onDone }: { person: Person; onDone: (person: number) => void }) {
   const [v, setV] = useState(person.name);
   useEffect(() => setV(person.name), [person.name]);
   const save = () => void (v.trim() !== person.name && api.renamePerson(person.id, v).then(onDone));
   return (
     <input
       value={v}
+      title="A name someone else already has merges the two"
       placeholder="Add a name"
       onChange={(e) => setV(e.target.value)}
       onBlur={save}
@@ -274,8 +275,62 @@ function NameInput({ person, onDone }: { person: Person; onDone: () => void }) {
   );
 }
 
+/** Library toolbar: pick people by face to show only the photos (of the current view) that show all of them. */
+export function FaceSearch({ people: picked, label, onChange }: { people: number[]; label?: string; onChange: (people: number[], label: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const [all, setAll] = useState<Person[]>([]);
+  const [q, setQ] = useState("");
+  useEffect(() => void api.people().then(setAll).catch(() => setAll([])), [open]);
+  const byId = new Map(all.map((p) => [p.id, p]));
+  const names = (ids: number[]) => ids.map((id) => (byId.get(id) ? nameOf(byId.get(id)!) : `#${id}`)).join(" & ");
+  const toggle = (id: number) => {
+    const ids = picked.includes(id) ? picked.filter((x) => x !== id) : [...picked, id];
+    onChange(ids, names(ids));
+  };
+  const query = q.trim().toLowerCase();
+  // named people first, then the most photographed; people seen once only when searched for
+  const list = all
+    .filter((p) => !p.hidden && (query ? nameOf(p).toLowerCase().includes(query) : p.name || p.photos > 1))
+    .sort((a, b) => (!a.name ? 1 : 0) - (!b.name ? 1 : 0) || b.photos - a.photos);
+
+  return (
+    <div className="relative">
+      <div className={`flex items-center overflow-hidden rounded ${picked.length ? "bg-[var(--theme-accent,#0ea5e9)]/20 text-[var(--theme-accent,#0ea5e9)]" : "bg-neutral-800 text-neutral-300"}`}>
+        <button className="max-w-56 truncate px-2 py-1 hover:brightness-125" title="Search by faces: photos showing all the people picked" onClick={() => setOpen((o) => !o)}>
+          👤 {picked.length ? label || names(picked) : "Faces"}
+        </button>
+        {picked.length > 0 && (
+          <button className="px-1.5 py-1 hover:brightness-125" title="Show everyone" onClick={() => (onChange([], ""), setOpen(false))}>
+            ✕
+          </button>
+        )}
+      </div>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+          <div className="absolute left-0 top-full z-50 mt-1 w-72 rounded-lg border border-neutral-700 bg-neutral-900 p-2 shadow-2xl">
+            <input autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="Find a person…" className="mb-2 w-full rounded bg-neutral-800 px-2 py-1 text-[11px] text-neutral-100 outline-none" />
+            <div className="max-h-80 space-y-0.5 overflow-y-auto">
+              {list.map((p) => (
+                <button key={p.id} onClick={() => toggle(p.id)} className={`flex w-full items-center gap-2 rounded px-1.5 py-1 text-left ${picked.includes(p.id) ? "bg-neutral-800" : "hover:bg-neutral-800/60"}`}>
+                  <input type="checkbox" readOnly checked={picked.includes(p.id)} className="pointer-events-none" />
+                  <FaceImg id={p.cover} size={28} />
+                  <span className={`flex-1 truncate ${p.name ? "text-neutral-100" : "text-neutral-500"}`}>{nameOf(p)}</span>
+                  <span className="text-[10px] text-neutral-500">{p.photos}</span>
+                </button>
+              ))}
+              {!list.length && <p className="px-1 py-2 text-[10px] text-neutral-500">{all.length ? "Nobody matches." : "No people yet: scan your photos in People."}</p>}
+            </div>
+            {picked.length > 1 && <p className="mt-1.5 px-1 text-[10px] text-neutral-500">Photos showing all {picked.length} of them.</p>}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 /** One person: their faces, to set the cover, move wrong ones out, delete non-faces, and pull in similar faces. */
-function PersonView({ person, people, onBack, onShow, onChanged }: { person: Person; people: Person[]; onBack: () => void; onShow: () => void; onChanged: () => void }) {
+function PersonView({ person, people, onBack, onShow, onChanged, onRenamed }: { person: Person; people: Person[]; onBack: () => void; onShow: () => void; onChanged: () => void; onRenamed: (person: number) => void }) {
   const [faces, setFaces] = useState<Face[]>([]);
   const [sel, setSel] = useState<number[]>([]);
   const [similar, setSimilar] = useState<Face[] | null>(null);
@@ -305,7 +360,7 @@ function PersonView({ person, people, onBack, onShow, onChanged }: { person: Per
           <Btn onClick={onBack}>← People</Btn>
           <FaceImg id={person.cover} size={56} />
           <div className="w-48 text-base">
-            <NameInput person={person} onDone={onChanged} />
+            <NameInput person={person} onDone={onRenamed} />
           </div>
           <span className={hint}>
             {person.photos} photos · {person.faces} faces

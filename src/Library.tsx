@@ -4,6 +4,7 @@ import { ReactNode, useEffect, useId, useRef, useState } from "react";
 import { api, AutoFunction, CloudAccount, CloudFolder, Culling, fileManagerName, Filter, flagName, FolderLoading, FolderProgress, ImmichAlbum, JobProgress, LABEL_COLORS, LABELS, NetworkDrive, Photo, Settings, Source, thumbUrl } from "./api";
 import { AutoView, FUNCS } from "./AutoView";
 import { Btn, HUE, Hue, Icon, Panel, Stars } from "./controls";
+import { FaceSearch } from "./People";
 import { PhotoViewer } from "./PhotoViewer";
 import { CloudBrowser } from "./Storage";
 
@@ -395,15 +396,16 @@ export function Library(p: Props) {
             value={f.text ?? ""}
             onChange={(e) => p.setFilter({ ...f, text: e.target.value })}
           />
-          {f.people?.length ? (
-            <button
-              className="rounded-full bg-[var(--theme-accent,#0ea5e9)]/20 px-2 py-0.5 text-[var(--theme-accent,#0ea5e9)] hover:bg-[var(--theme-accent,#0ea5e9)]/30"
-              title="Showing photos of these people; click to show all"
-              onClick={() => p.setFilter({ ...f, people: null, view: f.view?.startsWith("people:") ? "all" : f.view })}
-            >
-              👤 {f.view?.startsWith("people:") ? f.view.slice(7) : `${f.people.length} people`} ✕
-            </button>
-          ) : null}
+          {(p.settings?.faces_enabled || !!f.people?.length) && (
+            <FaceSearch
+              people={f.people ?? []}
+              label={f.view?.startsWith("people:") ? f.view.slice(7) : undefined}
+              onChange={(people, label) =>
+                // from the People view the whole library is shown; picked here, the current folder or album is kept
+                p.setFilter({ ...f, people: people.length ? people : null, view: f.view?.startsWith("people:") ? (people.length ? `people:${label}` : "all") : f.view })
+              }
+            />
+          )}
           <label className="flex items-center gap-1 text-neutral-400">
             Rating ≥
             <select className="rounded bg-neutral-800 px-1 py-1" value={f.min_rating ?? 0} onChange={(e) => p.setFilter({ ...f, min_rating: +e.target.value || null })}>
