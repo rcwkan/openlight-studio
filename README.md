@@ -107,7 +107,7 @@ The Develop panel groups every tool by the kind of tuning it does:
 | **Geometry** | Crop, rotate & flip, Upright transform, lens corrections (whole photo) |
 | **Masks** | ✦ AI select (subject, sky, click objects), masks, remove a selected object |
 | **Auto** | ✦ Auto, 16 photo styles (Bleach Bypass, Portra, Velvia, Nordic Noir, classic Teal & Orange + 5 variants, etc.) with strength slider, AI fine tune, one-at-a-time auto, and auto rotate |
-| **AI** | Local models: AI auto adjust, object removal, face swap, neural denoise |
+| **AI** | Local models: AI auto adjust, PerspectiveFields auto align (horizon & verticals), neural denoise, object removal & face swap |
 
 With a mask selected, the Adjust, Color, Detail and HDR tools tune only that mask.
 
@@ -292,6 +292,7 @@ OpenLight Studio allows optional, on-demand downloading of third-party neural ne
 
 | Model | Purpose | Author / Lab | License | Terms & Disclaimer |
 | :--- | :--- | :--- | :--- | :--- |
+| **PerspectiveFields** | Auto Horizon & Vertical Alignment | Jin et al. (University of Michigan / CVPR 2023) | MIT License | Permissive open-source license ([jinlinyi/PerspectiveFields](https://github.com/jinlinyi/PerspectiveFields)). |
 | **Stable Diffusion 1.5 Inpainting** | Generative Fill | RunwayML / Stability AI | CreativeML OpenRAIL-M | Subject to OpenRAIL-M use-based restrictions. |
 | **Moebius (RemovalModel)** | Inpainting & Object Removal | Duan & Xu et al. (HUST) / SimonW | Apache-2.0 | Permissive open-source license. |
 | **LaMa** | Inpainting & Object Removal | Suvorov et al. (Samsung Research) | Apache-2.0 | Permissive open-source license. |

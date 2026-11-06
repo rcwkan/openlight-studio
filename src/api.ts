@@ -231,6 +231,7 @@ export type Settings = {
   gpu_accel?: boolean;
   ai_denoise_model?: string;
   ai_removal_model?: string;
+  ai_align_model?: string;
   mcp_port: number;
   mcp_token: string;
   providers: Provider[];
@@ -504,7 +505,7 @@ function parseRender(buf: ArrayBuffer): Rendered {
 export type AiHardware = { gpu: string | null; vram_mb: number | null; device: string };
 export type AiModel = {
   id: string;
-  /** denoise | inpaint */
+  /** denoise | inpaint | generate | faces | faceswap | align */
   kind: string;
   name: string;
   blurb: string;
@@ -515,6 +516,15 @@ export type AiModel = {
   fits: boolean;
   recommended: boolean;
   note: string;
+};
+
+export type AlignResult = {
+  transform: Develop["transform"];
+  roll_deg: number;
+  pitch_deg: number;
+  vfov_deg: number;
+  confidence: number;
+  mode: "horizontal" | "vertical" | "both" | string;
 };
 
 /** One brush stroke over the photo: its path as fractions of the frame, and the brush radius as a fraction of the frame's width */
@@ -561,6 +571,9 @@ export const api = {
     parseRender(await invoke<ArrayBuffer>("render_preview", { id, develop, skipCrop, overlayMask, fullFrame, proof, hires })),
   /** Upright mode: off | auto | level | vertical | full | guided (uses develop.transform.guides) */
   upright: (id: number, develop: Develop, mode: string) => invoke<Develop["transform"]>("upright", { id, develop, mode }),
+  /** AI Auto Align using PerspectiveFields (horizontal | vertical | both) */
+  aiAlign: (id: number, develop: Develop, model: string, mode: "horizontal" | "vertical" | "both") =>
+    invoke<AlignResult>("ai_align", { id, develop, model, mode }),
   /** Measured lateral chromatic aberration: [ca_red_cyan, ca_blue_yellow] */
   autoCa: (id: number) => invoke<[number, number]>("auto_ca", { id }),
   /** Heal a circle at (x, y) of the full frame; radius is a fraction of the long edge. Commits one history step. */
