@@ -5,7 +5,7 @@
 **Professional, non-destructive RAW photo processor and digital asset manager (DAM) with a built-in Model Context Protocol (MCP) server that AI agents can drive.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Release](https://img.shields.io/badge/Release-v0.1.0--beta-success.svg)](https://github.com/rcwkan/openlight-studio/releases)
+[![Release](https://img.shields.io/badge/Release-v0.2.2-success.svg)](https://github.com/rcwkan/openlight-studio/releases)
 [![Website](https://img.shields.io/badge/Website-openlight.makecade.com-25c6d8.svg)](https://openlight.makecade.com/)
 [![Platforms](https://img.shields.io/badge/Platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg)](https://github.com/rcwkan/openlight-studio/releases)
 

@@ -1,6 +1,6 @@
 [package]
 name = "openlight-studio"
-version = "0.2.1"
+version = "0.2.2"
 description = "OpenLight Studio: non-destructive RAW processor and DAM with a built-in MCP server"
 authors = ["OpenLight Studio contributors"]
 license = "MIT"
